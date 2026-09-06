@@ -1,4 +1,9 @@
 //! The `writ` binary. This crate is the only one that does I/O.
+//!
+//! The crate doubles as a library target so integration tests can reach the
+//! HTTP router directly. That produces `dead_code` warnings for functions the
+//! binary uses but the library entry does not; they are expected.
+#![allow(dead_code)]
 
 mod audit;
 mod context;
@@ -8,7 +13,7 @@ mod list;
 mod matcher;
 mod output;
 mod record;
-mod ui;
+pub mod ui;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

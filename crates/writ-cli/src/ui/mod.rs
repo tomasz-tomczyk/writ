@@ -1,12 +1,16 @@
 //! The local web interface server.
 
+mod pages;
+mod routes;
+mod state;
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::{Command, ExitCode};
 
-use axum::Router;
-use axum::http::{HeaderMap, HeaderValue};
-use axum::routing::get;
 use writ_core::{Config, Error, Paths, Store};
+
+pub use routes::router;
+pub use state::AppState;
 
 /// Version of the protocol spoken by the UI server.
 pub const UI_PROTOCOL_VERSION: u16 = 1;
@@ -23,7 +27,12 @@ pub struct Args {
 }
 
 pub fn run(args: &Args, paths: &Paths, config: &Config) -> Result<ExitCode, Error> {
-    let _store = Store::open(&paths.db)?;
+    let store = Store::open(&paths.db)?;
+    let state = AppState {
+        db: paths.db.clone(),
+        config: config.clone(),
+        store: std::sync::Arc::new(std::sync::Mutex::new(store)),
+    };
     let port = args.port.unwrap_or(config.ui.port);
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let url = format!("http://{address}");
@@ -49,7 +58,7 @@ pub fn run(args: &Args, paths: &Paths, config: &Config) -> Result<ExitCode, Erro
             eprintln!("writ: warning: cannot open browser: {error}");
         }
 
-        axum::serve(listener, Router::new().route("/", get(root)))
+        axum::serve(listener, routes::router(state))
             .await
             .map_err(|error| Error::Command {
                 program: "writ ui".to_string(),
@@ -58,15 +67,6 @@ pub fn run(args: &Args, paths: &Paths, config: &Config) -> Result<ExitCode, Erro
     })?;
 
     Ok(ExitCode::SUCCESS)
-}
-
-async fn root() -> (HeaderMap, &'static str) {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "x-writ-protocol-version",
-        HeaderValue::from(UI_PROTOCOL_VERSION),
-    );
-    (headers, "writ ui")
 }
 
 fn open_browser(url: &str) -> std::io::Result<()> {

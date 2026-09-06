@@ -1,0 +1,84 @@
+:root {
+  --bg: #faf9f7;
+  --panel: #ffffff;
+  --ink: #1f1f1f;
+  --muted: #6b6b6b;
+  --border: #d6d3ce;
+  --accent: #2563eb;
+  --accent-ink: #ffffff;
+  --danger: #dc2626;
+  --warn: #d97706;
+  --ok: #16a34a;
+  --radius: 6px;
+  --gap: 1rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+header {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem var(--gap);
+}
+
+nav {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+nav a {
+  color: var(--ink);
+  text-decoration: none;
+  padding: 0.35rem 0;
+}
+
+nav a:hover {
+  color: var(--accent);
+}
+
+nav .brand {
+  font-weight: 700;
+  margin-right: auto;
+}
+
+nav .badge {
+  background: var(--danger);
+  color: var(--accent-ink);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  margin-left: 0.35rem;
+}
+
+main {
+  max-width: 1100px;
+  margin: var(--gap) auto;
+  padding: 0 var(--gap);
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0 0 var(--gap);
+}
+
+.shell {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap);
+}
