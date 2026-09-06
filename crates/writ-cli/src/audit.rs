@@ -10,8 +10,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use writ_core::{
-    AuditScope, Budget, Config, Diff, Error, Ingested, Result, Selected, Store, parse_findings,
-    rank, render_prompt,
+    AuditScope, BucketMetric, Budget, Config, CounterMetric, Diff, Error, FindingOutcomeMetric,
+    GateResultMetric, Ingested, LanguageMetric, MatcherResultMetric, Outcome, Result, Selected,
+    Store, TelemetryBatch, parse_findings, rank, render_prompt,
 };
 
 use crate::git;
@@ -94,6 +95,8 @@ pub struct Selection {
     /// Things worth saying on stderr. They are not the result, so the
     /// caller decides whether a hook protocol wants them.
     pub notices: Vec<String>,
+    /// Aggregate-only observations produced while selecting.
+    pub telemetry: TelemetryBatch,
 }
 
 impl Selection {
@@ -115,7 +118,7 @@ impl Selection {
 }
 
 /// Run the command and return the process exit code.
-pub fn run(args: &Args, db: &Path, config: &Config) -> Result<ExitCode> {
+pub fn run(args: &Args, db: &Path, config: &Config) -> Result<(ExitCode, TelemetryBatch)> {
     if args.ingest {
         return ingest(args, db);
     }
@@ -126,8 +129,8 @@ pub fn run(args: &Args, db: &Path, config: &Config) -> Result<ExitCode> {
 }
 
 /// Steps 1 to 4: scope, select, budget, emit.
-fn emit(args: &Args, db: &Path, config: &Config) -> Result<ExitCode> {
-    let run = select(args, db, config)?;
+fn emit(args: &Args, db: &Path, config: &Config) -> Result<(ExitCode, TelemetryBatch)> {
+    let mut run = select(args, db, config)?;
     for notice in &run.notices {
         eprintln!("{notice}");
     }
@@ -166,7 +169,8 @@ fn emit(args: &Args, db: &Path, config: &Config) -> Result<ExitCode> {
             }
         }
     }
-    Ok(ExitCode::SUCCESS)
+    let telemetry = std::mem::take(&mut run.telemetry);
+    Ok((ExitCode::SUCCESS, telemetry))
 }
 
 /// The `--format json` body. The MCP tool returns this same value, so the
@@ -206,6 +210,15 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     if diff.is_empty() {
         return Err(Error::EmptyDiff { range });
     }
+    let mut telemetry = TelemetryBatch::default();
+    telemetry
+        .buckets
+        .push(BucketMetric::DiffFiles(diff.paths.len() as u64));
+    for path in &diff.paths {
+        telemetry
+            .counters
+            .push(CounterMetric::Language(LanguageMetric::from_path(path)));
+    }
 
     let scope = AuditScope {
         identity: repo.identity,
@@ -224,7 +237,19 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
 
     // A matcher hit selects a learning. It never creates a finding.
     candidates.retain(|candidate| {
+        telemetry
+            .counters
+            .push(CounterMetric::MatcherKind(candidate.learning.matcher_kind));
         let verdict = evaluate(&candidate.learning, &scope.diff, &repo.root);
+        if candidate.learning.matcher_kind.is_some() {
+            telemetry
+                .counters
+                .push(CounterMetric::MatcherResult(match &verdict {
+                    Verdict::Hit => MatcherResultMetric::Hit,
+                    Verdict::Miss => MatcherResultMetric::Miss,
+                    Verdict::Unevaluable(_) => MatcherResultMetric::Unevaluable,
+                }));
+        }
         if let Verdict::Unevaluable(why) = &verdict {
             notices.push(format!(
                 "writ: keeping {} on scope alone: {why}",
@@ -236,6 +261,12 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
 
     rank(&mut candidates);
     let selected = store.take_budget(&candidates, &budget)?;
+    telemetry
+        .buckets
+        .push(BucketMetric::AuditConsidered(considered as u64));
+    telemetry
+        .buckets
+        .push(BucketMetric::AuditSent(selected.len() as u64));
 
     // A dry run writes nothing: no `audits` row and no `times_selected`.
     // Seeing what an audit would select had no cost-free path before, and
@@ -261,18 +292,23 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
         ));
     }
 
-    Ok(Selection {
+    let mut run = Selection {
         audit_id,
         scope,
         considered,
         selected,
         notices,
-    })
+        telemetry,
+    };
+    run.telemetry.buckets.push(BucketMetric::PromptChars(
+        run.prompt().chars().count() as u64
+    ));
+    Ok(run)
 }
 
 /// Steps 5 and 6: write the findings, then gate on them.
-fn ingest(args: &Args, db: &Path) -> Result<ExitCode> {
-    let written = ingest_text(&read_stdin()?, db)?;
+fn ingest(args: &Args, db: &Path) -> Result<(ExitCode, TelemetryBatch)> {
+    let (written, telemetry) = ingest_with_telemetry(&read_stdin()?, db)?;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -293,9 +329,9 @@ fn ingest(args: &Args, db: &Path) -> Result<ExitCode> {
     // Step 6. A blocking finding the agent fixed lets the handoff
     // through. An advisory finding never stops it. Anything else does.
     if written.unfixed_blocking > 0 {
-        return Ok(ExitCode::from(1));
+        return Ok((ExitCode::from(1), telemetry));
     }
-    Ok(ExitCode::SUCCESS)
+    Ok((ExitCode::SUCCESS, telemetry))
 }
 
 /// Write the findings and update the counters.
@@ -304,9 +340,40 @@ fn ingest(args: &Args, db: &Path) -> Result<ExitCode> {
 /// an argument, because stdin there is the transport. Both land here, so
 /// neither surface can drift from the other.
 pub fn ingest_text(text: &str, db: &Path) -> Result<Ingested> {
+    ingest_with_telemetry(text, db).map(|(written, _)| written)
+}
+
+/// Write findings and return the aggregate observations for the caller's
+/// surface. This keeps CLI and MCP ingestion on one validation/storage path.
+pub fn ingest_with_telemetry(text: &str, db: &Path) -> Result<(Ingested, TelemetryBatch)> {
     let input = parse_findings(text)?;
+    let mut telemetry = TelemetryBatch::default();
+    telemetry
+        .buckets
+        .push(BucketMetric::AuditFindings(input.findings.len() as u64));
+    for finding in &input.findings {
+        let outcome = match finding.outcome {
+            Outcome::Fixed => Some(FindingOutcomeMetric::Fixed),
+            Outcome::Ignored => Some(FindingOutcomeMetric::Ignored),
+            Outcome::Rejected => Some(FindingOutcomeMetric::Rejected),
+            Outcome::Open => None,
+        };
+        if let Some(outcome) = outcome {
+            telemetry
+                .counters
+                .push(CounterMetric::FindingOutcome(outcome));
+        }
+    }
     let mut store = Store::open(db)?;
-    store.ingest(&input)
+    let written = store.ingest(&input)?;
+    telemetry
+        .counters
+        .push(CounterMetric::GateResult(if written.unfixed_blocking > 0 {
+            GateResultMetric::Block
+        } else {
+            GateResultMetric::Pass
+        }));
+    Ok((written, telemetry))
 }
 
 /// Read the whole stream, and never wait on a person. crit #693.

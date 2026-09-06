@@ -31,6 +31,7 @@ pub fn run(args: &Args, paths: &Paths, config: &Config) -> Result<ExitCode, Erro
     let store = Store::open(&paths.db)?;
     let state = AppState {
         db: paths.db.clone(),
+        telemetry_db: paths.telemetry_db.clone(),
         config: config.clone(),
         store: std::sync::Arc::new(std::sync::Mutex::new(store)),
     };

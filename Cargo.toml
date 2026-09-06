@@ -12,7 +12,7 @@ repository = "https://github.com/tomasztomczyk/writ"
 [workspace.dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
 thiserror = "2"
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 clap = { version = "4", features = ["derive"] }
 axum = "0.8"
 regex = "1"
@@ -22,3 +22,5 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 toml = "0.9"
 tempfile = "3"
 rust-embed = "8"
+tower = "0.5"
+serde_urlencoded = "0.7"

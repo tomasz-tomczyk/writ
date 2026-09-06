@@ -29,6 +29,13 @@ pub enum Error {
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
+    /// A non-SQLite telemetry storage operation, such as purge, failed.
+    #[error("storage error: {message}")]
+    Storage {
+        /// The concrete filesystem cause.
+        message: String,
+    },
+
     /// `config.toml` is not valid TOML, or a value in it is not usable.
     ///
     /// A malformed configuration is never ignored. A silently dropped

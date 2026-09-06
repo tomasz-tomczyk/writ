@@ -15,13 +15,18 @@ pub mod matcher;
 pub mod mcp;
 pub mod output;
 pub mod record;
+pub mod telemetry;
 pub mod ui;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use writ_core::{Env, Error, Paths, resolve_paths};
+use writ_core::{
+    BucketMetric, CommandMetric, CounterMetric, Env, Error, Paths, SurfaceMetric, TelemetryBatch,
+    resolve_paths,
+};
 
 /// A local-first ledger of the steering you give coding agents.
 #[derive(Debug, Parser)]
@@ -56,6 +61,25 @@ pub enum Command {
     Ui(ui::Args),
     /// Run the MCP server on stdio
     Mcp(mcp::Args),
+    /// Inspect or control opt-in local-only aggregate telemetry
+    Telemetry(telemetry::Args),
+}
+
+impl Command {
+    fn telemetry_metric(&self) -> Option<CommandMetric> {
+        Some(match self {
+            Self::Record(_) => CommandMetric::Record,
+            Self::List(_) => CommandMetric::List,
+            Self::Audit(_) => CommandMetric::Audit,
+            Self::Show(_) => CommandMetric::Show,
+            Self::Archive(_) => CommandMetric::Archive,
+            Self::Ui(_) => CommandMetric::Ui,
+            Self::Mcp(_) => CommandMetric::Mcp,
+            // Administration does not observe itself: dump/show must be a
+            // stable disclosure, and purge must not recreate what it removed.
+            Self::Telemetry(_) => return None,
+        })
+    }
 }
 
 /// Parse the command line and run it. The binary returns what this returns.
@@ -90,20 +114,89 @@ pub fn dispatch(cli: Cli) -> ExitCode {
         Err(error) => return fail(&error, Some(&paths.db)),
     };
 
+    let command_metric = command.telemetry_metric();
+    let failure_db = if command_metric.is_some() {
+        &paths.db
+    } else {
+        &paths.telemetry_db
+    };
+    let telemetry_enabled = command_metric.is_some() && config.telemetry.enabled;
+    let started = Instant::now();
+
     let result = match command {
-        Command::Record(args) => record::run(&args, &paths.db, &config).map(|()| ExitCode::SUCCESS),
-        Command::List(args) => list::run(&args, &paths.db).map(|()| ExitCode::SUCCESS),
+        Command::Record(args) => {
+            record::run(&args, &paths.db, &config).map(|batch| (ExitCode::SUCCESS, batch))
+        }
+        Command::List(args) => {
+            list::run(&args, &paths.db).map(|()| (ExitCode::SUCCESS, TelemetryBatch::default()))
+        }
         Command::Audit(args) => audit::run(&args, &paths.db, &config),
-        Command::Show(args) => inspect::show(&args, &paths.db).map(|()| ExitCode::SUCCESS),
-        Command::Archive(args) => inspect::archive(&args, &paths.db).map(|()| ExitCode::SUCCESS),
-        Command::Ui(args) => ui::run(&args, &paths, &config),
-        Command::Mcp(args) => mcp::run(&args, &paths.db, &config),
+        Command::Show(args) => {
+            inspect::show(&args, &paths.db).map(|()| (ExitCode::SUCCESS, TelemetryBatch::default()))
+        }
+        Command::Archive(args) => inspect::archive(&args, &paths.db)
+            .map(|()| (ExitCode::SUCCESS, TelemetryBatch::default())),
+        Command::Ui(args) => {
+            ui::run(&args, &paths, &config).map(|code| (code, TelemetryBatch::default()))
+        }
+        Command::Mcp(args) => {
+            mcp::run(&args, &paths, &config).map(|code| (code, TelemetryBatch::default()))
+        }
+        Command::Telemetry(args) => {
+            telemetry::run(&args, &paths, &config).map(|code| (code, TelemetryBatch::default()))
+        }
     };
 
     match result {
-        Ok(code) => code,
-        Err(error) => fail(&error, Some(&paths.db)),
+        Ok((code, mut batch)) => {
+            if telemetry_enabled {
+                observe_command(
+                    &paths,
+                    &mut batch,
+                    command_metric.expect("enabled commands have a metric"),
+                    process_exit_code(code),
+                    started.elapsed().as_millis() as u64,
+                );
+            }
+            code
+        }
+        Err(error) => {
+            if telemetry_enabled {
+                let mut batch = TelemetryBatch::default();
+                observe_command(
+                    &paths,
+                    &mut batch,
+                    command_metric.expect("enabled commands have a metric"),
+                    exit_code(&error),
+                    started.elapsed().as_millis() as u64,
+                );
+            }
+            fail(&error, Some(failure_db))
+        }
     }
+}
+
+fn observe_command(
+    paths: &Paths,
+    batch: &mut TelemetryBatch,
+    command: CommandMetric,
+    code: u8,
+    elapsed_ms: u64,
+) {
+    batch.counters.extend([
+        CounterMetric::Command(command),
+        CounterMetric::Surface(SurfaceMetric::Cli),
+        CounterMetric::ExitCode(code),
+    ]);
+    batch.buckets.push(BucketMetric::CommandMs(elapsed_ms));
+    telemetry::add_collection_size_best_effort(&paths.db, batch);
+    telemetry::record_best_effort(&paths.telemetry_db, batch);
+}
+
+fn process_exit_code(code: ExitCode) -> u8 {
+    (0..=8)
+        .find(|value| code == ExitCode::from(*value))
+        .unwrap_or(8)
 }
 
 /// Report the error and pick its exit code.
@@ -137,7 +230,7 @@ pub fn exit_code(error: &Error) -> u8 {
         Error::NotFound { .. } => 5,
         Error::NotAGitRepository { .. } => 6,
         Error::EmptyDiff { .. } => 7,
-        Error::Sqlite(_) | Error::CreateDirectory { .. } => 8,
+        Error::Sqlite(_) | Error::CreateDirectory { .. } | Error::Storage { .. } => 8,
         Error::NoBaseDirectory { .. }
         | Error::Config { .. }
         | Error::Validation { .. }

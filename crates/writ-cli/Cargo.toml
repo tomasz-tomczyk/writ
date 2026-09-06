@@ -29,4 +29,7 @@ writ-core = { path = "../writ-core", version = "0.1.0" }
 tempfile.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
+uuid.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tower.workspace = true
+serde_urlencoded.workspace = true

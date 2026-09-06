@@ -5,6 +5,61 @@
 
 use crate::glob::glob_match;
 
+/// The one extension-to-language allowlist used by scoping and telemetry.
+///
+/// Telemetry must never record an extension supplied by a caller. Keeping the
+/// allowlist in this module means retrieval and telemetry cannot quietly grow
+/// different language vocabularies.
+const EXTENSION_LANGUAGES: &[(&str, &str)] = &[
+    ("rs", "rust"),
+    ("ex", "elixir"),
+    ("exs", "elixir"),
+    ("erl", "erlang"),
+    ("hrl", "erlang"),
+    ("ts", "typescript"),
+    ("mts", "typescript"),
+    ("cts", "typescript"),
+    ("tsx", "tsx"),
+    ("js", "javascript"),
+    ("mjs", "javascript"),
+    ("cjs", "javascript"),
+    ("jsx", "javascript"),
+    ("py", "python"),
+    ("pyi", "python"),
+    ("go", "go"),
+    ("rb", "ruby"),
+    ("rake", "ruby"),
+    ("java", "java"),
+    ("kt", "kotlin"),
+    ("kts", "kotlin"),
+    ("swift", "swift"),
+    ("scala", "scala"),
+    ("c", "c"),
+    ("h", "c"),
+    ("cc", "cpp"),
+    ("cpp", "cpp"),
+    ("cxx", "cpp"),
+    ("hpp", "cpp"),
+    ("hh", "cpp"),
+    ("cs", "csharp"),
+    ("php", "php"),
+    ("lua", "lua"),
+    ("sh", "bash"),
+    ("bash", "bash"),
+    ("zsh", "bash"),
+    ("sql", "sql"),
+    ("html", "html"),
+    ("htm", "html"),
+    ("css", "css"),
+    ("scss", "css"),
+    ("json", "json"),
+    ("yaml", "yaml"),
+    ("yml", "yaml"),
+    ("toml", "toml"),
+    ("md", "markdown"),
+    ("markdown", "markdown"),
+];
+
 /// One diff, as an audit sees it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Diff {
@@ -101,35 +156,20 @@ fn strip_prefix_marker(rest: &str) -> Option<&str> {
 pub fn language_of(path: &str) -> Option<&'static str> {
     let name = path.rsplit('/').next().unwrap_or(path);
     let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
-    Some(match extension.as_str() {
-        "rs" => "rust",
-        "ex" | "exs" => "elixir",
-        "erl" | "hrl" => "erlang",
-        "ts" | "mts" | "cts" => "typescript",
-        "tsx" => "tsx",
-        "js" | "mjs" | "cjs" | "jsx" => "javascript",
-        "py" | "pyi" => "python",
-        "go" => "go",
-        "rb" | "rake" => "ruby",
-        "java" => "java",
-        "kt" | "kts" => "kotlin",
-        "swift" => "swift",
-        "scala" => "scala",
-        "c" | "h" => "c",
-        "cc" | "cpp" | "cxx" | "hpp" | "hh" => "cpp",
-        "cs" => "csharp",
-        "php" => "php",
-        "lua" => "lua",
-        "sh" | "bash" | "zsh" => "bash",
-        "sql" => "sql",
-        "html" | "htm" => "html",
-        "css" | "scss" => "css",
-        "json" => "json",
-        "yaml" | "yml" => "yaml",
-        "toml" => "toml",
-        "md" | "markdown" => "markdown",
-        _ => return None,
-    })
+    EXTENSION_LANGUAGES
+        .iter()
+        .find_map(|(candidate, language)| (*candidate == extension).then_some(*language))
+}
+
+/// Keep a language label only when it occurs in the fixed extension table.
+/// Unknown or bespoke labels collapse to `other` rather than identifying a
+/// codebase.
+pub fn telemetry_language(label: &str) -> &'static str {
+    let label = label.to_ascii_lowercase();
+    EXTENSION_LANGUAGES
+        .iter()
+        .find_map(|(_, language)| (*language == label).then_some(*language))
+        .unwrap_or("other")
 }
 
 #[cfg(test)]
@@ -179,6 +219,13 @@ mod tests {
     fn an_unknown_extension_yields_no_language() {
         assert_eq!(language_of("data.qqq"), None);
         assert_eq!(language_of("Makefile"), None);
+    }
+
+    #[test]
+    fn telemetry_language_labels_come_only_from_the_extension_table() {
+        assert_eq!(telemetry_language("rust"), "rust");
+        assert_eq!(telemetry_language("RuSt"), "rust");
+        assert_eq!(telemetry_language("company-secret"), "other");
     }
 
     #[test]

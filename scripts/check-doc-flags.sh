@@ -23,7 +23,14 @@ commands=$("$writ" --help |
   awk '/^Commands:/{on=1; next} /^Options:/{on=0}
        on && /^  [a-z]/ && $1 != "help" {print $1}')
 for command in $commands; do
-  "$writ" "$command" --help | grep -oE -- '--[a-z][a-z0-9-]*' >>"$known"
+  command_help=$("$writ" "$command" --help)
+  grep -oE -- '--[a-z][a-z0-9-]*' <<<"$command_help" >>"$known"
+  subcommands=$(awk '/^Commands:/{on=1; next} /^Options:/{on=0}
+       on && /^  [a-z]/ && $1 != "help" {print $1}' <<<"$command_help")
+  for subcommand in $subcommands; do
+    "$writ" "$command" "$subcommand" --help |
+      grep -oE -- '--[a-z][a-z0-9-]*' >>"$known"
+  done
 done
 sort -u -o "$known" "$known"
 

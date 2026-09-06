@@ -2,11 +2,14 @@ use axum::Form;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use writ_core::{Error, Status};
+use writ_core::{
+    CounterMetric, Error, FindingOutcomeMetric, HealthActionMetric, Status, SurfaceMetric,
+    TelemetryBatch,
+};
 
 use crate::ui::AppState;
 use crate::ui::pages::layout::{error_response, with_store};
-use crate::ui::pages::{detail, inbox, layout};
+use crate::ui::pages::{detail, health, inbox, layout};
 
 /// Answer an Inbox action.
 ///
@@ -34,6 +37,17 @@ fn detail_reply(state: &AppState, headers: &HeaderMap, learning_id: &str) -> Res
         return redirect(&format!("/learnings/{learning_id}"));
     }
     match detail::render(state, learning_id) {
+        Ok(body) => layout::fragment(body.as_str()),
+        Err(error) => error_response(error),
+    }
+}
+
+/// Answer a Health action without regressing the htmx fragment contract.
+fn health_reply(state: &AppState, headers: &HeaderMap) -> Response {
+    if !layout::is_htmx(headers) {
+        return redirect("/health");
+    }
+    match health::render(state) {
         Ok(body) => layout::fragment(body.as_str()),
         Err(error) => error_response(error),
     }
@@ -104,9 +118,73 @@ pub async fn reject_finding(
         Ok(learning_id)
     });
     match result {
-        Ok(learning_id) => detail_reply(&state, &headers, &learning_id),
+        Ok(learning_id) => {
+            observe_ui(
+                &state,
+                CounterMetric::FindingOutcome(FindingOutcomeMetric::Rejected),
+            );
+            detail_reply(&state, &headers, &learning_id)
+        }
         Err(error) => error_response(error),
     }
+}
+
+pub async fn health_archive(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    match with_store(&state, |store| store.set_status(&id, Status::Archived)) {
+        Ok(()) => {
+            observe_ui(
+                &state,
+                CounterMetric::HealthAction(HealthActionMetric::Archive),
+            );
+            health_reply(&state, &headers)
+        }
+        Err(error) => error_response(error),
+    }
+}
+
+pub async fn health_edit(Path(id): Path<String>, State(state): State<AppState>) -> Response {
+    match with_store(&state, |store| store.get(&id).map(|_| ())) {
+        Ok(()) => {
+            observe_ui(
+                &state,
+                CounterMetric::HealthAction(HealthActionMetric::Edit),
+            );
+            redirect(&format!("/learnings/{id}"))
+        }
+        Err(error) => error_response(error),
+    }
+}
+
+pub async fn health_keep(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    match with_store(&state, |store| store.get(&id).map(|_| ())) {
+        Ok(()) => {
+            observe_ui(
+                &state,
+                CounterMetric::HealthAction(HealthActionMetric::Keep),
+            );
+            health_reply(&state, &headers)
+        }
+        Err(error) => error_response(error),
+    }
+}
+
+fn observe_ui(state: &AppState, metric: CounterMetric) {
+    if !state.config.telemetry.enabled {
+        return;
+    }
+    let batch = TelemetryBatch {
+        counters: vec![CounterMetric::Surface(SurfaceMetric::Ui), metric],
+        buckets: Vec::new(),
+    };
+    crate::telemetry::record_best_effort(&state.telemetry_db, &batch);
 }
 
 pub async fn open_editor(
@@ -160,4 +238,170 @@ fn redirect(path: &str) -> Response {
         .headers_mut()
         .insert(header::LOCATION, path.parse().unwrap());
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use writ_core::{
+        Config, FindingsInput, IncomingFinding, NewLearning, Outcome, Selected, Store,
+        TelemetryStore,
+    };
+
+    use super::*;
+
+    fn state(db: &std::path::Path, telemetry_enabled: bool) -> AppState {
+        let mut config = Config::default();
+        config.telemetry.enabled = telemetry_enabled;
+        let telemetry_db = db.with_file_name("telemetry.db");
+        if telemetry_enabled {
+            let mut telemetry = TelemetryStore::open(&telemetry_db).unwrap();
+            telemetry.enable().unwrap();
+        }
+        AppState {
+            db: db.to_path_buf(),
+            telemetry_db,
+            config,
+            store: Arc::new(Mutex::new(Store::open(db).unwrap())),
+        }
+    }
+
+    fn active(store: &mut Store, title: &str) -> String {
+        let mut learning = NewLearning::new(title, "rule", "rationale");
+        learning.status = Some(Status::Active);
+        store.record(&learning).unwrap().id
+    }
+
+    #[tokio::test]
+    async fn health_actions_record_fixed_labels_and_ui_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("learnings.db");
+        let state = state(&db, true);
+        let (archive_id, edit_id, keep_id) = {
+            let mut store = state.store.lock().unwrap();
+            (
+                active(&mut store, "archive"),
+                active(&mut store, "edit"),
+                active(&mut store, "keep"),
+            )
+        };
+
+        assert_eq!(
+            health_archive(Path(archive_id), State(state.clone()), HeaderMap::new())
+                .await
+                .status(),
+            StatusCode::SEE_OTHER
+        );
+        assert_eq!(
+            health_edit(Path(edit_id), State(state.clone()))
+                .await
+                .status(),
+            StatusCode::SEE_OTHER
+        );
+        assert_eq!(
+            health_keep(Path(keep_id), State(state.clone()), HeaderMap::new())
+                .await
+                .status(),
+            StatusCode::SEE_OTHER
+        );
+
+        let telemetry = TelemetryStore::open(&state.telemetry_db).unwrap();
+        let rows = telemetry.counters().unwrap();
+        for action in ["archive", "edit", "keep"] {
+            assert!(rows.iter().any(|row| {
+                row.metric == "health_action" && row.label == action && row.count == 1
+            }));
+        }
+        assert!(
+            rows.iter()
+                .any(|row| row.metric == "surface" && row.label == "ui" && row.count == 3)
+        );
+    }
+
+    #[tokio::test]
+    async fn developer_rejection_records_no_finding_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("learnings.db");
+        let state = state(&db, true);
+        let finding_id = {
+            let mut store = state.store.lock().unwrap();
+            let learning_id = active(&mut store, "private title");
+            let learning = store.get(&learning_id).unwrap();
+            let audit_id = store
+                .start_audit(
+                    "private repository",
+                    "private branch",
+                    1,
+                    &[Selected {
+                        learning,
+                        exemplars: Vec::new(),
+                    }],
+                )
+                .unwrap();
+            store
+                .ingest(&FindingsInput {
+                    audit_id,
+                    findings: vec![IncomingFinding {
+                        learning_id: learning_id.clone(),
+                        path: Some("private/path.rs".into()),
+                        line: Some(17),
+                        detail: Some("private detail".into()),
+                        outcome: Outcome::Open,
+                    }],
+                })
+                .unwrap();
+            store.findings_of(&learning_id).unwrap()[0].id.clone()
+        };
+
+        assert_eq!(
+            reject_finding(
+                Path(finding_id.clone()),
+                State(state.clone()),
+                HeaderMap::new(),
+            )
+            .await
+            .status(),
+            StatusCode::SEE_OTHER
+        );
+        let rows = TelemetryStore::open(&state.telemetry_db)
+            .unwrap()
+            .counters()
+            .unwrap();
+        assert!(rows.iter().any(|row| {
+            row.metric == "finding_outcome" && row.label == "rejected" && row.count == 1
+        }));
+        let json = serde_json::to_string(&rows).unwrap();
+        for sentinel in [
+            "private title",
+            "private repository",
+            "private branch",
+            "private/path.rs",
+            "private detail",
+            &finding_id,
+        ] {
+            assert!(!json.contains(sentinel), "leaked {sentinel}: {json}");
+        }
+    }
+
+    #[tokio::test]
+    async fn broken_ui_telemetry_does_not_change_the_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("learnings.db");
+        let state = state(&db, true);
+        let id = active(
+            &mut state.store.lock().unwrap(),
+            "archive despite telemetry",
+        );
+        std::fs::remove_file(&state.telemetry_db).unwrap();
+        std::fs::create_dir(&state.telemetry_db).unwrap();
+
+        let response =
+            health_archive(Path(id.clone()), State(state.clone()), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            state.store.lock().unwrap().get(&id).unwrap().status,
+            Status::Archived
+        );
+    }
 }

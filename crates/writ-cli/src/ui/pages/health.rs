@@ -79,16 +79,18 @@ pub fn render(state: &AppState) -> Result<String, Error> {
             ));
             html.push_str(&format!("<td>{}</td>", learning.times_applied));
             html.push_str("<td class=\"actions\">");
-            let archive = format!("/learnings/{}/archive", escape(&learning.id));
+            let archive = format!("/health/{}/archive", escape(&learning.id));
             html.push_str(&format!(
                 "<form method=\"post\" action=\"{archive}\" hx-post=\"{archive}\"{SWAP}><button type=\"submit\" class=\"danger\">Archive</button></form>"
             ));
             html.push_str(&format!(
-                "<a href=\"/learnings/{}\" class=\"button\">Edit</a>",
+                "<a href=\"/health/{}/edit\" class=\"button\">Edit</a>",
                 escape(&learning.id)
             ));
             html.push_str(&format!(
-                "<a href=\"/health\" hx-get=\"/health\"{SWAP} class=\"button keep\">Keep</a>"
+                "<a href=\"/health/{}/keep\" hx-get=\"/health/{}/keep\"{SWAP} class=\"button keep\">Keep</a>",
+                escape(&learning.id),
+                escape(&learning.id)
             ));
             html.push_str("</td></tr>");
         }

@@ -34,11 +34,13 @@ fn non_empty_var(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// The two paths every subcommand needs.
+/// The paths every subcommand needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
-    /// The SQLite database file.
+    /// The learnings SQLite database file.
     pub db: PathBuf,
+    /// The physically separate aggregate telemetry database file.
+    pub telemetry_db: PathBuf,
     /// The `config.toml` file. It does not have to exist.
     pub config: PathBuf,
 }
@@ -53,15 +55,40 @@ pub struct Paths {
 /// default. writ follows the XDG base directory specification on every
 /// platform, macOS included.
 pub fn resolve_paths(env: &Env, db: Option<&Path>, config: Option<&Path>) -> Result<Paths> {
+    let data_directory = data_home(env).ok().map(|home| home.join("writ"));
     let db = match db {
         Some(path) => path.to_path_buf(),
-        None => data_home(env)?.join("writ").join("learnings.db"),
+        None => data_directory
+            .as_ref()
+            .ok_or(Error::NoBaseDirectory {
+                what: "data",
+                var: "XDG_DATA_HOME",
+            })?
+            .join("learnings.db"),
+    };
+    let telemetry_db = match data_directory {
+        Some(directory) => directory.join("telemetry.db"),
+        None => {
+            // Preserve the explicit-override contract when the process has no
+            // base-directory environment at all, while never aliasing the two
+            // databases even if the override itself is named telemetry.db.
+            let sibling = db.with_file_name("telemetry.db");
+            if sibling == db {
+                db.with_file_name("writ-telemetry.db")
+            } else {
+                sibling
+            }
+        }
     };
     let config = match config {
         Some(path) => path.to_path_buf(),
         None => config_home(env)?.join("writ").join("config.toml"),
     };
-    Ok(Paths { db, config })
+    Ok(Paths {
+        db,
+        telemetry_db,
+        config,
+    })
 }
 
 fn data_home(env: &Env) -> Result<PathBuf> {
@@ -108,6 +135,10 @@ mod tests {
             paths.config,
             PathBuf::from("/home/dev/.config/writ/config.toml")
         );
+        assert_eq!(
+            paths.telemetry_db,
+            PathBuf::from("/home/dev/.local/share/writ/telemetry.db")
+        );
     }
 
     #[test]
@@ -119,6 +150,7 @@ mod tests {
         };
         let paths = resolve_paths(&env, None, None).unwrap();
         assert_eq!(paths.db, PathBuf::from("/data/writ/learnings.db"));
+        assert_eq!(paths.telemetry_db, PathBuf::from("/data/writ/telemetry.db"));
         assert_eq!(paths.config, PathBuf::from("/conf/writ/config.toml"));
     }
 
@@ -136,6 +168,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(paths.db, PathBuf::from("/tmp/other.db"));
+        assert_eq!(paths.telemetry_db, PathBuf::from("/data/writ/telemetry.db"));
         assert_eq!(paths.config, PathBuf::from("/tmp/other.toml"));
     }
 
@@ -165,5 +198,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(paths.db, PathBuf::from("/tmp/a.db"));
+        assert_eq!(paths.telemetry_db, PathBuf::from("/tmp/telemetry.db"));
+    }
+
+    #[test]
+    fn an_override_can_never_alias_the_telemetry_store() {
+        let paths = resolve_paths(
+            &Env::default(),
+            Some(Path::new("/tmp/telemetry.db")),
+            Some(Path::new("/tmp/a.toml")),
+        )
+        .unwrap();
+        assert_eq!(paths.db, PathBuf::from("/tmp/telemetry.db"));
+        assert_eq!(paths.telemetry_db, PathBuf::from("/tmp/writ-telemetry.db"));
+        assert_ne!(paths.db, paths.telemetry_db);
     }
 }

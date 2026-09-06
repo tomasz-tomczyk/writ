@@ -35,6 +35,9 @@ jobs:
       - name: Clippy
         run: mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: No HTTP client is linked into writ
+        run: mise run no-network
+
       - name: Test
         run: mise exec -- cargo test --workspace
 

@@ -17,7 +17,9 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-use writ_core::{Config, Error, Result};
+use writ_core::{
+    Config, CounterMetric, Error, GateResultMetric, HookHostMetric, Result, TelemetryBatch,
+};
 
 use crate::audit::{self, Args, Selection};
 
@@ -93,10 +95,15 @@ impl Retry {
 }
 
 /// Run the audit and emit the verdict in the host's protocol.
-pub fn run(host: Host, args: &Args, db: &Path, config: &Config) -> Result<ExitCode> {
+pub fn run(
+    host: Host,
+    args: &Args,
+    db: &Path,
+    config: &Config,
+) -> Result<(ExitCode, TelemetryBatch)> {
     let retry = Retry::parse(&read_payload());
 
-    let run = match audit::select(args, db, config) {
+    let mut run = match audit::select(args, db, config) {
         Ok(run) => run,
         // A turn that touched no code, or a session outside a repository,
         // has nothing to gate. Exiting 6 or 7 would put a red error in
@@ -104,7 +111,10 @@ pub fn run(host: Host, args: &Args, db: &Path, config: &Config) -> Result<ExitCo
         // to stderr, so the pass-through is not silent.
         Err(error @ (Error::EmptyDiff { .. } | Error::NotAGitRepository { .. })) => {
             eprintln!("writ: {error}. Nothing to audit, so the gate passes.");
-            return Ok(ExitCode::SUCCESS);
+            return Ok((
+                ExitCode::SUCCESS,
+                gate_telemetry(host, GateResultMetric::Pass),
+            ));
         }
         Err(error) => return Err(error),
     };
@@ -114,7 +124,10 @@ pub fn run(host: Host, args: &Args, db: &Path, config: &Config) -> Result<ExitCo
     }
 
     if !run.gates() {
-        return Ok(ExitCode::SUCCESS);
+        run.telemetry
+            .counters
+            .extend(gate_counters(host, GateResultMetric::Pass));
+        return Ok((ExitCode::SUCCESS, run.telemetry));
     }
     if retry.spent(host, args.loop_limit) {
         eprintln!(
@@ -122,10 +135,36 @@ pub fn run(host: Host, args: &Args, db: &Path, config: &Config) -> Result<ExitCo
              Letting the turn stop.",
             run.selected.len()
         );
-        return Ok(ExitCode::SUCCESS);
+        run.telemetry
+            .counters
+            .extend(gate_counters(host, GateResultMetric::RetryCapped));
+        return Ok((ExitCode::SUCCESS, run.telemetry));
     }
 
-    Ok(emit(host, &run))
+    let code = emit(host, &run);
+    run.telemetry
+        .counters
+        .extend(gate_counters(host, GateResultMetric::Block));
+    Ok((code, run.telemetry))
+}
+
+fn gate_counters(host: Host, result: GateResultMetric) -> [CounterMetric; 2] {
+    let host = match host {
+        Host::ClaudeCode => HookHostMetric::ClaudeCode,
+        Host::Codex => HookHostMetric::Codex,
+        Host::Cursor => HookHostMetric::Cursor,
+    };
+    [
+        CounterMetric::HookHost(host),
+        CounterMetric::GateResult(result),
+    ]
+}
+
+fn gate_telemetry(host: Host, result: GateResultMetric) -> TelemetryBatch {
+    TelemetryBatch {
+        counters: gate_counters(host, result).into(),
+        buckets: Vec::new(),
+    }
 }
 
 /// Write the block in the host's protocol and return its exit code.

@@ -22,6 +22,8 @@ pub struct Config {
     pub identity: Identity,
     /// `[ui]`. Read by `writ ui`.
     pub ui: Ui,
+    /// `[telemetry]`. Collection is off unless the user explicitly opts in.
+    pub telemetry: Telemetry,
 }
 
 /// `[audit]`.
@@ -54,6 +56,13 @@ pub struct Ui {
     pub editor_cmd: String,
 }
 
+/// `[telemetry]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Telemetry {
+    /// Whether aggregate local telemetry is collected.
+    pub enabled: bool,
+}
 impl Default for Audit {
     fn default() -> Self {
         Self {
@@ -128,6 +137,9 @@ share_author = true
 [ui]
 port = 7749
 editor_cmd = "cursor -g {path}:{line}"
+
+[telemetry]
+enabled = false
 "#;
 
     #[test]
@@ -147,6 +159,21 @@ editor_cmd = "cursor -g {path}:{line}"
     #[test]
     fn an_empty_file_is_the_defaults() {
         assert_eq!(Config::parse("").unwrap(), Config::default());
+        assert!(!Config::default().telemetry.enabled);
+    }
+
+    #[test]
+    fn telemetry_is_explicitly_opt_in() {
+        assert!(
+            Config::parse("[telemetry]\nenabled = true\n")
+                .unwrap()
+                .telemetry
+                .enabled
+        );
+        assert!(
+            Config::parse("[telemetry]\nenable = true\n").is_err(),
+            "a misspelled privacy setting must not be ignored"
+        );
     }
 
     #[test]

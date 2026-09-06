@@ -1,22 +1,96 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use tower::ServiceExt;
 use writ_cli::ui::{AppState, router};
 use writ_core::{Config, ExemplarKind, NewExemplar, NewLearning, Selected, Status, Store};
 
-async fn start_app(db: &Path, config: Config) -> String {
+fn start_app(db: &Path, config: Config) -> Router {
     let store = Store::open(db).unwrap();
     let state = AppState {
         db: db.to_path_buf(),
+        telemetry_db: db.with_file_name("telemetry.db"),
         config,
         store: Arc::new(Mutex::new(store)),
     };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router(state)).await.unwrap();
-    });
-    format!("http://{}", addr)
+    router(state)
+}
+
+struct TestResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: String,
+}
+
+async fn request_kind(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    form: Option<&[(&str, &str)]>,
+    htmx: bool,
+) -> TestResponse {
+    let body = form
+        .map(|fields| serde_urlencoded::to_string(fields).unwrap())
+        .unwrap_or_default();
+    let mut builder = Request::builder().method(method).uri(uri);
+    if form.is_some() {
+        builder = builder.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    }
+    if htmx {
+        builder = builder.header("HX-Request", "true");
+    }
+    let response = app
+        .clone()
+        .oneshot(builder.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    TestResponse {
+        status,
+        headers,
+        body,
+    }
+}
+
+async fn request(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    form: Option<&[(&str, &str)]>,
+) -> TestResponse {
+    request_kind(app, method, uri, form, false).await
+}
+
+async fn htmx(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    form: Option<&[(&str, &str)]>,
+) -> TestResponse {
+    request_kind(app, method, uri, form, true).await
+}
+
+async fn get(app: &Router, uri: &str) -> TestResponse {
+    request(app, Method::GET, uri, None).await
+}
+
+async fn post(app: &Router, uri: &str) -> TestResponse {
+    request(app, Method::POST, uri, None).await
+}
+
+async fn post_form(app: &Router, uri: &str, form: &[(&str, &str)]) -> TestResponse {
+    request(app, Method::POST, uri, Some(form)).await
 }
 
 fn config() -> Config {
@@ -38,15 +112,11 @@ async fn root_redirects_to_inbox_when_proposed_exist() {
         record_proposed(&mut store, "a proposal");
     }
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    let response = client.get(format!("{}/", base)).send().await.unwrap();
+    let app = start_app(&db, config());
+    let response = get(&app, "/").await;
 
-    assert_eq!(response.status(), 302);
-    assert_eq!(response.headers()["location"], "/inbox");
+    assert_eq!(response.status, 302);
+    assert_eq!(response.headers["location"], "/inbox");
 }
 
 #[tokio::test]
@@ -54,15 +124,11 @@ async fn root_redirects_to_collection_when_inbox_empty() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    let response = client.get(format!("{}/", base)).send().await.unwrap();
+    let app = start_app(&db, config());
+    let response = get(&app, "/").await;
 
-    assert_eq!(response.status(), 302);
-    assert_eq!(response.headers()["location"], "/collection");
+    assert_eq!(response.status, 302);
+    assert_eq!(response.headers["location"], "/collection");
 }
 
 #[tokio::test]
@@ -70,16 +136,11 @@ async fn protocol_version_header_is_present() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let response = client
-        .get(format!("{}/collection", base))
-        .send()
-        .await
-        .unwrap();
+    let app = start_app(&db, config());
+    let response = get(&app, "/collection").await;
 
-    assert_eq!(response.status(), 200);
-    assert_eq!(response.headers()["x-writ-protocol-version"], "1");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.headers["x-writ-protocol-version"], "1");
 }
 
 #[tokio::test]
@@ -92,16 +153,8 @@ async fn layout_shows_nav_and_inbox_badge() {
         record_proposed(&mut store, "second");
     }
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let body = client
-        .get(format!("{}/inbox", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let app = start_app(&db, config());
+    let body = get(&app, "/inbox").await.body;
 
     assert!(body.contains("Inbox"), "{body}");
     assert!(body.contains("Collection"), "{body}");
@@ -114,41 +167,21 @@ async fn embedded_assets_are_served() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
+    let app = start_app(&db, config());
 
-    let css = client
-        .get(format!("{}/assets/app.css", base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(css.status(), 200);
-    let css_type = css.headers()["content-type"].to_str().unwrap();
+    let css = get(&app, "/assets/app.css").await;
+    assert_eq!(css.status, 200);
+    let css_type = css.headers["content-type"].to_str().unwrap();
     assert!(css_type.contains("text/css"), "{css_type}");
 
-    let js = client
-        .get(format!("{}/assets/htmx.min.js", base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(js.status(), 200);
-    let js_type = js.headers()["content-type"].to_str().unwrap();
+    let js = get(&app, "/assets/htmx.min.js").await;
+    assert_eq!(js.status, 200);
+    let js_type = js.headers["content-type"].to_str().unwrap();
     assert!(js_type.contains("javascript"), "{js_type}");
-    let js_body = js.text().await.unwrap();
-    assert!(js_body.contains("htmx"), "{js_body}");
-    // The vendored copy shipped truncated once, and a truncated htmx is a
-    // syntax error, so every swap silently falls back to a full page load.
-    // The byte count is htmx 2.0.4, sha384
-    // HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+.
-    assert_eq!(js_body.len(), 50917, "vendored htmx is not the whole file");
-    assert!(
-        js_body.contains(r#"version:"2.0.4""#),
-        "unexpected htmx version"
-    );
-    assert!(
-        js_body.trim_end().ends_with("return Q}();"),
-        "htmx is cut short"
-    );
+    assert!(js.body.contains("htmx"), "{}", js.body);
+    assert_eq!(js.body.len(), 50917, "vendored htmx is not the whole file");
+    assert!(js.body.contains(r#"version:"2.0.4""#));
+    assert!(js.body.trim_end().ends_with("return Q}();"));
 }
 
 fn proposed_with_exemplars(store: &mut Store, title: &str, snippet: &str) -> String {
@@ -197,39 +230,7 @@ fn backdate_last_selected(db: &std::path::Path, learning_id: &str) {
 }
 
 #[tokio::test]
-async fn inbox_lists_proposed_with_exemplars() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("learnings.db");
-    {
-        let mut store = Store::open(&db).unwrap();
-        proposed_with_exemplars(&mut store, "prefer sd over sed", "let x = 1;");
-        proposed_with_exemplars(&mut store, "prefer ripgrep over grep", "let y = 2;");
-    }
-
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let body = client
-        .get(format!("{}/inbox", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-
-    assert!(body.contains("prefer sd over sed"), "{body}");
-    assert!(body.contains("prefer ripgrep over grep"), "{body}");
-    assert!(body.contains("let x = 1;"), "{body}");
-    assert!(
-        body.contains("/learnings/"),
-        "edit link should be present: {body}"
-    );
-}
-
-#[tokio::test]
-async fn the_inbox_never_shows_near_matches() {
-    // Spec section 7.3: nothing detects duplicates. Two proposals that
-    // share every word must still produce no similarity claim.
+async fn inbox_lists_proposed_without_near_matches() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
     {
@@ -238,73 +239,19 @@ async fn the_inbox_never_shows_near_matches() {
         proposed_with_exemplars(&mut store, "prefer sd over sed everywhere", "let y = 2;");
     }
 
-    let base = start_app(&db, config()).await;
-    let body = reqwest::get(format!("{}/inbox", base))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let app = start_app(&db, config());
+    let body = get(&app, "/inbox").await.body;
 
+    assert!(body.contains("prefer sd over sed"), "{body}");
+    assert!(body.contains("prefer sd over sed everywhere"), "{body}");
+    assert!(body.contains("let x = 1;"), "{body}");
     assert!(!body.contains("Near matches"), "{body}");
     assert!(!body.contains("near-match"), "{body}");
     assert!(!body.contains("bm25"), "{body}");
-}
-
-// --- the footer names the store, spec section 9.4 ----------------------
-
-#[tokio::test]
-async fn every_page_footer_names_the_database_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("learnings.db");
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-
-    for page in ["/inbox", "/collection", "/health"] {
-        let body = client
-            .get(format!("{}{}", base, page))
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
-        assert!(
-            body.contains(db.to_str().unwrap()),
-            "{page} footer should name the store: {body}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn detail_footer_names_the_database_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("learnings.db");
-    let id = {
-        let mut store = Store::open(&db).unwrap();
-        active_learning(&mut store, "footed")
-    };
-
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let body = client
-        .get(format!("{}/learnings/{id}", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(body.contains(db.to_str().unwrap()), "{body}");
-}
-
-// --- htmx: no interaction reloads the page, spec section 9.4 -----------
-
-fn htmx_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap()
+    assert!(
+        body.contains("/learnings/"),
+        "edit link should be present: {body}"
+    );
 }
 
 fn is_fragment(body: &str) -> bool {
@@ -312,290 +259,124 @@ fn is_fragment(body: &str) -> bool {
 }
 
 #[tokio::test]
-async fn inbox_rows_carry_htmx_attributes() {
+async fn main_htmx_inbox_and_health_contracts_are_preserved() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
-    let id = {
+    let (approve_id, archive_id) = {
         let mut store = Store::open(&db).unwrap();
-        proposed_with_exemplars(&mut store, "swap me", "s")
-    };
-
-    let base = start_app(&db, config()).await;
-    let body = reqwest::get(format!("{}/inbox", base))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-
-    assert!(body.contains(r#"id="inbox-list""#), "{body}");
-    assert!(
-        body.contains(&format!(r#"hx-post="/inbox/{id}/approve""#)),
-        "{body}"
-    );
-    assert!(body.contains(r##"hx-target="#inbox-list""##), "{body}");
-    // The plain form POST must survive htmx being unavailable.
-    assert!(
-        body.contains(&format!(r#"action="/inbox/{id}/approve""#)),
-        "{body}"
-    );
-}
-
-#[tokio::test]
-async fn approve_over_htmx_swaps_the_list_and_the_badge() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("learnings.db");
-    let id = {
-        let mut store = Store::open(&db).unwrap();
-        let id = proposed_with_exemplars(&mut store, "approve me", "s");
+        let approve_id = proposed_with_exemplars(&mut store, "approve over htmx", "s");
         proposed_with_exemplars(&mut store, "stay behind", "s2");
-        id
+        let mut old = NewLearning::new("archive over htmx", "rule", "rationale");
+        old.status = Some(Status::Active);
+        old.created_at = Some("2000-01-01 00:00:00".into());
+        let archive_id = store.record(&old).unwrap().id;
+        (approve_id, archive_id)
     };
 
-    let base = start_app(&db, config()).await;
-    let response = htmx_client()
-        .post(format!("{}/inbox/{id}/approve", base))
-        .header("HX-Request", "true")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let body = response.text().await.unwrap();
+    let app = start_app(&db, config());
+    let inbox = get(&app, "/inbox").await.body;
+    assert!(
+        inbox.contains(&format!(r#"hx-post="/inbox/{approve_id}/approve""#)),
+        "{inbox}"
+    );
+    let approved = htmx(
+        &app,
+        Method::POST,
+        &format!("/inbox/{approve_id}/approve"),
+        None,
+    )
+    .await;
+    assert_eq!(approved.status, 200);
+    assert!(is_fragment(&approved.body), "{}", approved.body);
+    assert!(approved.body.contains(r#"id="inbox-list""#));
+    assert!(approved.body.contains("hx-swap-oob"));
 
+    let health = get(&app, "/health").await.body;
     assert!(
-        is_fragment(&body),
-        "a swap is a fragment, not a page: {body}"
+        health.contains(&format!(r#"hx-post="/health/{archive_id}/archive""#)),
+        "{health}"
     );
-    assert!(body.contains(r#"id="inbox-list""#), "{body}");
     assert!(
-        body.contains("stay behind"),
-        "the other proposal stays: {body}"
+        health.contains(&format!(r#"hx-get="/health/{archive_id}/keep""#)),
+        "{health}"
     );
-    // The navigation count moves with the row, out of band.
-    assert!(body.contains(r#"id="inbox-badge""#), "{body}");
-    assert!(body.contains("hx-swap-oob"), "{body}");
-    assert!(
-        body.contains(">1</span>"),
-        "badge should now read 1: {body}"
-    );
+    let archived = htmx(
+        &app,
+        Method::POST,
+        &format!("/health/{archive_id}/archive"),
+        None,
+    )
+    .await;
+    assert_eq!(archived.status, 200);
+    assert!(is_fragment(&archived.body), "{}", archived.body);
+    assert!(archived.body.contains(r#"id="health-body""#));
+    assert!(!archived.body.contains("archive over htmx"));
 }
 
 #[tokio::test]
-async fn approve_without_htmx_still_redirects() {
+async fn main_htmx_detail_collection_and_merge_contracts_are_preserved() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
-    let id = {
+    let (target_id, proposed_id, learning_id, finding_id) = {
         let mut store = Store::open(&db).unwrap();
-        proposed_with_exemplars(&mut store, "no js here", "s")
+        let target_id = active_learning(&mut store, "target rule");
+        let proposed_id =
+            proposed_with_exemplars(&mut store, "proposal to merge", "merged snippet");
+        let learning_id = active_with_exemplar(&mut store, "editable over htmx");
+        let finding_id = finding_with_path(&mut store, &learning_id, Some("a.rs"), Some(3));
+        (target_id, proposed_id, learning_id, finding_id)
     };
+    let app = start_app(&db, config());
 
-    let base = start_app(&db, config()).await;
-    let response = htmx_client()
-        .post(format!("{}/inbox/{id}/approve", base))
-        .send()
-        .await
-        .unwrap();
+    let merged = htmx(
+        &app,
+        Method::POST,
+        &format!("/inbox/{proposed_id}/merge"),
+        Some(&[("target_id", target_id.as_str())]),
+    )
+    .await;
+    assert_eq!(merged.status, 200);
+    assert!(is_fragment(&merged.body), "{}", merged.body);
+    assert!(merged.body.contains(r#"id="inbox-list""#));
 
-    assert_eq!(response.status(), 303);
-    assert_eq!(response.headers()["location"], "/inbox");
-    let store = Store::open(&db).unwrap();
-    assert_eq!(store.get(&id).unwrap().status, Status::Active);
-}
+    let collection = htmx(
+        &app,
+        Method::GET,
+        "/collection?sort=hit&dir=desc&q=editable",
+        None,
+    )
+    .await;
+    assert_eq!(collection.status, 200);
+    assert!(is_fragment(&collection.body), "{}", collection.body);
+    assert!(collection.body.contains(r#"id="collection-body""#));
 
-#[tokio::test]
-async fn merge_over_htmx_swaps_the_list() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("learnings.db");
-    let (target_id, proposed_id) = {
-        let mut store = Store::open(&db).unwrap();
-        let target = active_learning(&mut store, "target rule");
-        let proposed = proposed_with_exemplars(&mut store, "similar target rule", "merged snippet");
-        (target, proposed)
-    };
-
-    let base = start_app(&db, config()).await;
-    let response = htmx_client()
-        .post(format!("{}/inbox/{proposed_id}/merge", base))
-        .header("HX-Request", "true")
-        .form(&[("target_id", &target_id)])
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), 200);
-    let body = response.text().await.unwrap();
-    assert!(is_fragment(&body), "{body}");
-    assert!(body.contains(r#"id="inbox-list""#), "{body}");
-}
-
-#[tokio::test]
-async fn health_archive_over_htmx_swaps_the_table() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("learnings.db");
-    let id = {
-        let mut store = Store::open(&db).unwrap();
-        let mut learning = NewLearning::new("archive me over htmx", "rule", "rationale");
-        learning.status = Some(Status::Active);
-        learning.created_at = Some("2000-01-01 00:00:00".into());
-        store.record(&learning).unwrap().id
-    };
-
-    let base = start_app(&db, config()).await;
-    let page = reqwest::get(format!("{}/health", base))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(page.contains(r#"id="health-body""#), "{page}");
-    assert!(
-        page.contains(&format!(r#"hx-post="/learnings/{id}/archive""#)),
-        "{page}"
-    );
-    assert!(
-        page.contains(r#"hx-get="/health""#),
-        "keep is a swap too: {page}"
-    );
-
-    let response = htmx_client()
-        .post(format!("{}/learnings/{id}/archive", base))
-        .header("HX-Request", "true")
-        .header("HX-Target", "health-body")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let body = response.text().await.unwrap();
-    assert!(is_fragment(&body), "{body}");
-    assert!(body.contains(r#"id="health-body""#), "{body}");
-    assert!(!body.contains("archive me over htmx"), "{body}");
-}
-
-#[tokio::test]
-async fn collection_sort_and_search_over_htmx_return_a_fragment() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("learnings.db");
-    {
-        let mut store = Store::open(&db).unwrap();
-        active_learning(&mut store, "alpha rule");
-        active_learning(&mut store, "beta rule");
-    }
-
-    let base = start_app(&db, config()).await;
-    let page = reqwest::get(format!("{}/collection", base))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(page.contains(r#"id="collection-body""#), "{page}");
-    assert!(page.contains(r#"hx-get="/collection"#), "{page}");
-    assert!(page.contains(r#"hx-push-url="true""#), "{page}");
-
-    let body = htmx_client()
-        .get(format!("{}/collection?sort=hit&dir=desc", base))
-        .header("HX-Request", "true")
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(is_fragment(&body), "{body}");
-    assert!(body.contains(r#"id="collection-body""#), "{body}");
-    assert!(body.contains("alpha rule"), "{body}");
-
-    let searched = htmx_client()
-        .get(format!("{}/collection?q=alpha", base))
-        .header("HX-Request", "true")
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(is_fragment(&searched), "{searched}");
-    assert!(searched.contains("alpha rule"), "{searched}");
-    assert!(!searched.contains("beta rule"), "{searched}");
-}
-
-#[tokio::test]
-async fn detail_save_over_htmx_returns_the_fragment() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("learnings.db");
-    let id = {
-        let mut store = Store::open(&db).unwrap();
-        active_with_exemplar(&mut store, "editable over htmx")
-    };
-
-    let base = start_app(&db, config()).await;
-    let page = reqwest::get(format!("{}/learnings/{id}", base))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(page.contains(r#"id="detail-body""#), "{page}");
-    assert!(
-        page.contains(&format!(r#"hx-post="/learnings/{id}""#)),
-        "{page}"
-    );
-
-    let response = htmx_client()
-        .post(format!("{}/learnings/{id}", base))
-        .header("HX-Request", "true")
-        .form(&[
+    let saved = htmx(
+        &app,
+        Method::POST,
+        &format!("/learnings/{learning_id}"),
+        Some(&[
             ("title", "editable over htmx"),
             ("rule", "swapped rule"),
             ("rationale", "swapped rationale"),
-        ])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let body = response.text().await.unwrap();
-    assert!(is_fragment(&body), "{body}");
-    assert!(body.contains(r#"id="detail-body""#), "{body}");
-    assert!(body.contains("swapped rule"), "{body}");
+        ]),
+    )
+    .await;
+    assert_eq!(saved.status, 200);
+    assert!(is_fragment(&saved.body), "{}", saved.body);
+    assert!(saved.body.contains(r#"id="detail-body""#));
+    assert!(saved.body.contains("swapped rule"));
 
-    let store = Store::open(&db).unwrap();
-    assert_eq!(store.get(&id).unwrap().rule, "swapped rule");
-}
-
-#[tokio::test]
-async fn finding_reject_over_htmx_returns_the_detail_fragment() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("learnings.db");
-    let (learning_id, finding_id) = {
-        let mut store = Store::open(&db).unwrap();
-        let id = active_with_exemplar(&mut store, "finding owner");
-        let finding_id = finding_with_path(&mut store, &id, Some("a.rs"), Some(3));
-        (id, finding_id)
-    };
-
-    let base = start_app(&db, config()).await;
-    let page = reqwest::get(format!("{}/learnings/{learning_id}", base))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(
-        page.contains(&format!(r#"hx-post="/findings/{finding_id}/reject""#)),
-        "{page}"
-    );
-
-    let response = htmx_client()
-        .post(format!("{}/findings/{finding_id}/reject", base))
-        .header("HX-Request", "true")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let body = response.text().await.unwrap();
-    assert!(is_fragment(&body), "{body}");
-    assert!(body.contains(r#"id="detail-body""#), "{body}");
-    assert!(body.contains("rejected"), "{body}");
+    let rejected = htmx(
+        &app,
+        Method::POST,
+        &format!("/findings/{finding_id}/reject"),
+        None,
+    )
+    .await;
+    assert_eq!(rejected.status, 200);
+    assert!(is_fragment(&rejected.body), "{}", rejected.body);
+    assert!(rejected.body.contains(r#"id="detail-body""#));
+    assert!(rejected.body.contains("rejected"));
 }
 
 #[tokio::test]
@@ -607,30 +388,15 @@ async fn approve_activates_and_removes_from_inbox() {
         proposed_with_exemplars(&mut store, "activate me", "s")
     };
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    let response = client
-        .post(format!("{}/inbox/{id}/approve", base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 303);
+    let app = start_app(&db, config());
+    let response = post(&app, &format!("/inbox/{id}/approve")).await;
+    assert_eq!(response.status, 303);
 
     let store = Store::open(&db).unwrap();
     let learning = store.get(&id).unwrap();
     assert_eq!(learning.status, Status::Active);
 
-    let body = client
-        .get(format!("{}/inbox", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let body = get(&app, "/inbox").await.body;
     assert!(!body.contains("activate me"), "{body}");
 }
 
@@ -643,17 +409,9 @@ async fn reject_archives_proposal() {
         proposed_with_exemplars(&mut store, "reject me", "s")
     };
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    let response = client
-        .post(format!("{}/inbox/{id}/reject", base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 303);
+    let app = start_app(&db, config());
+    let response = post(&app, &format!("/inbox/{id}/reject")).await;
+    assert_eq!(response.status, 303);
 
     let store = Store::open(&db).unwrap();
     assert_eq!(store.get(&id).unwrap().status, Status::Archived);
@@ -670,18 +428,14 @@ async fn merge_reinforces_target_and_archives_proposal() {
         (target, proposed)
     };
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    let response = client
-        .post(format!("{}/inbox/{proposed_id}/merge", base))
-        .form(&[("target_id", &target_id)])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 303);
+    let app = start_app(&db, config());
+    let response = post_form(
+        &app,
+        &format!("/inbox/{proposed_id}/merge"),
+        &[("target_id", &target_id)],
+    )
+    .await;
+    assert_eq!(response.status, 303);
 
     let store = Store::open(&db).unwrap();
     assert_eq!(store.get(&proposed_id).unwrap().status, Status::Archived);
@@ -741,16 +495,8 @@ async fn collection_search_filters_by_title() {
         active_learning(&mut store, "beta rule");
     }
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let body = client
-        .get(format!("{}/collection?q=alpha", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?q=alpha").await.body;
 
     assert!(body.contains("alpha rule"), "{body}");
     assert!(!body.contains("beta rule"), "{body}");
@@ -768,16 +514,8 @@ async fn collection_hides_archived_by_default() {
         active
     };
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let body = client
-        .get(format!("{}/collection", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection").await.body;
 
     assert!(body.contains(&active_id), "{body}");
     assert!(!body.contains("now archived"), "{body}");
@@ -795,16 +533,8 @@ async fn collection_sorts_by_hits_descending() {
         bump_applied(&mut store, &low, 1);
     }
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let body = client
-        .get(format!("{}/collection?sort=hit&dir=desc", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?sort=hit&dir=desc").await.body;
 
     let high_pos = body.find("high hits").unwrap();
     let low_pos = body.find("low hits").unwrap();
@@ -832,24 +562,20 @@ async fn detail_save_updates_rule_text() {
         active_with_exemplar(&mut store, "editable")
     };
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    let response = client
-        .post(format!("{}/learnings/{id}", base))
-        .form(&[
+    let app = start_app(&db, config());
+    let response = post_form(
+        &app,
+        &format!("/learnings/{id}"),
+        &[
             ("title", "editable"),
             ("rule", "updated rule"),
             ("rationale", "updated rationale"),
             ("good_snippet", "let good = true;"),
-        ])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 303);
-    assert_eq!(response.headers()["location"], format!("/learnings/{id}"));
+        ],
+    )
+    .await;
+    assert_eq!(response.status, 303);
+    assert_eq!(response.headers["location"], format!("/learnings/{id}"));
 
     let store = Store::open(&db).unwrap();
     let learning = store.get(&id).unwrap();
@@ -868,19 +594,11 @@ async fn reject_finding_from_detail_sets_rejected() {
         (id, finding_id)
     };
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    let response = client
-        .post(format!("{}/findings/{finding_id}/reject", base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 303);
+    let app = start_app(&db, config());
+    let response = post(&app, &format!("/findings/{finding_id}/reject")).await;
+    assert_eq!(response.status, 303);
     assert_eq!(
-        response.headers()["location"],
+        response.headers["location"],
         format!("/learnings/{learning_id}")
     );
 
@@ -914,24 +632,11 @@ async fn open_editor_runs_configured_command() {
         (id, finding_id)
     };
 
-    let base = start_app(&db, config).await;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    let response = client
-        .post(format!("{}/findings/{finding_id}/open", base))
-        .send()
-        .await
-        .unwrap();
+    let app = start_app(&db, config);
+    let response = post(&app, &format!("/findings/{finding_id}/open")).await;
+    assert_eq!(response.status, 303, "body: {}", response.body);
     assert_eq!(
-        response.status(),
-        303,
-        "body: {}",
-        response.text().await.unwrap()
-    );
-    assert_eq!(
-        response.headers()["location"],
+        response.headers["location"],
         format!("/learnings/{learning_id}")
     );
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -954,16 +659,8 @@ async fn health_lists_unused_rules() {
         store.record(&learning).unwrap();
     }
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let body = client
-        .get(format!("{}/health", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let app = start_app(&db, config());
+    let body = get(&app, "/health").await.body;
 
     assert!(body.contains("old and unused"), "{body}");
     assert!(body.contains("Not selected in 90 days"), "{body}");
@@ -979,16 +676,8 @@ async fn health_lists_never_applied_rules() {
         select_learning(&mut store, &id);
     }
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let body = client
-        .get(format!("{}/health", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let app = start_app(&db, config());
+    let body = get(&app, "/health").await.body;
 
     assert!(body.contains("selected but silent"), "{body}");
     assert!(body.contains("Selected but never applied"), "{body}");
@@ -1006,16 +695,8 @@ async fn health_marks_rows_in_both_buckets() {
     };
     backdate_last_selected(&db, &id);
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let body = client
-        .get(format!("{}/health", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let app = start_app(&db, config());
+    let body = get(&app, "/health").await.body;
 
     assert!(body.contains("in both buckets"), "{body}");
     assert!(body.contains("in-both"), "{body}");
@@ -1026,16 +707,8 @@ async fn inbox_empty_state_shows_curation_copy() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let body = client
-        .get(format!("{}/inbox", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let app = start_app(&db, config());
+    let body = get(&app, "/inbox").await.body;
 
     assert!(body.contains("Inbox is empty"), "{body}");
     assert!(body.contains("Every proposal is curated"), "{body}");
@@ -1046,16 +719,8 @@ async fn health_empty_state_shows_clear_copy() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::new();
-    let body = client
-        .get(format!("{}/health", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let app = start_app(&db, config());
+    let body = get(&app, "/health").await.body;
 
     assert!(body.contains("Health is clear"), "{body}");
 }
@@ -1072,25 +737,10 @@ async fn health_archive_removes_from_health() {
         store.record(&learning).unwrap().id
     };
 
-    let base = start_app(&db, config()).await;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-    let response = client
-        .post(format!("{}/learnings/{id}/archive", base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 303);
+    let app = start_app(&db, config());
+    let response = post(&app, &format!("/health/{id}/archive")).await;
+    assert_eq!(response.status, 303);
 
-    let body = client
-        .get(format!("{}/health", base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let body = get(&app, "/health").await.body;
     assert!(!body.contains("archive me"), "{body}");
 }

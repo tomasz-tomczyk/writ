@@ -4,8 +4,9 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 
 use writ_core::{
-    Config, Error, ExemplarKind, MatcherKind, NewExemplar, NewLearning, Recorded, Result, Scope,
-    SourceKind, Status, Store, parse_jsonl,
+    Config, CounterMetric, Error, ExemplarKind, LanguageMetric, MatcherKind, NewExemplar,
+    NewLearning, RecordSourceMetric, RecordStatusMetric, Recorded, Result, Scope, ScopeKind,
+    SourceKind, Status, Store, TelemetryBatch, parse_jsonl,
 };
 
 use crate::context::{read_snippet, resolve_author};
@@ -108,9 +109,10 @@ pub struct Args {
 }
 
 /// Run the command and print what it wrote.
-pub fn run(args: &Args, db: &Path, config: &Config) -> Result<()> {
-    let written = execute(args, db, config)?;
-    report(&written, args.format)
+pub fn run(args: &Args, db: &Path, config: &Config) -> Result<TelemetryBatch> {
+    let (written, telemetry) = execute_with_telemetry(args, db, config)?;
+    report(&written, args.format)?;
+    Ok(telemetry)
 }
 
 /// Write the learnings and return them. This prints nothing.
@@ -118,9 +120,27 @@ pub fn run(args: &Args, db: &Path, config: &Config) -> Result<()> {
 /// The MCP tool calls this, so the two surfaces cannot validate or store
 /// one learning differently. Spec section 9.1.
 pub fn execute(args: &Args, db: &Path, config: &Config) -> Result<Vec<Recorded>> {
+    execute_with_telemetry(args, db, config).map(|(written, _)| written)
+}
+
+/// Write learnings and return aggregate-only observations to the calling
+/// surface without changing the shared validation or storage path.
+pub fn execute_with_telemetry(
+    args: &Args,
+    db: &Path,
+    config: &Config,
+) -> Result<(Vec<Recorded>, TelemetryBatch)> {
     let status = args.requested_status()?;
     let exemplars = args.exemplars()?;
     let mut store = Store::open(db)?;
+    let mut telemetry = TelemetryBatch::default();
+    telemetry
+        .counters
+        .push(CounterMetric::RecordSource(if args.json {
+            RecordSourceMetric::Json
+        } else {
+            RecordSourceMetric::Manual
+        }));
 
     let written = if let Some(id) = &args.reinforce {
         vec![store.reinforce(id, &exemplars, status)?]
@@ -130,6 +150,7 @@ pub fn execute(args: &Args, db: &Path, config: &Config) -> Result<Vec<Recorded>>
         for learning in &mut learnings {
             learning.status = learning.status.or(status);
             learning.author = learning.author.clone().or_else(|| author.clone());
+            observe_learning(&mut telemetry, learning);
         }
         store.record_many(&learnings)?
     } else {
@@ -150,10 +171,39 @@ pub fn execute(args: &Args, db: &Path, config: &Config) -> Result<Vec<Recorded>>
         learning.status = status;
         learning.author = resolve_author(config);
         learning.source_kind = Some(SourceKind::Manual);
+        observe_learning(&mut telemetry, &learning);
         vec![store.record(&learning)?]
     };
 
-    Ok(written)
+    Ok((written, telemetry))
+}
+
+fn observe_learning(batch: &mut TelemetryBatch, learning: &NewLearning) {
+    batch
+        .counters
+        .push(CounterMetric::RecordStatus(match learning.status {
+            Some(Status::Active) => RecordStatusMetric::Active,
+            _ => RecordStatusMetric::Proposed,
+        }));
+    batch
+        .counters
+        .push(CounterMetric::MatcherKind(learning.matcher_kind));
+    if learning.scopes.is_empty() {
+        batch
+            .counters
+            .push(CounterMetric::ScopeKind(ScopeKind::Global));
+        return;
+    }
+    for scope in &learning.scopes {
+        batch.counters.push(CounterMetric::ScopeKind(scope.kind));
+        if scope.kind == ScopeKind::Language {
+            batch
+                .counters
+                .push(CounterMetric::Language(LanguageMetric::from_label(
+                    &scope.value,
+                )));
+        }
+    }
 }
 
 impl Args {

@@ -16,6 +16,7 @@ description = "Format, lint, and test"
 run = [
   "cargo fmt --all --check",
   "cargo clippy --workspace --all-targets -- -D warnings",
+  "mise run no-network",
   "cargo test --workspace",
 ]
 
@@ -25,6 +26,19 @@ run = [
   "cargo build --bin writ",
   "./scripts/check-doc-flags.sh",
 ]
+
+[tasks.no-network]
+description = "Assert the writ binary has no HTTP client dependency"
+run = '''
+if cargo tree -p writ-cli --edges normal | grep -E '(^| )((reqwest|ureq|isahc|curl|surf) v)'; then
+  echo "an HTTP client is linked into writ; telemetry must remain local-only" >&2
+  exit 1
+fi
+if grep -R -E 'reqwest::|ureq::|isahc::|curl::|surf::|TcpStream|UdpSocket|hyper::client' crates/*/src; then
+  echo "network client code exists in writ; telemetry must remain local-only" >&2
+  exit 1
+fi
+'''
 
 [tasks.build]
 description = "Build the writ binary"

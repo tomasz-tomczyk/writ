@@ -61,6 +61,13 @@ impl Store {
         migrate::current_version(&self.conn)
     }
 
+    /// Number of learnings currently held, across every status.
+    pub fn collection_size(&self) -> Result<u64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM learnings", [], |row| row.get(0))
+            .map_err(Into::into)
+    }
+
     /// Write one learning.
     pub fn record(&mut self, learning: &NewLearning) -> Result<Recorded> {
         Ok(self.record_many(std::slice::from_ref(learning))?.remove(0))

@@ -23,10 +23,13 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use serde_json::{Value, json};
-use writ_core::{Config, Result};
+use writ_core::{
+    CommandMetric, Config, CounterMetric, Paths, Result, SurfaceMetric, TelemetryBatch,
+};
 
 use crate::audit;
 use crate::record;
+use crate::telemetry;
 
 /// The protocol revision this server implements.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -343,14 +346,22 @@ struct AuditLine {
 /// The server, with the paths every subcommand resolved once.
 pub struct Server {
     db: PathBuf,
+    telemetry_db: PathBuf,
     config: Config,
 }
 
 impl Server {
     /// A server over this database and configuration.
     pub fn new(db: &Path, config: Config) -> Self {
+        Self::new_with_telemetry(db, db.with_file_name("telemetry.db"), config)
+    }
+
+    /// A server with the separately resolved telemetry store used by the
+    /// production command.
+    pub fn new_with_telemetry(db: &Path, telemetry_db: impl Into<PathBuf>, config: Config) -> Self {
         Self {
             db: db.to_path_buf(),
+            telemetry_db: telemetry_db.into(),
             config,
         }
     }
@@ -421,25 +432,43 @@ impl Server {
         match tool.command {
             "record" => {
                 let line = RecordLine::try_parse_from(argv).map_err(usage)?;
-                let written =
-                    record::execute(&line.inner, &self.db, &self.config).map_err(cause)?;
+                let (written, batch) =
+                    record::execute_with_telemetry(&line.inner, &self.db, &self.config)
+                        .map_err(cause)?;
+                self.observe(batch, CommandMetric::Record);
                 Ok(serde_json::to_value(&written).expect("Recorded serializes"))
             }
             "audit" => {
                 let line = AuditLine::try_parse_from(argv).map_err(usage)?;
                 if let Some(findings) = stdin {
-                    let written = audit::ingest_text(findings, &self.db).map_err(cause)?;
+                    let (written, batch) =
+                        audit::ingest_with_telemetry(findings, &self.db).map_err(cause)?;
+                    self.observe(batch, CommandMetric::Audit);
                     return Ok(serde_json::to_value(&written).expect("Ingested serializes"));
                 }
-                let run = audit::select(&line.inner, &self.db, &self.config).map_err(cause)?;
+                let mut run = audit::select(&line.inner, &self.db, &self.config).map_err(cause)?;
                 let mut report = audit::report(&run, line.inner.dry_run);
                 if !run.notices.is_empty() {
                     report["notices"] = json!(run.notices);
                 }
+                self.observe(std::mem::take(&mut run.telemetry), CommandMetric::Audit);
                 Ok(report)
             }
             other => Err(format!("no such command {other}")),
         }
+    }
+
+    fn observe(&self, mut batch: TelemetryBatch, command: CommandMetric) {
+        if !self.config.telemetry.enabled {
+            return;
+        }
+        batch.counters.extend([
+            CounterMetric::Command(command),
+            CounterMetric::Surface(SurfaceMetric::Mcp),
+            CounterMetric::ExitCode(0),
+        ]);
+        telemetry::add_collection_size_best_effort(&self.db, &mut batch);
+        telemetry::record_best_effort(&self.telemetry_db, &batch);
     }
 }
 
@@ -469,8 +498,8 @@ fn failure(message: &str) -> Value {
 }
 
 /// Serve on stdio until the host closes the stream.
-pub fn run(_args: &Args, db: &Path, config: &Config) -> Result<ExitCode> {
-    let server = Server::new(db, config.clone());
+pub fn run(_args: &Args, paths: &Paths, config: &Config) -> Result<ExitCode> {
+    let server = Server::new_with_telemetry(&paths.db, &paths.telemetry_db, config.clone());
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     serve(&server, stdin.lock(), stdout.lock());

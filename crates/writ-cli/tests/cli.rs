@@ -36,6 +36,10 @@ impl Sandbox {
         self.path("config.toml")
     }
 
+    fn telemetry_db(&self) -> PathBuf {
+        self.path("xdg-data/writ/telemetry.db")
+    }
+
     fn write_config(&self, text: &str) {
         std::fs::write(self.config(), text).unwrap();
     }
@@ -63,6 +67,7 @@ impl Sandbox {
             .current_dir(dir)
             .env("GIT_CONFIG_GLOBAL", self.path("empty.gitconfig"))
             .env("GIT_CONFIG_SYSTEM", self.path("empty.gitconfig"))
+            .env("XDG_DATA_HOME", self.path("xdg-data"))
             .env_remove("GIT_AUTHOR_EMAIL")
             .env_remove("EMAIL");
         command
@@ -146,6 +151,497 @@ impl Sandbox {
         let output = self.run(&["list", "--format", "json"]);
         output.assert_code(0);
         serde_json::from_str(&output.stdout).unwrap()
+    }
+}
+
+// --- writ telemetry: explicit consent and disclosure ------------------
+
+#[test]
+fn telemetry_defaults_to_disabled_and_show_does_not_create_a_store() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["telemetry"]);
+    output.assert_code(0);
+    assert!(
+        output.stdout.contains("telemetry: disabled"),
+        "{}",
+        output.stdout
+    );
+    assert!(output.stdout.contains("**Captured:**"), "{}", output.stdout);
+    assert!(
+        output.stdout.contains("**Never captured:**"),
+        "{}",
+        output.stdout
+    );
+    assert!(!sandbox.telemetry_db().exists());
+    assert!(!sandbox.config().exists());
+}
+
+#[test]
+fn telemetry_help_lists_every_local_command_and_no_upload() {
+    let sandbox = Sandbox::new();
+    let help = sandbox.run(&["telemetry", "--help"]);
+    help.assert_code(0);
+    for command in ["on", "off", "show", "dump", "purge"] {
+        assert!(
+            help.stdout.contains(command),
+            "missing {command}: {}",
+            help.stdout
+        );
+    }
+    assert!(!help.stdout.contains("upload"), "{}", help.stdout);
+
+    let on = sandbox.run(&["telemetry", "on", "--help"]);
+    on.assert_code(0);
+    assert!(on.stdout.contains("--yes"), "{}", on.stdout);
+}
+
+#[test]
+fn telemetry_on_prints_privacy_text_before_accepting_yes() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["telemetry", "on", "--yes"]);
+    output.assert_code(0);
+    let captured = output.stdout.find("**Captured:**").unwrap();
+    let enabled = output.stdout.find("telemetry enabled").unwrap();
+    assert!(captured < enabled, "{}", output.stdout);
+    assert!(sandbox.telemetry_db().is_file());
+    let config = std::fs::read_to_string(sandbox.config()).unwrap();
+    assert!(config.contains("[telemetry]\nenabled = true"), "{config}");
+
+    let conn = rusqlite::Connection::open(sandbox.telemetry_db()).unwrap();
+    let install_id: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'install_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        uuid::Uuid::parse_str(&install_id)
+            .unwrap()
+            .get_version_num(),
+        4
+    );
+}
+
+#[test]
+fn telemetry_on_accepts_piped_confirmation_and_declining_is_safe() {
+    let declined = Sandbox::new();
+    declined.pipe(&["telemetry", "on"], "no\n").assert_code(0);
+    assert!(!declined.telemetry_db().exists());
+    assert!(!declined.config().exists());
+
+    let accepted = Sandbox::new();
+    accepted.pipe(&["telemetry", "on"], "yes\n").assert_code(0);
+    assert!(accepted.telemetry_db().is_file());
+}
+
+#[test]
+fn telemetry_off_keeps_data_and_purge_removes_only_telemetry() {
+    let sandbox = Sandbox::new();
+    sandbox.record(&[]);
+    sandbox.run(&["telemetry", "on", "--yes"]).assert_code(0);
+
+    sandbox.run(&["telemetry", "off"]).assert_code(0);
+    assert!(sandbox.telemetry_db().is_file());
+    assert!(sandbox.db().is_file());
+    assert!(
+        !writ_core::Config::parse(&std::fs::read_to_string(sandbox.config()).unwrap())
+            .unwrap()
+            .telemetry
+            .enabled
+    );
+
+    sandbox.run(&["telemetry", "purge"]).assert_code(0);
+    assert!(!sandbox.telemetry_db().exists());
+    assert!(sandbox.db().is_file());
+    assert!(sandbox.config().is_file());
+}
+
+#[test]
+fn telemetry_dump_is_versioned_json_and_show_displays_every_row() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["telemetry", "on", "--yes"]).assert_code(0);
+    let conn = rusqlite::Connection::open(sandbox.telemetry_db()).unwrap();
+    conn.execute(
+        "INSERT INTO counters (day, metric, label, count) VALUES ('2026-09-06','command','audit',12)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO buckets (day, metric, bucket, count) VALUES ('2026-09-06','audit_sent','6-20',9)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let dump = sandbox.run(&["telemetry", "dump"]);
+    dump.assert_code(0);
+    let json: writ_core::TelemetryDump = serde_json::from_str(&dump.stdout).unwrap();
+    assert_eq!(json.writ_telemetry, 1);
+    assert_eq!(json.counters.len(), 1);
+    assert_eq!(json.buckets.len(), 1);
+    assert_eq!(json.bucket_edges.len(), 7);
+    assert_eq!(
+        serde_json::from_str::<writ_core::TelemetryDump>(&dump.stdout).unwrap(),
+        json
+    );
+
+    let show = sandbox.run(&["telemetry", "show"]);
+    show.assert_code(0);
+    for held in [
+        "install_id",
+        "enabled_at",
+        "schema_version",
+        "2026-09-06  command  audit  12",
+        "2026-09-06  audit_sent  6-20  9",
+    ] {
+        assert!(
+            show.stdout.contains(held),
+            "missing {held}: {}",
+            show.stdout
+        );
+    }
+}
+
+#[test]
+fn every_existing_command_leaves_no_telemetry_store_when_disabled() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("disabled", Some("git@github.com:owner/disabled.git"));
+    let id = sandbox.record(&["--activate"]);
+    assert!(!sandbox.telemetry_db().exists(), "record must not collect");
+
+    for args in [
+        vec!["list", "--format", "json"],
+        vec!["show", id.as_str()],
+        vec!["archive", id.as_str()],
+        vec!["telemetry"],
+        vec!["telemetry", "show"],
+        vec!["telemetry", "off"],
+        vec!["telemetry", "purge"],
+        vec!["telemetry", "dump"],
+    ] {
+        let _ = sandbox.run(&args);
+        assert!(
+            !sandbox.telemetry_db().exists(),
+            "{} created telemetry.db while disabled",
+            args.join(" ")
+        );
+    }
+
+    std::fs::write(root.join("a.rs"), "fn main() { changed(); }\n").unwrap();
+    sandbox
+        .run_at(&root, &["audit", "--format", "json"])
+        .assert_code(0);
+    assert!(!sandbox.telemetry_db().exists(), "audit must not collect");
+
+    // `ui` normally serves until stopped. A deliberately unreadable learning
+    // store exercises its dispatch path without leaving a server behind.
+    let ui = Sandbox::new();
+    std::fs::create_dir(ui.db()).unwrap();
+    ui.run(&["ui", "--no-open"]).assert_code(8);
+    assert!(!ui.telemetry_db().exists(), "ui must not collect");
+}
+
+#[test]
+fn hand_editing_config_true_does_not_bypass_the_on_command() {
+    let sandbox = Sandbox::new();
+    sandbox.write_config("[telemetry]\nenabled = true\n");
+    sandbox.record(&[]);
+    assert!(
+        !sandbox.telemetry_db().exists(),
+        "only `writ telemetry on` may create enable metadata or collect"
+    );
+}
+
+#[test]
+fn a_broken_telemetry_store_cannot_change_audit_results_or_exit_codes() {
+    let sandbox = Sandbox::new();
+    sandbox.write_config("[telemetry]\nenabled = true\n");
+    std::fs::create_dir_all(sandbox.telemetry_db()).unwrap();
+    sandbox.record(&["--activate"]);
+    let root = sandbox.repo(
+        "broken-telemetry",
+        Some("https://github.com/owner/repo.git"),
+    );
+    std::fs::write(root.join("a.rs"), "fn main() { changed(); }\n").unwrap();
+
+    let success = sandbox.run_at(&root, &["audit", "--format", "json"]);
+    success.assert_code(0);
+    let report: serde_json::Value = serde_json::from_str(&success.stdout).unwrap();
+    assert_eq!(report["sent"], 1);
+
+    git(&root, &["add", "a.rs"]);
+    git(&root, &["commit", "-qm", "changed"]);
+    let empty = sandbox.run_at(&root, &["audit"]);
+    empty.assert_code(7);
+    assert!(empty.stderr.contains("empty"), "{}", empty.stderr);
+}
+
+#[test]
+fn enabled_cli_paths_record_all_metrics_the_current_commands_can_observe() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["telemetry", "on", "--yes"]).assert_code(0);
+    let first = sandbox.record(&[
+        "--activate",
+        "--scope",
+        "language:rust",
+        "--matcher",
+        "changed",
+        "--matcher-kind",
+        "regex",
+    ]);
+    let second = sandbox.record(&[
+        "--activate",
+        "--scope",
+        "language:rust",
+        "--matcher",
+        "changed",
+        "--matcher-kind",
+        "regex",
+    ]);
+    sandbox
+        .run(&["record", "--reinforce", &first])
+        .assert_code(0);
+    sandbox
+        .pipe(
+            &["record", "--json"],
+            r#"{"title":"json","rule":"r","rationale":"why"}
+"#,
+        )
+        .assert_code(0);
+
+    let root = sandbox.repo("metrics", Some("https://github.com/owner/metrics.git"));
+    std::fs::write(root.join("a.rs"), "fn main() { changed(); }\n").unwrap();
+    std::fs::write(root.join("private.qqq"), "DIFF_CONTENT_SENTINEL\n").unwrap();
+    git(&root, &["add", "a.rs", "private.qqq"]);
+    let audit = sandbox.run_at(&root, &["audit", "--format", "json"]);
+    audit.assert_code(0);
+    let report: serde_json::Value = serde_json::from_str(&audit.stdout).unwrap();
+    let audit_id = report["audit_id"].as_str().unwrap();
+    let ingest = format!(
+        r#"{{"audit_id":"{audit_id}","findings":[
+          {{"learning_id":"{first}","outcome":"fixed"}},
+          {{"learning_id":"{second}","outcome":"ignored"}}
+        ]}}"#
+    );
+    sandbox.pipe(&["audit", "--ingest"], &ingest).assert_code(1);
+
+    let dump = sandbox.run(&["telemetry", "dump"]);
+    dump.assert_code(0);
+    let dump: writ_core::TelemetryDump = serde_json::from_str(&dump.stdout).unwrap();
+    let metric_labels: std::collections::BTreeSet<_> = dump
+        .counters
+        .iter()
+        .map(|row| (row.metric.as_str(), row.label.as_str()))
+        .collect();
+    for expected in [
+        ("command", "record"),
+        ("command", "audit"),
+        ("surface", "cli"),
+        ("exit_code", "0"),
+        ("exit_code", "1"),
+        ("record_source", "manual"),
+        ("record_source", "json"),
+        ("record_status", "active"),
+        ("record_status", "proposed"),
+        ("scope_kind", "language"),
+        ("scope_kind", "global"),
+        ("language", "rust"),
+        ("language", "other"),
+        ("matcher_kind", "regex"),
+        ("matcher_kind", "none"),
+        ("matcher_result", "hit"),
+        ("finding_outcome", "fixed"),
+        ("finding_outcome", "ignored"),
+        ("gate_result", "block"),
+    ] {
+        assert!(
+            metric_labels.contains(&expected),
+            "missing {expected:?}: {metric_labels:?}"
+        );
+    }
+
+    let bucket_metrics: std::collections::BTreeSet<_> =
+        dump.buckets.iter().map(|row| row.metric.as_str()).collect();
+    assert_eq!(
+        bucket_metrics,
+        [
+            "audit_considered",
+            "audit_findings",
+            "audit_sent",
+            "collection_size",
+            "command_ms",
+            "diff_files",
+            "prompt_chars",
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+
+#[test]
+fn telemetry_dump_leaks_none_of_the_enumerated_content_sentinels() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["telemetry", "on", "--yes"]).assert_code(0);
+
+    let title = "TITLE_SENTINEL_7f3a";
+    let rule = "RULE_SENTINEL_2b8c";
+    let rationale = "RATIONALE_SENTINEL_4d1e";
+    let author = "AUTHOR_SENTINEL_9a6f@example.invalid";
+    let matcher = "DIFF_CONTENT_SENTINEL_5c2d";
+    let exemplar_snippet = "EXEMPLAR_SNIPPET_SENTINEL_1e7b";
+    let exemplar_note = "EXEMPLAR_NOTE_SENTINEL_8d4a";
+    let exemplar_language = "EXEMPLAR_LANGUAGE_SENTINEL_6f9c";
+    let source_adapter = "SOURCE_ADAPTER_SENTINEL_3a5d";
+    let source_ref = "SOURCE_REF_SENTINEL_0c8e";
+    let created_at = "2099-01-02 CREATED_TIME_SENTINEL";
+    let updated_at = "2099-01-03 UPDATED_TIME_SENTINEL";
+    let activated_at = "2099-01-04 ACTIVATED_TIME_SENTINEL";
+    let project_scope = "remote_sentinel.example/owner_sentinel/repo_sentinel";
+    let glob_scope = "src/path_sentinel.rs";
+    let json = serde_json::json!({
+        "title": title,
+        "rule": rule,
+        "rationale": rationale,
+        "scopes": [
+            format!("project:{project_scope}"),
+            "language:rust",
+            format!("glob:{glob_scope}"),
+        ],
+        "matcher_kind": "regex",
+        "matcher": matcher,
+        "exemplars": [{
+            "kind": "bad",
+            "language": exemplar_language,
+            "snippet": exemplar_snippet,
+            "note": exemplar_note,
+        }],
+        "status": "active",
+        "author": author,
+        "source_adapter": source_adapter,
+        "source_ref": source_ref,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "activated_at": activated_at,
+    });
+    let recorded = sandbox.pipe(&["record", "--json", "--format", "json"], &json.to_string());
+    recorded.assert_code(0);
+    let rows: serde_json::Value = serde_json::from_str(&recorded.stdout).unwrap();
+    let learning_id = rows[0]["id"].as_str().unwrap().to_string();
+
+    let repo_directory = "REPO_DIRECTORY_SENTINEL_4a9e";
+    let remote = "https://remote_sentinel.example/owner_sentinel/repo_sentinel.git";
+    let root = sandbox.repo(repo_directory, Some(remote));
+    let branch = "BRANCH_SENTINEL_6d0f";
+    git(&root, &["checkout", "-qb", branch]);
+    let changed_path = root.join(glob_scope);
+    std::fs::create_dir_all(changed_path.parent().unwrap()).unwrap();
+    std::fs::write(&changed_path, format!("fn {matcher}() {{}}\n")).unwrap();
+    git(&root, &["add", glob_scope]);
+
+    let audit = sandbox.run_at(&root, &["audit", "--format", "json"]);
+    audit.assert_code(0);
+    let report: serde_json::Value = serde_json::from_str(&audit.stdout).unwrap();
+    let audit_id = report["audit_id"].as_str().unwrap().to_string();
+    assert_eq!(report["sent"], 1, "{}", audit.stdout);
+
+    let finding_path = "FINDING_PATH_SENTINEL_8b3c.rs";
+    let finding_detail = "FINDING_DETAIL_SENTINEL_1a4d";
+    let findings = serde_json::json!({
+        "audit_id": audit_id,
+        "findings": [{
+            "learning_id": learning_id,
+            "path": finding_path,
+            "line": 42,
+            "detail": finding_detail,
+            "outcome": "fixed",
+        }],
+    });
+    sandbox
+        .pipe(&["audit", "--ingest"], &findings.to_string())
+        .assert_code(0);
+    let finding_id = writ_core::Store::open(&sandbox.db())
+        .unwrap()
+        .findings_of(&learning_id)
+        .unwrap()[0]
+        .id
+        .clone();
+
+    let search = "SEARCH_QUERY_SENTINEL_5e7a";
+    sandbox
+        .run(&["list", "--search", search, "--format", "json"])
+        .assert_code(0);
+
+    let dump = sandbox.run(&["telemetry", "dump"]);
+    dump.assert_code(0);
+    let sentinels = [
+        title,
+        rule,
+        rationale,
+        author,
+        matcher,
+        exemplar_snippet,
+        exemplar_note,
+        exemplar_language,
+        source_adapter,
+        source_ref,
+        created_at,
+        updated_at,
+        activated_at,
+        project_scope,
+        glob_scope,
+        repo_directory,
+        remote,
+        branch,
+        finding_path,
+        finding_detail,
+        search,
+        &learning_id,
+        &audit_id,
+        &finding_id,
+    ];
+    for sentinel in sentinels {
+        assert!(
+            !dump.stdout.contains(sentinel),
+            "telemetry leaked sentinel {sentinel}: {}",
+            dump.stdout
+        );
+    }
+}
+
+#[test]
+fn matcher_telemetry_distinguishes_hit_miss_and_unevaluable() {
+    let sandbox = Sandbox::new();
+    sandbox.run(&["telemetry", "on", "--yes"]).assert_code(0);
+    for (title, pattern) in [("hit", "changed"), ("miss", "absent"), ("bad", "(")] {
+        let output = sandbox.run(&[
+            "record",
+            "--title",
+            title,
+            "--rule",
+            "rule",
+            "--rationale",
+            "why",
+            "--activate",
+            "--matcher-kind",
+            "regex",
+            "--matcher",
+            pattern,
+        ]);
+        output.assert_code(0);
+    }
+    let root = sandbox.repo("matcher-metrics", Some("https://github.com/owner/repo.git"));
+    std::fs::write(root.join("a.rs"), "fn main() { changed(); }\n").unwrap();
+    sandbox.run_at(&root, &["audit"]).assert_code(0);
+
+    let dump = sandbox.run(&["telemetry", "dump"]);
+    let dump: writ_core::TelemetryDump = serde_json::from_str(&dump.stdout).unwrap();
+    for label in ["hit", "miss", "unevaluable"] {
+        assert!(
+            dump.counters.iter().any(|row| {
+                row.metric == "matcher_result" && row.label == label && row.count == 1
+            })
+        );
     }
 }
 
@@ -1160,6 +1656,7 @@ const EVERY_SUBCOMMAND: &[&[&str]] = &[
     &["archive", "01234567-89ab-7def-8000-000000000000"],
     &["ui", "--no-open"],
     &["mcp"],
+    &["telemetry", "show"],
 ];
 
 #[test]
