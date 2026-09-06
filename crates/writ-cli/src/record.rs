@@ -4,8 +4,8 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 
 use writ_core::{
-    Config, Error, ExemplarKind, MatcherKind, NearMatch, NewExemplar, NewLearning, Recorded,
-    Result, Scope, SourceKind, Status, Store, parse_jsonl,
+    Config, Error, ExemplarKind, MatcherKind, NewExemplar, NewLearning, Recorded, Result, Scope,
+    SourceKind, Status, Store, parse_jsonl,
 };
 
 use crate::context::{read_snippet, resolve_author};
@@ -98,10 +98,6 @@ pub struct Args {
     #[arg(long)]
     json: bool,
 
-    /// Write despite a near-match block. No effect in MVP
-    #[arg(long)]
-    force: bool,
-
     /// Attach to an existing learning instead of creating one
     #[arg(long, value_name = "ID")]
     reinforce: Option<String>,
@@ -122,14 +118,8 @@ pub fn run(args: &Args, db: &Path, config: &Config) -> Result<()> {
 /// The MCP tool calls this, so the two surfaces cannot validate or store
 /// one learning differently. Spec section 9.1.
 pub fn execute(args: &Args, db: &Path, config: &Config) -> Result<Vec<Recorded>> {
-    // `--force` is accepted so the flag exists the day `block_above` is
-    // calibrated. Nothing refuses a write while block_above is false, so
-    // there is nothing for it to override. Spec section 7.3.
-    let _ = args.force;
-
     let status = args.requested_status()?;
     let exemplars = args.exemplars()?;
-    let warn_top_n = config.dedupe.warn_top_n;
     let mut store = Store::open(db)?;
 
     let written = if let Some(id) = &args.reinforce {
@@ -141,7 +131,7 @@ pub fn execute(args: &Args, db: &Path, config: &Config) -> Result<Vec<Recorded>>
             learning.status = learning.status.or(status);
             learning.author = learning.author.clone().or_else(|| author.clone());
         }
-        store.record_many(&learnings, warn_top_n)?
+        store.record_many(&learnings)?
     } else {
         let mut learning = NewLearning::new(
             args.title.clone().unwrap_or_default(),
@@ -160,7 +150,7 @@ pub fn execute(args: &Args, db: &Path, config: &Config) -> Result<Vec<Recorded>>
         learning.status = status;
         learning.author = resolve_author(config);
         learning.source_kind = Some(SourceKind::Manual);
-        vec![store.record(&learning, warn_top_n)?]
+        vec![store.record(&learning)?]
     };
 
     Ok(written)
@@ -265,26 +255,8 @@ fn report(written: &[Recorded], format: Format) -> Result<()> {
                     "recorded"
                 };
                 let _ = writeln!(out, "{verb} {}", record.id);
-                warn_near_matches(&record.near_matches);
             }
         }
     }
     Ok(())
-}
-
-/// MVP warns and always writes. The warning is not the result, so it goes
-/// to stderr and leaves stdout parseable. Spec section 7.3.
-fn warn_near_matches(matches: &[NearMatch]) {
-    for near in matches {
-        eprintln!(
-            "writ: near match {} {:?} ({}, bm25 {:.2})",
-            near.id,
-            near.title,
-            near.status.as_str(),
-            near.score
-        );
-    }
-    if !matches.is_empty() {
-        eprintln!("writ: recorded anyway. Use --reinforce ID to attach to one of these instead");
-    }
 }

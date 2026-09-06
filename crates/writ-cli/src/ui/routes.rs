@@ -1,6 +1,6 @@
 use axum::Router;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use rust_embed::RustEmbed;
@@ -49,9 +49,10 @@ async fn root(State(state): State<AppState>) -> Response {
     )
 }
 
-async fn inbox(State(state): State<AppState>) -> Response {
+async fn inbox(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match inbox::render(&state) {
-        Ok(body) => layout::render(&state, "Inbox", &body),
+        Ok(body) if layout::is_htmx(&headers) => layout::fragment(body.as_str()),
+        Ok(body) => layout::render(&state, "Inbox", body.as_str()),
         Err(error) => layout::error_response(error),
     }
 }
@@ -66,6 +67,7 @@ struct CollectionQuery {
 
 async fn collection(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<CollectionQuery>,
 ) -> Response {
     match collection::render(
@@ -75,14 +77,16 @@ async fn collection(
         query.dir.as_deref(),
         query.status.as_deref(),
     ) {
-        Ok(body) => layout::render(&state, "Collection", &body),
+        Ok(body) if layout::is_htmx(&headers) => layout::fragment(body.as_str()),
+        Ok(body) => layout::render(&state, "Collection", body.as_str()),
         Err(error) => layout::error_response(error),
     }
 }
 
-async fn health(State(state): State<AppState>) -> Response {
+async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match health::render(&state) {
-        Ok(body) => layout::render(&state, "Health", &body),
+        Ok(body) if layout::is_htmx(&headers) => layout::fragment(body.as_str()),
+        Ok(body) => layout::render(&state, "Health", body.as_str()),
         Err(error) => layout::error_response(error),
     }
 }

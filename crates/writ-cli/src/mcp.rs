@@ -156,12 +156,6 @@ const RECORD_ARGS: &[ToolArg] = &[
         kind: Kind::Text,
         about: "Attach to an existing learning id instead of creating one",
     },
-    ToolArg {
-        name: "force",
-        flag: "force",
-        kind: Kind::Flag,
-        about: "Write despite a near-match block. No effect while block_above is false",
-    },
 ];
 
 /// Spec section 5, the `writ audit` row.

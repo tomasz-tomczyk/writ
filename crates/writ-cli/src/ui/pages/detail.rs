@@ -1,12 +1,16 @@
 use axum::Form;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use writ_core::{Error, ExemplarKind, LearningUpdate, NewExemplar, Scope, Status};
 
 use crate::ui::AppState;
+use crate::ui::pages::health;
 use crate::ui::pages::layout;
 use crate::ui::pages::layout::{escape, with_store};
+
+/// The element every Detail action swaps.
+const SWAP: &str = r##" hx-target="#detail-body" hx-swap="outerHTML""##;
 
 pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
     with_store(state, |store| {
@@ -19,9 +23,9 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
         let good_snippet = good.map(|e| e.snippet.as_str()).unwrap_or("");
         let bad_snippet = bad.map(|e| e.snippet.as_str()).unwrap_or("");
 
-        let mut html = String::new();
+        let mut html = String::from(r#"<div id="detail-body">"#);
         html.push_str(&format!(
-            r#"<form method="post" action="/learnings/{id}" class="detail">"#,
+            r#"<form method="post" action="/learnings/{id}" hx-post="/learnings/{id}"{SWAP} class="detail">"#,
             id = escape(id)
         ));
         html.push_str("<div class=\"field\">");
@@ -115,9 +119,9 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
         html.push_str("</div>");
         html.push_str("</form>");
 
+        let archive = format!("/learnings/{}/archive", escape(id));
         html.push_str(&format!(
-            "<form method=\"post\" action=\"/learnings/{}/archive\" class=\"danger-form\">",
-            escape(id)
+            "<form method=\"post\" action=\"{archive}\" hx-post=\"{archive}\"{SWAP} class=\"danger-form\">"
         ));
         html.push_str("<button type=\"submit\" class=\"danger\">Archive</button>");
         html.push_str("</form>");
@@ -146,14 +150,14 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
                     escape(finding.outcome.as_str())
                 ));
                 html.push_str("<td class=\"actions\">");
+                let reject = format!("/findings/{}/reject", escape(&finding.id));
                 html.push_str(&format!(
-                    "<form method=\"post\" action=\"/findings/{}/reject\"><button type=\"submit\">Reject</button></form>",
-                    escape(&finding.id)
+                    "<form method=\"post\" action=\"{reject}\" hx-post=\"{reject}\"{SWAP}><button type=\"submit\">Reject</button></form>"
                 ));
                 if finding.path.is_some() {
+                    let open = format!("/findings/{}/open", escape(&finding.id));
                     html.push_str(&format!(
-                        "<form method=\"post\" action=\"/findings/{}/open\"><button type=\"submit\">Open</button></form>",
-                        escape(&finding.id)
+                        "<form method=\"post\" action=\"{open}\" hx-post=\"{open}\"{SWAP}><button type=\"submit\">Open</button></form>"
                     ));
                 }
                 html.push_str("</td></tr>");
@@ -161,6 +165,7 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
             html.push_str("</tbody></table>");
         }
 
+        html.push_str("</div>");
         Ok(html)
     })
 }
@@ -180,9 +185,14 @@ pub struct SaveForm {
     action: Option<String>,
 }
 
-pub async fn get(Path(id): Path<String>, State(state): State<AppState>) -> Response {
+pub async fn get(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     match render(&state, &id) {
-        Ok(body) => layout::render(&state, "Detail", &body),
+        Ok(body) if layout::is_htmx(&headers) => layout::fragment(body.as_str()),
+        Ok(body) => layout::render(&state, "Detail", body.as_str()),
         Err(error) => layout::error_response(error),
     }
 }
@@ -190,6 +200,7 @@ pub async fn get(Path(id): Path<String>, State(state): State<AppState>) -> Respo
 pub async fn post(
     Path(id): Path<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(form): Form<SaveForm>,
 ) -> Response {
     let result = with_store(&state, |store| {
@@ -201,14 +212,40 @@ pub async fn post(
         Ok(())
     });
     match result {
+        Ok(()) if layout::is_htmx(&headers) => match render(&state, &id) {
+            Ok(body) => layout::fragment(body.as_str()),
+            Err(error) => layout::error_response(error),
+        },
         Ok(()) => redirect(&format!("/learnings/{id}")),
         Err(error) => layout::error_response(error),
     }
 }
 
-pub async fn archive(Path(id): Path<String>, State(state): State<AppState>) -> Response {
-    match with_store(&state, |store| store.set_status(&id, Status::Archived)) {
-        Ok(()) => redirect("/collection"),
+/// Archive, from either Health or Detail.
+///
+/// One route serves both screens, so the fragment to send back is the one
+/// htmx names in `HX-Target`. Without htmx the redirect is unchanged.
+pub async fn archive(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = with_store(&state, |store| store.set_status(&id, Status::Archived)) {
+        return layout::error_response(error);
+    }
+    if !layout::is_htmx(&headers) {
+        return redirect("/collection");
+    }
+    let target = headers
+        .get("hx-target")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let body = match target {
+        "detail-body" => render(&state, &id),
+        _ => health::render(&state),
+    };
+    match body {
+        Ok(body) => layout::fragment(body.as_str()),
         Err(error) => layout::error_response(error),
     }
 }

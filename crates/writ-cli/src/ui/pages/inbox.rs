@@ -1,7 +1,10 @@
-use writ_core::{Error, ExemplarKind, ListFilter, NearMatch, Status};
+use writ_core::{Error, ExemplarKind, ListFilter, Status};
 
 use crate::ui::AppState;
 use crate::ui::pages::layout::{escape, with_store};
+
+/// The element every Inbox action swaps.
+const SWAP: &str = r##" hx-target="#inbox-list" hx-swap="outerHTML""##;
 
 /// Render the Inbox page body.
 pub fn render(state: &AppState) -> Result<String, Error> {
@@ -11,21 +14,27 @@ pub fn render(state: &AppState) -> Result<String, Error> {
             ..Default::default()
         })?;
 
+        // Merge needs a target the author names. Nothing guesses one:
+        // spec section 7.3 removed the near-match check, and this is the
+        // same principle as `--reinforce ID`.
+        let mut targets = store.list(&ListFilter {
+            status: Some(Status::Active),
+            ..Default::default()
+        })?;
+        targets.sort_by(|left, right| left.title.cmp(&right.title));
+
+        let mut html = String::from(r#"<div class="inbox" id="inbox-list">"#);
+
         if proposed.is_empty() {
-            return Ok(
-                r#"<div class="shell empty">Inbox is empty. Every proposal is curated.</div>"#
-                    .into(),
+            html.push_str(
+                r#"<div class="shell empty">Inbox is empty. Every proposal is curated.</div>"#,
             );
+            html.push_str("</div>");
+            return Ok(html);
         }
 
-        let mut html = String::from(r#"<div class="inbox">"#);
         for learning in proposed {
             let exemplars = store.exemplars_of(&learning.id)?;
-            let near = store.near_matches(
-                &format!("{} {}", learning.title, learning.rule),
-                state.config.dedupe.warn_top_n,
-            )?;
-            let near: Vec<NearMatch> = near.into_iter().filter(|m| m.id != learning.id).collect();
 
             html.push_str("<article class=\"proposal\">");
             html.push_str(&format!("<h2>{}</h2>", escape(&learning.title)));
@@ -64,33 +73,34 @@ pub fn render(state: &AppState) -> Result<String, Error> {
                 html.push_str("</div>");
             }
 
-            if !near.is_empty() {
+            if !targets.is_empty() {
+                let action = format!("/inbox/{}/merge", escape(&learning.id));
                 html.push_str(&format!(
-                    "<form method=\"post\" action=\"/inbox/{}/merge\" class=\"merge\">",
-                    escape(&learning.id)
+                    "<form method=\"post\" action=\"{action}\" hx-post=\"{action}\"{SWAP} class=\"merge\">"
                 ));
-                html.push_str("<fieldset><legend>Near matches</legend>");
-                for m in near {
+                html.push_str(
+                    "<label>Merge into <select name=\"target_id\" required><option value=\"\">Choose a learning…</option>",
+                );
+                for target in &targets {
                     html.push_str(&format!(
-                        "<label class=\"near-match\"><input type=\"radio\" name=\"target_id\" value=\"{}\" required> {} <span class=\"chip\">{}</span></label>",
-                        escape(&m.id),
-                        escape(&m.title),
-                        escape(m.status.as_str())
+                        "<option value=\"{}\">{}</option>",
+                        escape(&target.id),
+                        escape(&target.title)
                     ));
                 }
-                html.push_str("</fieldset>");
-                html.push_str("<button type=\"submit\">Merge into selected</button>");
+                html.push_str("</select></label>");
+                html.push_str("<button type=\"submit\">Merge</button>");
                 html.push_str("</form>");
             }
 
             html.push_str("<div class=\"actions\">");
+            let approve = format!("/inbox/{}/approve", escape(&learning.id));
             html.push_str(&format!(
-                "<form method=\"post\" action=\"/inbox/{}/approve\"><button type=\"submit\" class=\"primary\">Approve</button></form>",
-                escape(&learning.id)
+                "<form method=\"post\" action=\"{approve}\" hx-post=\"{approve}\"{SWAP}><button type=\"submit\" class=\"primary\">Approve</button></form>"
             ));
+            let reject = format!("/inbox/{}/reject", escape(&learning.id));
             html.push_str(&format!(
-                "<form method=\"post\" action=\"/inbox/{}/reject\"><button type=\"submit\" class=\"danger\">Reject</button></form>",
-                escape(&learning.id)
+                "<form method=\"post\" action=\"{reject}\" hx-post=\"{reject}\"{SWAP}><button type=\"submit\" class=\"danger\">Reject</button></form>"
             ));
             html.push_str(&format!(
                 "<a href=\"/learnings/{}\" class=\"button\">Edit</a>",

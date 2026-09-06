@@ -18,8 +18,6 @@ use crate::error::{Error, Result};
 pub struct Config {
     /// `[audit]`. Read by `writ audit`.
     pub audit: Audit,
-    /// `[dedupe]`. Read by `writ record`.
-    pub dedupe: Dedupe,
     /// `[identity]`. Read by `writ record` and `writ export`.
     pub identity: Identity,
     /// `[ui]`. Read by `writ ui`.
@@ -34,16 +32,6 @@ pub struct Audit {
     pub max_rules: u32,
     /// The most characters of rule text one audit prompt may carry.
     pub max_chars: u32,
-}
-
-/// `[dedupe]`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Dedupe {
-    /// How many near matches a write reports.
-    pub warn_top_n: u32,
-    /// The bm25 cutoff above which a write is refused.
-    pub block_above: BlockAbove,
 }
 
 /// `[identity]`.
@@ -66,35 +54,11 @@ pub struct Ui {
     pub editor_cmd: String,
 }
 
-/// `block_above` is either off or a bm25 cutoff.
-///
-/// bm25 in SQLite is negative, and more negative is a better match, so the
-/// cutoff is a negative number and the comparison reads backwards from the
-/// intuition. Spec section 7.3. MVP ships `false`, and there is no
-/// calibrated number to default to.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(untagged)]
-pub enum BlockAbove {
-    /// `block_above = false`. No write is ever refused.
-    Off(bool),
-    /// `block_above = -8.5`. A bm25 score.
-    Score(f64),
-}
-
 impl Default for Audit {
     fn default() -> Self {
         Self {
             max_rules: 40,
             max_chars: 20_000,
-        }
-    }
-}
-
-impl Default for Dedupe {
-    fn default() -> Self {
-        Self {
-            warn_top_n: 3,
-            block_above: BlockAbove::Off(false),
         }
     }
 }
@@ -129,12 +93,6 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.dedupe.block_above == BlockAbove::Off(true) {
-            return Err(Error::Config {
-                message: "block_above = true names no cutoff. Give a bm25 score, or false"
-                    .to_string(),
-            });
-        }
         if self.audit.max_rules == 0 || self.audit.max_chars == 0 {
             return Err(Error::Config {
                 message: "max_rules and max_chars must be greater than zero".to_string(),
@@ -163,10 +121,6 @@ mod tests {
 max_rules = 40
 max_chars = 20000
 
-[dedupe]
-warn_top_n  = 3
-block_above = false
-
 [identity]
 author       = ""
 share_author = true
@@ -183,21 +137,29 @@ editor_cmd = "cursor -g {path}:{line}"
     }
 
     #[test]
+    fn the_dedupe_block_is_gone_and_is_now_an_unknown_key() {
+        // Spec section 7.3: nothing detects duplicates, so the block that
+        // configured it must not be silently accepted either.
+        let error = Config::parse("[dedupe]\nwarn_top_n = 3\n").unwrap_err();
+        assert!(matches!(error, Error::Config { .. }), "{error}");
+    }
+
+    #[test]
     fn an_empty_file_is_the_defaults() {
         assert_eq!(Config::parse("").unwrap(), Config::default());
     }
 
     #[test]
     fn a_partial_file_keeps_the_other_defaults() {
-        let config = Config::parse("[dedupe]\nwarn_top_n = 7\n").unwrap();
-        assert_eq!(config.dedupe.warn_top_n, 7);
-        assert_eq!(config.audit.max_rules, 40);
+        let config = Config::parse("[audit]\nmax_rules = 7\n").unwrap();
+        assert_eq!(config.audit.max_rules, 7);
+        assert_eq!(config.audit.max_chars, 20_000);
         assert!(config.identity.share_author);
     }
 
     #[test]
     fn malformed_toml_names_the_real_cause() {
-        let error = Config::parse("[dedupe\nwarn_top_n = 3").unwrap_err();
+        let error = Config::parse("[audit\nmax_rules = 3").unwrap_err();
         assert!(matches!(error, Error::Config { .. }), "{error}");
     }
 
@@ -209,32 +171,8 @@ editor_cmd = "cursor -g {path}:{line}"
 
     #[test]
     fn a_wrong_type_is_refused() {
-        let error = Config::parse("[dedupe]\nwarn_top_n = \"three\"\n").unwrap_err();
+        let error = Config::parse("[audit]\nmax_rules = \"three\"\n").unwrap_err();
         assert!(matches!(error, Error::Config { .. }), "{error}");
-    }
-
-    #[test]
-    fn block_above_takes_false_or_a_score() {
-        assert_eq!(
-            Config::parse("[dedupe]\nblock_above = false\n")
-                .unwrap()
-                .dedupe
-                .block_above,
-            BlockAbove::Off(false)
-        );
-        assert_eq!(
-            Config::parse("[dedupe]\nblock_above = -8.5\n")
-                .unwrap()
-                .dedupe
-                .block_above,
-            BlockAbove::Score(-8.5)
-        );
-    }
-
-    #[test]
-    fn block_above_true_names_no_cutoff() {
-        let error = Config::parse("[dedupe]\nblock_above = true\n").unwrap_err();
-        assert!(error.to_string().contains("bm25"), "{error}");
     }
 
     #[test]

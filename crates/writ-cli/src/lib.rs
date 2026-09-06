@@ -80,26 +80,24 @@ pub fn dispatch(cli: Cli) -> ExitCode {
         return ExitCode::from(2);
     };
 
+    // The configuration is resolved once, here, for the same reason the
+    // paths are: a subcommand that parses it late, or not at all, runs
+    // against a file the user never approved. `list`, `show` and `archive`
+    // each ignored `--config` entirely until this moved out of the arms.
+    // Spec section 10 and crit #763.
+    let config = match context::load_config(&paths.config) {
+        Ok(config) => config,
+        Err(error) => return fail(&error, Some(&paths.db)),
+    };
+
     let result = match command {
-        Command::Record(args) => match context::load_config(&paths.config) {
-            Ok(config) => record::run(&args, &paths.db, &config).map(|()| ExitCode::SUCCESS),
-            Err(error) => Err(error),
-        },
+        Command::Record(args) => record::run(&args, &paths.db, &config).map(|()| ExitCode::SUCCESS),
         Command::List(args) => list::run(&args, &paths.db).map(|()| ExitCode::SUCCESS),
-        Command::Audit(args) => match context::load_config(&paths.config) {
-            Ok(config) => audit::run(&args, &paths.db, &config),
-            Err(error) => Err(error),
-        },
+        Command::Audit(args) => audit::run(&args, &paths.db, &config),
         Command::Show(args) => inspect::show(&args, &paths.db).map(|()| ExitCode::SUCCESS),
         Command::Archive(args) => inspect::archive(&args, &paths.db).map(|()| ExitCode::SUCCESS),
-        Command::Ui(args) => match context::load_config(&paths.config) {
-            Ok(config) => ui::run(&args, &paths, &config),
-            Err(error) => Err(error),
-        },
-        Command::Mcp(args) => match context::load_config(&paths.config) {
-            Ok(config) => mcp::run(&args, &paths.db, &config),
-            Err(error) => Err(error),
-        },
+        Command::Ui(args) => ui::run(&args, &paths, &config),
+        Command::Mcp(args) => mcp::run(&args, &paths.db, &config),
     };
 
     match result {

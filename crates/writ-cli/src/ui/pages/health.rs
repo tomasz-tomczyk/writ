@@ -7,6 +7,9 @@ use crate::ui::pages::layout::{escape, with_store};
 
 const UNUSED_DAYS: u32 = 90;
 
+/// The element every Health action swaps.
+const SWAP: &str = r##" hx-target="#health-body" hx-swap="outerHTML""##;
+
 struct HealthRow {
     learning: Learning,
     unused: bool,
@@ -47,13 +50,13 @@ pub fn render(state: &AppState) -> Result<String, Error> {
         }
 
         if rows.is_empty() {
-            return Ok(r#"<div class="shell empty">Health is clear. Every active rule has been reached and applied within the last 90 days.</div>"#.into());
+            return Ok(r#"<div id="health-body"><div class="shell empty">Health is clear. Every active rule has been reached and applied within the last 90 days.</div></div>"#.into());
         }
 
         let mut ordered: Vec<HealthRow> = rows.into_values().collect();
         ordered.sort_by(|left, right| left.learning.title.cmp(&right.learning.title));
 
-        let mut html = String::from(r#"<table class="health">"#);
+        let mut html = String::from(r#"<div id="health-body"><table class="health">"#);
         html.push_str("<thead><tr><th>Learning</th><th>Bucket</th><th>Selected</th><th>Applied</th><th></th></tr></thead><tbody>");
         for row in ordered {
             let class = if row.unused && row.never_applied {
@@ -76,18 +79,20 @@ pub fn render(state: &AppState) -> Result<String, Error> {
             ));
             html.push_str(&format!("<td>{}</td>", learning.times_applied));
             html.push_str("<td class=\"actions\">");
+            let archive = format!("/learnings/{}/archive", escape(&learning.id));
             html.push_str(&format!(
-                "<form method=\"post\" action=\"/learnings/{}/archive\"><button type=\"submit\" class=\"danger\">Archive</button></form>",
-                escape(&learning.id)
+                "<form method=\"post\" action=\"{archive}\" hx-post=\"{archive}\"{SWAP}><button type=\"submit\" class=\"danger\">Archive</button></form>"
             ));
             html.push_str(&format!(
                 "<a href=\"/learnings/{}\" class=\"button\">Edit</a>",
                 escape(&learning.id)
             ));
-            html.push_str("<a href=\"/health\" class=\"button keep\">Keep</a>");
+            html.push_str(&format!(
+                "<a href=\"/health\" hx-get=\"/health\"{SWAP} class=\"button keep\">Keep</a>"
+            ));
             html.push_str("</td></tr>");
         }
-        html.push_str("</tbody></table>");
+        html.push_str("</tbody></table></div>");
         Ok(html)
     })
 }

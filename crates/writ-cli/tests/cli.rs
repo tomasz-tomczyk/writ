@@ -289,7 +289,6 @@ fn record_and_list_advertise_every_documented_flag() {
         "--status",
         "--activate",
         "--json",
-        "--force",
         "--reinforce",
         "--format",
     ] {
@@ -735,32 +734,28 @@ fn reinforcing_an_unknown_id_exits_five() {
 }
 
 #[test]
-fn a_near_match_warns_and_the_write_still_happens() {
-    // MVP warns and always writes. Spec section 7.3.
+fn force_is_gone_and_is_now_a_usage_error() {
+    // `--force` only ever bypassed the near-match block. Spec section 7.3
+    // removed the block, so the flag went with it.
     let sandbox = Sandbox::new();
-    sandbox.record(&[]);
-    let output = sandbox
-        .cmd(&[
-            "record",
-            "--title",
-            "prefer sd",
-            "--rule",
-            "use sd",
-            "--rationale",
-            "sed is terse",
-        ])
-        .output()
-        .unwrap();
-    let output = Output::from(output);
-    output.assert_code(0);
-    assert!(output.stderr.contains("near match"), "{}", output.stderr);
-    assert_eq!(sandbox.learnings().as_array().unwrap().len(), 2);
+    let output = sandbox.run(&[
+        "record",
+        "--title",
+        "t",
+        "--rule",
+        "r",
+        "--rationale",
+        "why",
+        "--force",
+    ]);
+    output.assert_code(2);
+    assert_eq!(sandbox.learnings().as_array().unwrap().len(), 0);
 }
 
 #[test]
-fn warn_top_n_zero_turns_the_warning_off() {
+fn no_write_prints_a_near_match_warning() {
+    // Nothing detects duplicates any more. Spec section 7.3.
     let sandbox = Sandbox::new();
-    sandbox.write_config("[dedupe]\nwarn_top_n = 0\n");
     sandbox.record(&[]);
     let output = sandbox.run(&[
         "record",
@@ -773,13 +768,6 @@ fn warn_top_n_zero_turns_the_warning_off() {
     ]);
     output.assert_code(0);
     assert!(!output.stderr.contains("near match"), "{}", output.stderr);
-}
-
-#[test]
-fn force_is_accepted_and_changes_nothing() {
-    let sandbox = Sandbox::new();
-    sandbox.record(&["--force"]);
-    assert_eq!(sandbox.learnings().as_array().unwrap().len(), 1);
 }
 
 // --- author -----------------------------------------------------------
@@ -1151,10 +1139,95 @@ fn a_missing_config_file_is_not_an_error() {
     sandbox.record(&[]);
 }
 
+/// One valid invocation of every subcommand in spec section 5.
+///
+/// The list is here rather than inline in each test so that a new
+/// subcommand cannot quietly skip the config contract: adding a
+/// `Command` variant without adding a row makes the count test fail.
+const EVERY_SUBCOMMAND: &[&[&str]] = &[
+    &[
+        "record",
+        "--title",
+        "t",
+        "--rule",
+        "r",
+        "--rationale",
+        "why",
+    ],
+    &["list"],
+    &["audit"],
+    &["show", "01234567-89ab-7def-8000-000000000000"],
+    &["archive", "01234567-89ab-7def-8000-000000000000"],
+    &["ui", "--no-open"],
+    &["mcp"],
+];
+
+#[test]
+fn every_subcommand_reads_the_config_file() {
+    // crit #763, spec section 10: the configuration is resolved once,
+    // before dispatch. A subcommand that parses it late, or not at all,
+    // runs against a file the user never approved.
+    let sandbox = Sandbox::new();
+    sandbox.write_config("[audit\nmax_rules = 3\n");
+
+    for args in EVERY_SUBCOMMAND {
+        let output = sandbox.run(args);
+        output.assert_code(2);
+        assert!(
+            output.stderr.contains("config.toml"),
+            "`writ {}` ignored a malformed config: {}",
+            args[0],
+            output.stderr
+        );
+    }
+}
+
+#[test]
+fn every_subcommand_refuses_an_unknown_config_key() {
+    // The `[dedupe]` guard belongs at the level where it failed: the
+    // binary, not `Config::parse`. Spec section 7.3.
+    let sandbox = Sandbox::new();
+    sandbox.write_config("[dedupe]\nwarn_top_n = 3\n");
+
+    for args in EVERY_SUBCOMMAND {
+        let output = sandbox.run(args);
+        output.assert_code(2);
+        assert!(
+            output.stderr.contains("dedupe"),
+            "`writ {}` accepted the removed [dedupe] block: {}",
+            args[0],
+            output.stderr
+        );
+    }
+}
+
+#[test]
+fn the_subcommand_list_covers_every_subcommand() {
+    // Guards the two tests above. `writ --help` is the binary's own list,
+    // so a new subcommand shows up here before anyone remembers to add it.
+    let help = String::from_utf8(writ().arg("--help").output().unwrap().stdout).unwrap();
+    let listed: Vec<&str> = help
+        .lines()
+        .skip_while(|line| !line.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|line| line.starts_with("  ") && !line.trim().is_empty())
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .collect();
+
+    for name in &listed {
+        assert!(
+            EVERY_SUBCOMMAND.iter().any(|args| args[0] == *name),
+            "EVERY_SUBCOMMAND is missing `{name}`, so it skips the config contract"
+        );
+    }
+    assert_eq!(listed.len(), EVERY_SUBCOMMAND.len(), "{listed:?}");
+}
+
 #[test]
 fn a_malformed_config_file_names_itself() {
     let sandbox = Sandbox::new();
-    sandbox.write_config("[dedupe\nwarn_top_n = 3\n");
+    sandbox.write_config("[audit\nmax_rules = 3\n");
     let output = sandbox.run(&[
         "record",
         "--title",
@@ -1175,7 +1248,7 @@ fn a_malformed_config_file_names_itself() {
 #[test]
 fn a_misspelled_config_key_is_refused_rather_than_ignored() {
     let sandbox = Sandbox::new();
-    sandbox.write_config("[dedupe]\nwarn_top = 3\n");
+    sandbox.write_config("[audit]\nmax_rulez = 3\n");
     let output = sandbox.run(&[
         "record",
         "--title",

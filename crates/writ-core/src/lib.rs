@@ -22,7 +22,7 @@ pub use audit::{
     AuditScope, Budget, Candidate, FindingsInput, IncomingFinding, Ingested, Outcome, Outcomes,
     Selected, parse_findings, rank, render_prompt, rule_block,
 };
-pub use config::{Audit, BlockAbove, Config, Dedupe, Identity, Ui};
+pub use config::{Audit, Config, Identity, Ui};
 pub use diff::{Diff, language_of};
 pub use error::{Error, Result};
 pub use glob::glob_match;
@@ -30,7 +30,7 @@ pub use id::new_id;
 pub use jsonl::parse_jsonl;
 pub use migrate::SCHEMA_VERSION;
 pub use model::{
-    Exemplar, ExemplarKind, Finding, Learning, LearningUpdate, ListFilter, MatcherKind, NearMatch,
+    Exemplar, ExemplarKind, Finding, Learning, LearningUpdate, ListFilter, MatcherKind,
     NewExemplar, NewLearning, Recorded, Scope, ScopeKind, SourceKind, Status,
 };
 pub use paths::{Env, Paths, resolve_paths};

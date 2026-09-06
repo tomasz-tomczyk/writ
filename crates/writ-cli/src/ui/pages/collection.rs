@@ -7,6 +7,10 @@ use crate::ui::pages::layout::{escape, with_store};
 
 const UNUSED_DAYS: u32 = 90;
 
+/// The element every Collection control swaps. `hx-push-url` keeps the
+/// address bar honest, so a reload lands on the same sort and filter.
+const SWAP: &str = r##" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true""##;
+
 pub fn render(
     state: &AppState,
     q: Option<&str>,
@@ -60,14 +64,14 @@ pub fn render(
             .map(|l| l.id)
             .collect();
 
-        let mut html = String::new();
+        let mut html = String::from(r#"<div id="collection-body">"#);
         html.push_str(r#"<div class="collection-controls">"#);
         html.push_str(&search_form(q));
         html.push_str(&status_chips(status_filter));
         html.push_str("</div>");
 
         if rows.is_empty() {
-            html.push_str(r#"<div class="shell empty">No learnings match.</div>"#);
+            html.push_str(r#"<div class="shell empty">No learnings match.</div></div>"#);
             return Ok(html);
         }
 
@@ -120,7 +124,7 @@ pub fn render(
             ));
             html.push_str("</tr>");
         }
-        html.push_str("</tbody></table>");
+        html.push_str("</tbody></table></div>");
         Ok(html)
     })
 }
@@ -128,7 +132,7 @@ pub fn render(
 fn search_form(q: Option<&str>) -> String {
     let value = q.map_or(String::new(), escape);
     format!(
-        r#"<form method="get" action="/collection" class="search">
+        r#"<form method="get" action="/collection" hx-get="/collection"{SWAP} class="search">
              <input type="search" name="q" value="{}" placeholder="Search…">
              <button type="submit">Search</button>
            </form>"#,
@@ -151,8 +155,7 @@ fn status_chips(current: Option<&str>) -> String {
         };
         let class = if selected { "chip active" } else { "chip" };
         html.push_str(&format!(
-            "<a href=\"{}\" class=\"{}\">{}</a>",
-            href, class, label
+            "<a href=\"{href}\" hx-get=\"{href}\"{SWAP} class=\"{class}\">{label}</a>"
         ));
     }
     html.push_str("</div>");
@@ -176,7 +179,8 @@ fn sort_link(label: &str, field: &str, sort: Option<&str>, dir: &str, q: Option<
         ""
     };
     format!(
-        "<th><a href=\"{}\">{}{}</a></th>",
+        "<th><a href=\"{}\" hx-get=\"{}\"{SWAP}>{}{}</a></th>",
+        href,
         href,
         escape(label),
         arrow

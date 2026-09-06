@@ -28,7 +28,7 @@ mise run build
 ## Layout
 
 ```
-crates/writ-core/   storage, selection, budget, dedupe.
+crates/writ-core/   storage, selection, budget.
                     Knows nothing about a terminal, socket, or HTTP.
 crates/writ-cli/    the `writ` binary. The only crate that does I/O.
 plugins/claude-code/  the /record skill and the Stop hook.

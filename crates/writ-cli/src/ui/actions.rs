@@ -1,22 +1,62 @@
 use axum::Form;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use writ_core::{Error, Status};
 
 use crate::ui::AppState;
 use crate::ui::pages::layout::{error_response, with_store};
+use crate::ui::pages::{detail, inbox, layout};
 
-pub async fn approve(Path(id): Path<String>, State(state): State<AppState>) -> Response {
-    match with_store(&state, |store| store.set_status(&id, Status::Active)) {
-        Ok(()) => redirect("/inbox"),
+/// Answer an Inbox action.
+///
+/// htmx gets the list fragment plus an out-of-band badge, so the row and
+/// the navigation count move together. Anything else gets the redirect a
+/// plain form POST expects, so the page still works without htmx.
+fn inbox_reply(state: &AppState, headers: &HeaderMap) -> Response {
+    if !layout::is_htmx(headers) {
+        return redirect("/inbox");
+    }
+    let body = match inbox::render(state) {
+        Ok(body) => body,
+        Err(error) => return error_response(error),
+    };
+    let badge = match layout::inbox_badge_oob(state) {
+        Ok(badge) => badge,
+        Err(error) => return error_response(error),
+    };
+    layout::fragment(&format!("{body}{badge}"))
+}
+
+/// Answer a Detail action, the same way.
+fn detail_reply(state: &AppState, headers: &HeaderMap, learning_id: &str) -> Response {
+    if !layout::is_htmx(headers) {
+        return redirect(&format!("/learnings/{learning_id}"));
+    }
+    match detail::render(state, learning_id) {
+        Ok(body) => layout::fragment(body.as_str()),
         Err(error) => error_response(error),
     }
 }
 
-pub async fn reject_proposal(Path(id): Path<String>, State(state): State<AppState>) -> Response {
+pub async fn approve(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    match with_store(&state, |store| store.set_status(&id, Status::Active)) {
+        Ok(()) => inbox_reply(&state, &headers),
+        Err(error) => error_response(error),
+    }
+}
+
+pub async fn reject_proposal(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     match with_store(&state, |store| store.set_status(&id, Status::Archived)) {
-        Ok(()) => redirect("/inbox"),
+        Ok(()) => inbox_reply(&state, &headers),
         Err(error) => error_response(error),
     }
 }
@@ -29,6 +69,7 @@ pub struct MergeForm {
 pub async fn merge(
     Path(id): Path<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(form): Form<MergeForm>,
 ) -> Response {
     let result = with_store(&state, |store| {
@@ -46,12 +87,16 @@ pub async fn merge(
         store.set_status(&id, Status::Archived)
     });
     match result {
-        Ok(()) => redirect("/inbox"),
+        Ok(()) => inbox_reply(&state, &headers),
         Err(error) => error_response(error),
     }
 }
 
-pub async fn reject_finding(Path(id): Path<String>, State(state): State<AppState>) -> Response {
+pub async fn reject_finding(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     let result = with_store(&state, |store| {
         let finding = store.finding(&id)?;
         let learning_id = finding.learning_id;
@@ -59,12 +104,16 @@ pub async fn reject_finding(Path(id): Path<String>, State(state): State<AppState
         Ok(learning_id)
     });
     match result {
-        Ok(learning_id) => redirect(&format!("/learnings/{learning_id}")),
+        Ok(learning_id) => detail_reply(&state, &headers, &learning_id),
         Err(error) => error_response(error),
     }
 }
 
-pub async fn open_editor(Path(id): Path<String>, State(state): State<AppState>) -> Response {
+pub async fn open_editor(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     let result = with_store(&state, |store| {
         let finding = store.finding(&id)?;
         let learning_id = finding.learning_id;
@@ -81,7 +130,7 @@ pub async fn open_editor(Path(id): Path<String>, State(state): State<AppState>) 
         Ok(learning_id)
     });
     match result {
-        Ok(learning_id) => redirect(&format!("/learnings/{learning_id}")),
+        Ok(learning_id) => detail_reply(&state, &headers, &learning_id),
         Err(error) => error_response(error),
     }
 }

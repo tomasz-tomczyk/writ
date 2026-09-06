@@ -65,6 +65,12 @@ nav .badge {
   margin-left: 0.35rem;
 }
 
+/* The badge element is always in the markup so an out-of-band swap has a
+   target. An empty count is a hidden badge, not a missing one. */
+nav .badge:empty {
+  display: none;
+}
+
 main {
   max-width: 1100px;
   margin: var(--gap) auto;
@@ -459,4 +465,35 @@ pre code {
 
 .muted {
   color: var(--muted);
+}
+
+/* Two servers on one machine read different files and look identical.
+   The footer names the store. Spec section 9.4. */
+footer.store {
+  max-width: 1100px;
+  margin: calc(var(--gap) * 2) auto var(--gap);
+  padding: var(--gap);
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.8rem;
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+footer.store .label {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.7rem;
+}
+
+footer.store code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+
+/* htmx marks the element it is swapping. A short fade says the screen
+   changed without a reload. */
+.htmx-swapping {
+  opacity: 0.5;
 }

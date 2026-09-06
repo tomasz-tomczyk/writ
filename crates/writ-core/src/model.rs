@@ -621,20 +621,6 @@ pub struct Learning {
     pub scopes: Vec<Scope>,
 }
 
-/// One near match the dedupe path found. Spec section 7.3.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct NearMatch {
-    /// The existing learning's id.
-    pub id: String,
-    /// Its title, so the warning is readable.
-    pub title: String,
-    /// Its status, so an archived match is recognizable.
-    pub status: Status,
-    /// The bm25 score. It is negative, and more negative is a closer
-    /// match. Spec section 7.3 names this as the second silent trap.
-    pub score: f64,
-}
-
 /// What a write did, so the caller can report it. crit #446: every write
 /// reports what it wrote.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -643,8 +629,6 @@ pub struct Recorded {
     pub id: String,
     /// Whether an existing learning was reinforced instead of created.
     pub reinforced: bool,
-    /// The closest existing learnings. MVP warns and always writes.
-    pub near_matches: Vec<NearMatch>,
 }
 
 /// The filters `writ list` accepts.

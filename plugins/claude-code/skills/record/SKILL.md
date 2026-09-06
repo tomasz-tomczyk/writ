@@ -76,6 +76,6 @@ after the file moves or the branch goes.
 ## After writing
 
 Say the id back to the user, and say whether it is active or waiting in
-the Inbox. If writ warns about a near match on stderr, tell the user
-which learning it found and offer `writ record --reinforce ID` instead
-of a second row that says the same thing.
+the Inbox. Nothing detects duplicates, so when the user says the lesson
+is already recorded, use `writ record --reinforce ID` with the id they
+name instead of writing a second row that says the same thing.

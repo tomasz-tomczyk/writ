@@ -10,7 +10,7 @@ use crate::fts;
 use crate::id::new_id;
 use crate::migrate;
 use crate::model::{
-    Exemplar, ExemplarKind, Finding, Learning, LearningUpdate, ListFilter, MatcherKind, NearMatch,
+    Exemplar, ExemplarKind, Finding, Learning, LearningUpdate, ListFilter, MatcherKind,
     NewExemplar, NewLearning, Recorded, Scope, ScopeKind, SourceKind, Status,
 };
 
@@ -62,31 +62,22 @@ impl Store {
     }
 
     /// Write one learning.
-    ///
-    /// `warn_top_n` comes from `[dedupe] warn_top_n`. MVP warns and always
-    /// writes, so the near matches are reported, never obeyed. Spec 7.3.
-    pub fn record(&mut self, learning: &NewLearning, warn_top_n: u32) -> Result<Recorded> {
-        Ok(self
-            .record_many(std::slice::from_ref(learning), warn_top_n)?
-            .remove(0))
+    pub fn record(&mut self, learning: &NewLearning) -> Result<Recorded> {
+        Ok(self.record_many(std::slice::from_ref(learning))?.remove(0))
     }
 
     /// Write many learnings in one transaction.
     ///
     /// One transaction, so a stream either lands whole or not at all and a
     /// re-run cannot duplicate half of it. See `jsonl`.
-    pub fn record_many(
-        &mut self,
-        learnings: &[NewLearning],
-        warn_top_n: u32,
-    ) -> Result<Vec<Recorded>> {
+    pub fn record_many(&mut self, learnings: &[NewLearning]) -> Result<Vec<Recorded>> {
         for learning in learnings {
             learning.validate()?;
         }
         let tx = self.conn.transaction()?;
         let mut written = Vec::with_capacity(learnings.len());
         for learning in learnings {
-            written.push(insert_learning(&tx, learning, warn_top_n)?);
+            written.push(insert_learning(&tx, learning)?);
         }
         tx.commit()?;
         Ok(written)
@@ -185,7 +176,6 @@ impl Store {
         Ok(Recorded {
             id: id.to_string(),
             reinforced: true,
-            near_matches: Vec::new(),
         })
     }
 
@@ -207,14 +197,6 @@ impl Store {
         set_status(&tx, id, status)?;
         tx.commit()?;
         Ok(())
-    }
-
-    /// The learnings closest to this text, best match first.
-    ///
-    /// bm25 is negative in SQLite and more negative is a better match, so
-    /// the ordering is ascending. Spec section 7.3 names this trap.
-    pub fn near_matches(&self, text: &str, limit: u32) -> Result<Vec<NearMatch>> {
-        near_matches(&self.conn, text, limit)
     }
 
     /// Read learnings back, filtered. This is `writ list`.
@@ -728,21 +710,7 @@ impl<T> OptionalRow<T> for rusqlite::Result<T> {
     }
 }
 
-fn insert_learning(
-    tx: &Transaction<'_>,
-    learning: &NewLearning,
-    warn_top_n: u32,
-) -> Result<Recorded> {
-    let near_matches = if warn_top_n == 0 {
-        Vec::new()
-    } else {
-        near_matches(
-            tx,
-            &format!("{} {}", learning.title, learning.rule),
-            warn_top_n,
-        )?
-    };
-
+fn insert_learning(tx: &Transaction<'_>, learning: &NewLearning) -> Result<Recorded> {
     let id = new_id();
     let status = learning.effective_status();
     tx.execute(
@@ -789,7 +757,6 @@ fn insert_learning(
     Ok(Recorded {
         id,
         reinforced: false,
-        near_matches,
     })
 }
 
@@ -828,40 +795,6 @@ fn set_status(tx: &Transaction<'_>, id: &str, status: Status) -> Result<()> {
         params![status.as_str(), id],
     )?;
     Ok(())
-}
-
-fn near_matches(conn: &Connection, text: &str, limit: u32) -> Result<Vec<NearMatch>> {
-    let Some(query) = fts::match_any(text) else {
-        return Ok(Vec::new());
-    };
-    let mut stmt = conn.prepare(
-        "SELECT l.id, l.title, l.status, bm25(learnings_fts) AS score
-           FROM learnings_fts
-           JOIN learnings l ON l.rowid = learnings_fts.rowid
-          WHERE learnings_fts MATCH ?1
-          ORDER BY score ASC
-          LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(params![query, limit], |row| {
-        let status: String = row.get(2)?;
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            status,
-            row.get::<_, f64>(3)?,
-        ))
-    })?;
-    let mut matches = Vec::new();
-    for row in rows {
-        let (id, title, status, score) = row?;
-        matches.push(NearMatch {
-            id,
-            title,
-            status: parse_status(&status)?,
-            score,
-        });
-    }
-    Ok(matches)
 }
 
 fn read_learning(row: &Row<'_>) -> rusqlite::Result<Learning> {
@@ -983,7 +916,7 @@ mod tests {
         let mut learning = NewLearning::new(title, "r", "why");
         learning.scopes = scopes.iter().map(|s| s.parse().unwrap()).collect();
         learning.status = Some(Status::Active);
-        store.record(&learning, 0).unwrap().id
+        store.record(&learning).unwrap().id
     }
 
     fn selected_titles(store: &Store, scope: &AuditScope) -> Vec<String> {
@@ -1365,7 +1298,7 @@ mod tests {
     }
 
     fn record(store: &mut Store, learning: &NewLearning) -> String {
-        store.record(learning, 0).unwrap().id
+        store.record(learning).unwrap().id
     }
 
     fn learning_update() -> crate::model::LearningUpdate {
@@ -1634,7 +1567,7 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let good = NewLearning::new("t", "r", "why");
         let bad = NewLearning::new("t", "r", "");
-        let error = store.record_many(&[good, bad], 0).unwrap_err();
+        let error = store.record_many(&[good, bad]).unwrap_err();
         assert!(matches!(error, Error::Validation { .. }), "{error}");
         assert!(store.list(&ListFilter::default()).unwrap().is_empty());
     }
@@ -1681,57 +1614,6 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         let error = store.reinforce("nope", &[], None).unwrap_err();
         assert!(matches!(error, Error::NotFound { .. }), "{error}");
-    }
-
-    #[test]
-    fn a_near_match_is_reported_and_the_write_still_happens() {
-        // MVP warns and always writes. Spec section 7.3.
-        let mut store = Store::open_in_memory().unwrap();
-        record(
-            &mut store,
-            &NewLearning::new("prefer sd", "use sd not sed", "why"),
-        );
-
-        let written = store
-            .record(&NewLearning::new("prefer sd", "use sd not sed", "why"), 3)
-            .unwrap();
-        assert_eq!(written.near_matches.len(), 1);
-        assert!(
-            written.near_matches[0].score < 0.0,
-            "bm25 is negative: {:?}",
-            written.near_matches[0]
-        );
-        assert_eq!(store.list(&ListFilter::default()).unwrap().len(), 2);
-    }
-
-    #[test]
-    fn a_near_match_query_survives_fts5_operator_characters() {
-        // Raw, this title is an FTS5 syntax error. Spec section 7.3.
-        let mut store = Store::open_in_memory().unwrap();
-        let title = r#"no non-empty "x" OR NEAR sd*"#;
-        record(&mut store, &NewLearning::new(title, "r", "why"));
-        let written = store
-            .record(&NewLearning::new(title, "r", "why"), 3)
-            .unwrap();
-        assert_eq!(written.near_matches.len(), 1);
-    }
-
-    #[test]
-    fn near_match_ranking_puts_the_closest_first() {
-        let mut store = Store::open_in_memory().unwrap();
-        record(
-            &mut store,
-            &NewLearning::new("unrelated", "sd appears once", "why"),
-        );
-        record(
-            &mut store,
-            &NewLearning::new("prefer sd", "use sd instead of sed", "why"),
-        );
-
-        let found = store.near_matches("prefer sd instead of sed", 5).unwrap();
-        assert_eq!(found.len(), 2);
-        assert_eq!(found[0].title, "prefer sd");
-        assert!(found[0].score <= found[1].score, "{found:?}");
     }
 
     #[test]
@@ -2069,7 +1951,7 @@ mod tests {
     fn selection_takes_active_learnings_only() {
         let mut store = Store::open_in_memory().unwrap();
         store
-            .record(&NewLearning::new("proposed", "r", "why"), 0)
+            .record(&NewLearning::new("proposed", "r", "why"))
             .unwrap();
         let archived = active(&mut store, "archived", &["global"]);
         store.set_status(&archived, Status::Archived).unwrap();
@@ -2285,7 +2167,7 @@ mod tests {
         let mut learning = NewLearning::new("advisory", "r", "why");
         learning.blocking = false;
         learning.status = Some(Status::Active);
-        let id = store.record(&learning, 0).unwrap().id;
+        let id = store.record(&learning).unwrap().id;
         let audit = store.start_audit("repo", "HEAD", 1, &[]).unwrap();
         let written = store
             .ingest(&FindingsInput {

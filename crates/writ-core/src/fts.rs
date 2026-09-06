@@ -2,9 +2,9 @@
 //!
 //! `MATCH` takes a query language, not a string. `-`, `"`, `*`, `OR` and
 //! `NEAR` are operators there, so passing raw input either raises a syntax
-//! error or quietly searches for something else. Spec section 7.3 names
-//! this as one of the two silent traps in the dedupe path, and it applies
-//! to `writ list --search` in exactly the same way.
+//! error or quietly searches for something else. Spec section 7.3 records
+//! this as one of the two silent traps, and it is what `writ list --search`
+//! has to survive.
 //!
 //! The fix is to tokenize. Everything that is not a letter or a digit
 //! separates two tokens, and each token goes into the query as a quoted
@@ -48,24 +48,6 @@ pub fn match_all(input: &str) -> Option<String> {
     )
 }
 
-/// A query that accepts any term. This is the dedupe near-match.
-///
-/// Near-match wants candidates to rank, not an exact hit, so the terms are
-/// joined with `OR` and `bm25()` decides which are closest.
-pub fn match_any(input: &str) -> Option<String> {
-    let terms = terms(input);
-    if terms.is_empty() {
-        return None;
-    }
-    Some(
-        terms
-            .iter()
-            .map(|term| quote(term))
-            .collect::<Vec<_>>()
-            .join(" OR "),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,7 +55,6 @@ mod tests {
     #[test]
     fn plain_words_become_quoted_phrases() {
         assert_eq!(match_all("prefer sd").unwrap(), r#""prefer" AND "sd""#);
-        assert_eq!(match_any("prefer sd").unwrap(), r#""prefer" OR "sd""#);
     }
 
     #[test]
@@ -106,7 +87,7 @@ mod tests {
     #[test]
     fn input_with_no_term_has_no_query() {
         assert_eq!(match_all("***"), None);
-        assert_eq!(match_any(" - \" "), None);
+        assert_eq!(match_all(" - \" "), None);
         assert_eq!(match_all(""), None);
     }
 }

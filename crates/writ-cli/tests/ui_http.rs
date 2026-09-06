@@ -26,7 +26,7 @@ fn config() -> Config {
 fn record_proposed(store: &mut Store, title: &str) {
     let mut learning = NewLearning::new(title, "rule", "rationale");
     learning.status = Some(Status::Proposed);
-    store.record(&learning, 0).unwrap();
+    store.record(&learning).unwrap();
 }
 
 #[tokio::test]
@@ -136,6 +136,19 @@ async fn embedded_assets_are_served() {
     assert!(js_type.contains("javascript"), "{js_type}");
     let js_body = js.text().await.unwrap();
     assert!(js_body.contains("htmx"), "{js_body}");
+    // The vendored copy shipped truncated once, and a truncated htmx is a
+    // syntax error, so every swap silently falls back to a full page load.
+    // The byte count is htmx 2.0.4, sha384
+    // HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+.
+    assert_eq!(js_body.len(), 50917, "vendored htmx is not the whole file");
+    assert!(
+        js_body.contains(r#"version:"2.0.4""#),
+        "unexpected htmx version"
+    );
+    assert!(
+        js_body.trim_end().ends_with("return Q}();"),
+        "htmx is cut short"
+    );
 }
 
 fn proposed_with_exemplars(store: &mut Store, title: &str, snippet: &str) -> String {
@@ -147,13 +160,13 @@ fn proposed_with_exemplars(store: &mut Store, title: &str, snippet: &str) -> Str
         snippet: snippet.into(),
         note: None,
     }];
-    store.record(&learning, 0).unwrap().id
+    store.record(&learning).unwrap().id
 }
 
 fn active_learning(store: &mut Store, title: &str) -> String {
     let mut learning = NewLearning::new(title, "rule", "rationale");
     learning.status = Some(Status::Active);
-    store.record(&learning, 0).unwrap().id
+    store.record(&learning).unwrap().id
 }
 
 fn select_learning(store: &mut Store, learning_id: &str) {
@@ -184,7 +197,7 @@ fn backdate_last_selected(db: &std::path::Path, learning_id: &str) {
 }
 
 #[tokio::test]
-async fn inbox_lists_proposed_with_exemplars_and_near_matches() {
+async fn inbox_lists_proposed_with_exemplars() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
     {
@@ -207,11 +220,382 @@ async fn inbox_lists_proposed_with_exemplars_and_near_matches() {
     assert!(body.contains("prefer sd over sed"), "{body}");
     assert!(body.contains("prefer ripgrep over grep"), "{body}");
     assert!(body.contains("let x = 1;"), "{body}");
-    assert!(body.contains("Near matches"), "{body}");
     assert!(
         body.contains("/learnings/"),
         "edit link should be present: {body}"
     );
+}
+
+#[tokio::test]
+async fn the_inbox_never_shows_near_matches() {
+    // Spec section 7.3: nothing detects duplicates. Two proposals that
+    // share every word must still produce no similarity claim.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        proposed_with_exemplars(&mut store, "prefer sd over sed", "let x = 1;");
+        proposed_with_exemplars(&mut store, "prefer sd over sed everywhere", "let y = 2;");
+    }
+
+    let base = start_app(&db, config()).await;
+    let body = reqwest::get(format!("{}/inbox", base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(!body.contains("Near matches"), "{body}");
+    assert!(!body.contains("near-match"), "{body}");
+    assert!(!body.contains("bm25"), "{body}");
+}
+
+// --- the footer names the store, spec section 9.4 ----------------------
+
+#[tokio::test]
+async fn every_page_footer_names_the_database_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::new();
+
+    for page in ["/inbox", "/collection", "/health"] {
+        let body = client
+            .get(format!("{}{}", base, page))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            body.contains(db.to_str().unwrap()),
+            "{page} footer should name the store: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn detail_footer_names_the_database_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        active_learning(&mut store, "footed")
+    };
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("{}/learnings/{id}", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains(db.to_str().unwrap()), "{body}");
+}
+
+// --- htmx: no interaction reloads the page, spec section 9.4 -----------
+
+fn htmx_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+}
+
+fn is_fragment(body: &str) -> bool {
+    !body.contains("<!DOCTYPE html>") && !body.contains("<body>")
+}
+
+#[tokio::test]
+async fn inbox_rows_carry_htmx_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        proposed_with_exemplars(&mut store, "swap me", "s")
+    };
+
+    let base = start_app(&db, config()).await;
+    let body = reqwest::get(format!("{}/inbox", base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains(r#"id="inbox-list""#), "{body}");
+    assert!(
+        body.contains(&format!(r#"hx-post="/inbox/{id}/approve""#)),
+        "{body}"
+    );
+    assert!(body.contains(r##"hx-target="#inbox-list""##), "{body}");
+    // The plain form POST must survive htmx being unavailable.
+    assert!(
+        body.contains(&format!(r#"action="/inbox/{id}/approve""#)),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn approve_over_htmx_swaps_the_list_and_the_badge() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        let id = proposed_with_exemplars(&mut store, "approve me", "s");
+        proposed_with_exemplars(&mut store, "stay behind", "s2");
+        id
+    };
+
+    let base = start_app(&db, config()).await;
+    let response = htmx_client()
+        .post(format!("{}/inbox/{id}/approve", base))
+        .header("HX-Request", "true")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+
+    assert!(
+        is_fragment(&body),
+        "a swap is a fragment, not a page: {body}"
+    );
+    assert!(body.contains(r#"id="inbox-list""#), "{body}");
+    assert!(
+        body.contains("stay behind"),
+        "the other proposal stays: {body}"
+    );
+    // The navigation count moves with the row, out of band.
+    assert!(body.contains(r#"id="inbox-badge""#), "{body}");
+    assert!(body.contains("hx-swap-oob"), "{body}");
+    assert!(
+        body.contains(">1</span>"),
+        "badge should now read 1: {body}"
+    );
+}
+
+#[tokio::test]
+async fn approve_without_htmx_still_redirects() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        proposed_with_exemplars(&mut store, "no js here", "s")
+    };
+
+    let base = start_app(&db, config()).await;
+    let response = htmx_client()
+        .post(format!("{}/inbox/{id}/approve", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 303);
+    assert_eq!(response.headers()["location"], "/inbox");
+    let store = Store::open(&db).unwrap();
+    assert_eq!(store.get(&id).unwrap().status, Status::Active);
+}
+
+#[tokio::test]
+async fn merge_over_htmx_swaps_the_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let (target_id, proposed_id) = {
+        let mut store = Store::open(&db).unwrap();
+        let target = active_learning(&mut store, "target rule");
+        let proposed = proposed_with_exemplars(&mut store, "similar target rule", "merged snippet");
+        (target, proposed)
+    };
+
+    let base = start_app(&db, config()).await;
+    let response = htmx_client()
+        .post(format!("{}/inbox/{proposed_id}/merge", base))
+        .header("HX-Request", "true")
+        .form(&[("target_id", &target_id)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(is_fragment(&body), "{body}");
+    assert!(body.contains(r#"id="inbox-list""#), "{body}");
+}
+
+#[tokio::test]
+async fn health_archive_over_htmx_swaps_the_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("archive me over htmx", "rule", "rationale");
+        learning.status = Some(Status::Active);
+        learning.created_at = Some("2000-01-01 00:00:00".into());
+        store.record(&learning).unwrap().id
+    };
+
+    let base = start_app(&db, config()).await;
+    let page = reqwest::get(format!("{}/health", base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains(r#"id="health-body""#), "{page}");
+    assert!(
+        page.contains(&format!(r#"hx-post="/learnings/{id}/archive""#)),
+        "{page}"
+    );
+    assert!(
+        page.contains(r#"hx-get="/health""#),
+        "keep is a swap too: {page}"
+    );
+
+    let response = htmx_client()
+        .post(format!("{}/learnings/{id}/archive", base))
+        .header("HX-Request", "true")
+        .header("HX-Target", "health-body")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(is_fragment(&body), "{body}");
+    assert!(body.contains(r#"id="health-body""#), "{body}");
+    assert!(!body.contains("archive me over htmx"), "{body}");
+}
+
+#[tokio::test]
+async fn collection_sort_and_search_over_htmx_return_a_fragment() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        active_learning(&mut store, "alpha rule");
+        active_learning(&mut store, "beta rule");
+    }
+
+    let base = start_app(&db, config()).await;
+    let page = reqwest::get(format!("{}/collection", base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains(r#"id="collection-body""#), "{page}");
+    assert!(page.contains(r#"hx-get="/collection"#), "{page}");
+    assert!(page.contains(r#"hx-push-url="true""#), "{page}");
+
+    let body = htmx_client()
+        .get(format!("{}/collection?sort=hit&dir=desc", base))
+        .header("HX-Request", "true")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(is_fragment(&body), "{body}");
+    assert!(body.contains(r#"id="collection-body""#), "{body}");
+    assert!(body.contains("alpha rule"), "{body}");
+
+    let searched = htmx_client()
+        .get(format!("{}/collection?q=alpha", base))
+        .header("HX-Request", "true")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(is_fragment(&searched), "{searched}");
+    assert!(searched.contains("alpha rule"), "{searched}");
+    assert!(!searched.contains("beta rule"), "{searched}");
+}
+
+#[tokio::test]
+async fn detail_save_over_htmx_returns_the_fragment() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        active_with_exemplar(&mut store, "editable over htmx")
+    };
+
+    let base = start_app(&db, config()).await;
+    let page = reqwest::get(format!("{}/learnings/{id}", base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains(r#"id="detail-body""#), "{page}");
+    assert!(
+        page.contains(&format!(r#"hx-post="/learnings/{id}""#)),
+        "{page}"
+    );
+
+    let response = htmx_client()
+        .post(format!("{}/learnings/{id}", base))
+        .header("HX-Request", "true")
+        .form(&[
+            ("title", "editable over htmx"),
+            ("rule", "swapped rule"),
+            ("rationale", "swapped rationale"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(is_fragment(&body), "{body}");
+    assert!(body.contains(r#"id="detail-body""#), "{body}");
+    assert!(body.contains("swapped rule"), "{body}");
+
+    let store = Store::open(&db).unwrap();
+    assert_eq!(store.get(&id).unwrap().rule, "swapped rule");
+}
+
+#[tokio::test]
+async fn finding_reject_over_htmx_returns_the_detail_fragment() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let (learning_id, finding_id) = {
+        let mut store = Store::open(&db).unwrap();
+        let id = active_with_exemplar(&mut store, "finding owner");
+        let finding_id = finding_with_path(&mut store, &id, Some("a.rs"), Some(3));
+        (id, finding_id)
+    };
+
+    let base = start_app(&db, config()).await;
+    let page = reqwest::get(format!("{}/learnings/{learning_id}", base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        page.contains(&format!(r#"hx-post="/findings/{finding_id}/reject""#)),
+        "{page}"
+    );
+
+    let response = htmx_client()
+        .post(format!("{}/findings/{finding_id}/reject", base))
+        .header("HX-Request", "true")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(is_fragment(&body), "{body}");
+    assert!(body.contains(r#"id="detail-body""#), "{body}");
+    assert!(body.contains("rejected"), "{body}");
 }
 
 #[tokio::test]
@@ -436,7 +820,7 @@ fn active_with_exemplar(store: &mut Store, title: &str) -> String {
         snippet: "let good = true;".into(),
         note: None,
     }];
-    store.record(&learning, 0).unwrap().id
+    store.record(&learning).unwrap().id
 }
 
 #[tokio::test]
@@ -567,7 +951,7 @@ async fn health_lists_unused_rules() {
         let mut learning = NewLearning::new("old and unused", "rule", "rationale");
         learning.status = Some(Status::Active);
         learning.created_at = Some("2000-01-01 00:00:00".into());
-        store.record(&learning, 0).unwrap();
+        store.record(&learning).unwrap();
     }
 
     let base = start_app(&db, config()).await;
@@ -685,7 +1069,7 @@ async fn health_archive_removes_from_health() {
         let mut learning = NewLearning::new("archive me", "rule", "rationale");
         learning.status = Some(Status::Active);
         learning.created_at = Some("2000-01-01 00:00:00".into());
-        store.record(&learning, 0).unwrap().id
+        store.record(&learning).unwrap().id
     };
 
     let base = start_app(&db, config()).await;
