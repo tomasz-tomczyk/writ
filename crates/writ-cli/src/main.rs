@@ -8,6 +8,7 @@ mod list;
 mod matcher;
 mod output;
 mod record;
+mod ui;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -43,6 +44,8 @@ enum Command {
     Show(inspect::ShowArgs),
     /// Prune a learning. It stops being selected and stays in the database
     Archive(inspect::ArchiveArgs),
+    /// Open the local web interface
+    Ui(ui::Args),
 }
 
 fn main() -> ExitCode {
@@ -75,6 +78,10 @@ fn main() -> ExitCode {
         },
         Command::Show(args) => inspect::show(&args, &paths.db).map(|()| ExitCode::SUCCESS),
         Command::Archive(args) => inspect::archive(&args, &paths.db).map(|()| ExitCode::SUCCESS),
+        Command::Ui(args) => match context::load_config(&paths.config) {
+            Ok(config) => ui::run(&args, &paths, &config),
+            Err(error) => Err(error),
+        },
     };
 
     match result {

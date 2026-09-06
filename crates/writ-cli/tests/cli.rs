@@ -263,6 +263,15 @@ fn no_command_exits_two_and_says_so() {
     assert!(stderr.contains("no command given"), "{stderr}");
 }
 
+#[test]
+fn ui_help_lists_port_and_no_open() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["ui", "--help"]);
+    output.assert_code(0);
+    assert!(output.stdout.contains("--port"), "{}", output.stdout);
+    assert!(output.stdout.contains("--no-open"), "{}", output.stdout);
+}
+
 /// P8: every flag section 5 lists for these two commands is a real flag.
 #[test]
 fn record_and_list_advertise_every_documented_flag() {
