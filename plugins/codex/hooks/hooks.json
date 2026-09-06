@@ -1,0 +1,17 @@
+{
+  "description": "Audit the diff against the learnings that apply before the turn ends.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "writ audit --hook codex",
+            "statusMessage": "Auditing the diff against your learnings",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -149,9 +149,20 @@ pub fn rule_block(position: usize, selected: &Selected) -> String {
 
 /// The prompt `--format prompt` prints. Spec section 7.1 step 4.
 ///
-/// It carries the diff, then the selected rules, then the JSON shape it
-/// wants back. It never asks the host to rewrite the tree: writ reports,
-/// the developer decides.
+/// It carries the diff, then the selected rules, then how to send the
+/// findings back. It never asks the host to rewrite the tree: writ
+/// reports, the developer decides.
+///
+/// **It names a return path, not only a JSON shape.** An earlier version
+/// ended with "reply with this JSON", and a reply in the conversation
+/// reaches nothing: the hook process has already exited. Everything
+/// downstream of a finding died there. `times_applied` never moved, so
+/// `--never-applied` and the Health bucket measured nothing. Step 3 ranks
+/// by acceptance rate over `findings`, and there were none. `blocking` had
+/// no effect at all, because its only teeth are the ingest gate and ingest
+/// never ran. The loop looked closed and was not.
+///
+/// Both paths are named because writ cannot see which the host has.
 ///
 /// How many learnings were considered is deliberately **not** in here. It
 /// is audit bookkeeping, the host has no use for it, and printing it would
@@ -188,13 +199,31 @@ pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) 
         }
     }
 
-    out.push_str("\n## Reply\n\n");
-    out.push_str("Reply with this JSON and nothing else. Do not rewrite the tree.\n\n");
+    out.push_str("\n## Report back\n\n");
+    out.push_str(
+        "Do not rewrite the tree. Send the findings to writ. A reply left in \
+         the conversation reaches nothing, because the audit has already \
+         exited.\n\n",
+    );
+    out.push_str(
+        "- Call the `writ_audit` tool with a `findings` argument holding the \
+         whole document below, when MCP is available. This is the normal \
+         path.\n",
+    );
+    out.push_str("- Otherwise pipe the same document to `writ audit --ingest`.\n\n");
     out.push_str(
         "{\"audit_id\":\"AUDIT\",\"findings\":[{\"learning_id\":\"ID\",\
-         \"path\":\"PATH\",\"line\":1,\"detail\":\"WHAT IS WRONG\"}]}\n",
+         \"path\":\"PATH\",\"line\":1,\"detail\":\"WHAT IS WRONG\",\
+         \"outcome\":\"open\"}]}\n",
     );
-    out.push_str("\nAn empty findings array is the right answer when the diff breaks no rule.\n");
+    out.push_str(
+        "\nUse the audit-id above, verbatim. `outcome` is `open`, `fixed` or \
+         `ignored`.\n",
+    );
+    out.push_str(
+        "An empty findings array is the right answer when the diff breaks no \
+         rule, and it still has to be sent.\n",
+    );
     out
 }
 

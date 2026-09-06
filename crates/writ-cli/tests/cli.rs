@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -1656,6 +1657,9 @@ const EVERY_SUBCOMMAND: &[&[&str]] = &[
     &["archive", "01234567-89ab-7def-8000-000000000000"],
     &["ui", "--no-open"],
     &["mcp"],
+    // `--print` so that a valid-config variant of this list can never
+    // reach the machine's own host configuration.
+    &["install", "claude-code", "--print"],
     &["telemetry", "show"],
 ];
 
@@ -2931,6 +2935,124 @@ fn a_hook_with_no_payload_still_runs() {
     let output = hook(&sandbox, &root, "claude-code", "");
 
     output.assert_code(2);
+}
+
+/// What the host left on the gate's stdin.
+enum HookStdin {
+    /// No stdin at all. End of file at once.
+    Closed,
+    /// A pipe nobody writes to and nobody closes, which is what a Stop
+    /// hook inherits from a session that holds its own stdin open.
+    Silent,
+    /// A host payload, written and then closed.
+    Payload(&'static str),
+}
+
+/// Run the gate with a stdin the test controls, under a hard time bound.
+///
+/// The bound is the assertion. A regression in the stdin path is a hang,
+/// and a test that hangs on regression hangs CI instead of failing it.
+fn hook_stdin(sandbox: &Sandbox, root: &Path, host: &str, stdin: HookStdin) -> Output {
+    let mut command = sandbox.cmd_at(root.to_path_buf(), &["audit", "--hook", host]);
+    command
+        .stdin(match stdin {
+            HookStdin::Closed => Stdio::null(),
+            HookStdin::Silent | HookStdin::Payload(_) => Stdio::piped(),
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+
+    // Held for the whole run in the silent case, so the write end stays
+    // open and the child never sees end of file.
+    let mut held = child.stdin.take();
+    if let (HookStdin::Payload(text), Some(pipe)) = (&stdin, held.as_mut()) {
+        pipe.write_all(text.as_bytes()).unwrap();
+    }
+    if !matches!(stdin, HookStdin::Silent) {
+        held = None;
+    }
+
+    let output = wait_bounded(&mut child, Duration::from_secs(30), host);
+    drop(held);
+    output
+}
+
+fn wait_bounded(child: &mut Child, limit: Duration, what: &str) -> Output {
+    let deadline = Instant::now() + limit;
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            std::io::Read::read_to_string(child.stdout.as_mut().unwrap(), &mut stdout).unwrap();
+            std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+            return Output {
+                code: child.wait().unwrap().code().unwrap(),
+                stdout,
+                stderr,
+            };
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("writ audit --hook {what} did not exit within {limit:?}: it blocked on stdin");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Assert the gate blocked, in whichever protocol this host speaks.
+fn assert_blocked(host: &str, output: &Output) {
+    match host {
+        "claude-code" => {
+            output.assert_code(2);
+            assert!(output.stderr.contains("prefer sd"), "{}", output.stderr);
+        }
+        "codex" => {
+            output.assert_code(0);
+            let body: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+            assert_eq!(body["decision"], "block");
+        }
+        "cursor" => {
+            output.assert_code(0);
+            let body: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+            assert!(body["followup_message"].is_string(), "{body}");
+        }
+        other => panic!("no protocol for {other}"),
+    }
+}
+
+/// P7: never hang on stdin, and section 11 lists the gate beside
+/// `--ingest` and `record --json`.
+///
+/// `--hook` differs from those two in what absent stdin means. They need
+/// their document and exit with usage without it. A hook legitimately runs
+/// with no payload on some hosts, so the gate treats absent or empty stdin
+/// as "no retry signal" and carries on. What it must never do is wait.
+#[test]
+fn the_gate_never_waits_on_stdin() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    for host in ["claude-code", "codex", "cursor"] {
+        // No stdin at all.
+        assert_blocked(host, &hook_stdin(&sandbox, &root, host, HookStdin::Closed));
+
+        // A pipe that is open, empty, and never closed. Before the
+        // deadline existed this read parked until the session ended.
+        assert_blocked(host, &hook_stdin(&sandbox, &root, host, HookStdin::Silent));
+
+        // A payload still reaches the retry signal, so the bound did not
+        // buy the pass-through by throwing stdin away.
+        let signal = match host {
+            "cursor" => r#"{"loop_count": 5}"#,
+            _ => r#"{"stop_hook_active": true}"#,
+        };
+        let spent = hook_stdin(&sandbox, &root, host, HookStdin::Payload(signal));
+        spent.assert_code(0);
+        assert!(spent.stdout.is_empty(), "{}", spent.stdout);
+        assert!(spent.stderr.contains("retry cap"), "{}", spent.stderr);
+    }
 }
 
 /// A payload writ cannot parse is not a reason to skip the gate.

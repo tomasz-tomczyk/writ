@@ -2,8 +2,10 @@
 
 A local-first ledger of the steering you give coding agents.
 
-Say a thing once. writ keeps it, and puts it back in front of whoever is
-about to repeat the mistake. Nothing leaves the machine.
+You correct an agent, the correction works, and the session ends. Next
+week you type it again. writ keeps the correction, and puts it back in
+front of whoever is about to repeat the mistake. Nothing leaves the
+machine, and writ never calls a model — your agent does the reasoning.
 
 ## Install
 
@@ -11,41 +13,59 @@ about to repeat the mistake. Nothing leaves the machine.
 cargo install --path crates/writ-cli
 ```
 
-That installs a binary named `writ`.
+That installs a binary named `writ`. On crates.io the package is
+`writ-cli`, because `writ` belongs to an unrelated markdown editor.
 
-## Use
+## The loop
 
 ```
-writ record --title T --rule R --rationale WHY --activate
+writ record --title T --rule R --rationale WHY --scope language:rust --activate
 writ audit
-writ list
+writ list --never-applied
+writ archive ID
 writ ui
 ```
 
-- **`writ record`** writes a learning. It is the only way into the
-  database. A write with no `--activate` waits in the Inbox as
-  `proposed`, so a forgotten flag fails safe.
-- **`writ audit`** reads the diff you have not committed, selects the
-  learnings that apply to it, and prints them for a reviewing agent.
-- **`writ list`** reads the collection back. `--unused-days` and
-  `--never-applied` find the rules that are not earning their place.
-- **`writ ui`** opens the four screens: Inbox, Collection, Detail and
-  Health.
+1. **`writ record`** writes a learning. It is the only way into the
+   database. A write with no `--activate` waits in the Inbox as
+   `proposed`, so a forgotten flag fails safe.
+2. **`writ audit`** reads the diff you have not committed, selects the
+   learnings that apply to it, and prints them for a reviewing agent.
+3. **`writ list`** reads the collection back. `--unused-days` and
+   `--never-applied` find the rules that are not earning their place.
+4. **`writ archive`** prunes one. It stops being selected and stays in
+   the database.
+5. **`writ ui`** opens four screens: Inbox, Collection, Detail, Health.
 
 An audit costs what the diff costs, not what the collection costs. It
 sends at most `max_rules` learnings and `max_chars` of rule text,
-whether you have fifty learnings or a thousand.
+whether you hold fifty learnings or a thousand.
 
 ## Agents
 
 `writ mcp` serves two tools, `writ_record` and `writ_audit`, on stdio.
-Both are shells over the same code the commands above run.
+Both are shells over the same code the commands above run. That makes
+writ reachable. It does not make the review happen.
 
-`writ audit --hook HOST` emits the audit in a host's gate protocol, so
-the review is not optional. See
-[`plugins/claude-code/README.md`](plugins/claude-code/README.md) for the
-Claude Code plugin, the hosts that can enforce a gate, and the one that
-cannot.
+`writ audit --hook HOST` is what makes the review not optional. It emits
+the same verdict in each host's own gate protocol, so a turn that
+touched code the learnings cover does not hand over unreviewed.
+
+| Host | Gate |
+| --- | --- |
+| Claude Code | `Stop` hook |
+| Codex CLI | `Stop` hook |
+| Cursor | `stop` hook |
+| OpenCode | **none — it cannot enforce one** |
+
+**OpenCode cannot enforce a gate.** Every one of its plugin hooks
+returns `Promise<void>`, so nothing there can block a turn or inject a
+prompt. Its `AGENTS.md` can ask the agent to run the audit, and that is
+a request, not a gate. `writ audit --hook opencode` is rejected rather
+than accepted and quietly ignored.
+
+See [`plugins/claude-code/README.md`](plugins/claude-code/README.md) for
+the Claude Code plugin and the exact protocol each host receives.
 
 ## Where things live
 
@@ -121,3 +141,10 @@ still report failures because the telemetry store is their requested result.
 
 The dump has format version `"writ_telemetry": 1` and includes all fixed bucket
 edges, so it remains self-describing if a later release changes the format.
+
+## Design
+
+[`AGENTS.md`](AGENTS.md) holds the principles, the data model, and the
+invariants. Read it before changing behavior. `CLAUDE.md` is a symlink
+to it, because Claude Code reads that name and the other three hosts
+read `AGENTS.md`.

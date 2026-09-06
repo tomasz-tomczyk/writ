@@ -34,10 +34,13 @@ for command in $commands; do
 done
 sort -u -o "$known" "$known"
 
-docs=$(find . -name README.md -o -name SKILL.md |
+# AGENTS.md is in the list because it names flags too, and P8 does not
+# stop at the README. `-type f` skips the CLAUDE.md symlink, which is the
+# same bytes and would report every failure twice.
+docs=$(find . -type f \( -name README.md -o -name SKILL.md -o -name AGENTS.md \) |
   grep -v '/target/' | grep -v '/\.worktrees/' | sort)
 if [ -z "$docs" ]; then
-  echo "check-doc-flags: no README.md or SKILL.md found. Nothing was checked." >&2
+  echo "check-doc-flags: no README.md, SKILL.md or AGENTS.md found. Nothing was checked." >&2
   exit 1
 fi
 

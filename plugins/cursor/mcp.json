@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "writ": {
+      "type": "stdio",
+      "command": "writ",
+      "args": ["mcp"]
+    }
+  }
+}

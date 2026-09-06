@@ -1,0 +1,12 @@
+{
+  "name": "writ",
+  "version": "0.1.0",
+  "description": "Capture the steering you give coding agents once, and audit every diff against it.",
+  "author": {
+    "name": "Tomasz Tomczyk"
+  },
+  "homepage": "https://github.com/tomasztomczyk/writ",
+  "repository": "https://github.com/tomasztomczyk/writ",
+  "license": "MIT",
+  "keywords": ["code-review", "conventions", "memory"]
+}

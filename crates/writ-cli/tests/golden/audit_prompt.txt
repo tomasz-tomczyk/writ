@@ -31,10 +31,14 @@ good:
 let y = 2;
 ```
 
-## Reply
+## Report back
 
-Reply with this JSON and nothing else. Do not rewrite the tree.
+Do not rewrite the tree. Send the findings to writ. A reply left in the conversation reaches nothing, because the audit has already exited.
 
-{"audit_id":"AUDIT","findings":[{"learning_id":"ID","path":"PATH","line":1,"detail":"WHAT IS WRONG"}]}
+- Call the `writ_audit` tool with a `findings` argument holding the whole document below, when MCP is available. This is the normal path.
+- Otherwise pipe the same document to `writ audit --ingest`.
 
-An empty findings array is the right answer when the diff breaks no rule.
+{"audit_id":"AUDIT","findings":[{"learning_id":"ID","path":"PATH","line":1,"detail":"WHAT IS WRONG","outcome":"open"}]}
+
+Use the audit-id above, verbatim. `outcome` is `open`, `fixed` or `ignored`.
+An empty findings array is the right answer when the diff breaks no rule, and it still has to be sent.

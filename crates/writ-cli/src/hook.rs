@@ -16,6 +16,8 @@
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use writ_core::{
     Config, CounterMetric, Error, GateResultMetric, HookHostMetric, Result, TelemetryBatch,
@@ -200,17 +202,115 @@ fn write_json(body: &serde_json::Value) {
     let _ = writeln!(out, "{body}");
 }
 
-/// Read the host payload, and never wait on a person. crit #693.
+/// Read the host payload, and never wait. P7 and crit #693.
 ///
 /// A terminal on stdin means a human ran the command by hand, so there is
-/// no payload to read and no reason to block on one. Anything else is
-/// read to end of file: the hosts close the pipe after writing.
+/// no payload and no reason to block on one.
+///
+/// Everything else is read under a deadline rather than to end of file. A
+/// Stop hook inherits whatever stdin the host had. When that is a pipe
+/// nobody writes to and nobody closes, end of file never arrives and
+/// `read_to_string` parks the gate for the life of the session. Absent
+/// stdin is not an error here — the spec says a hook legitimately runs
+/// with no payload on some hosts — so the deadline yields "no retry
+/// signal" and the gate carries on.
 fn read_payload() -> String {
-    let mut stdin = std::io::stdin();
+    let stdin = std::io::stdin();
     if stdin.is_terminal() {
         return String::new();
     }
-    let mut text = String::new();
-    let _ = stdin.read_to_string(&mut text);
-    text
+    read_within(stdin, PAYLOAD_WAIT)
+}
+
+/// How long the gate waits for a host payload before deciding there is none.
+///
+/// Generous rather than tight, because the two failures are not
+/// symmetric. A pause of this length once per turn costs nothing. Losing a
+/// retry signal that arrived late makes the gate block a second time, and
+/// on Cursor the cap that bounds the follow-up loop is the payload. The
+/// wait is also not paid in practice: a complete JSON document ends it as
+/// soon as it parses.
+const PAYLOAD_WAIT: Duration = Duration::from_secs(2);
+
+/// Read `source` until it ends, until it holds one complete JSON document,
+/// or until `limit` runs out, whichever comes first.
+///
+/// The read runs on its own thread because there is no portable way to
+/// abandon a blocking read on the thread that issued it. The thread is
+/// detached on purpose: it may still be parked inside `read` when the
+/// deadline passes, and the process exits moments later and takes it.
+///
+/// Stopping on a parseable document, rather than on end of file, is what
+/// makes the common path free. A host that writes its payload and leaves
+/// the pipe open is served at once instead of at the deadline.
+fn read_within<R: Read + Send + 'static>(mut source: R, limit: Duration) -> String {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match source.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if sender.send(buffer[..read].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let deadline = Instant::now() + limit;
+    let mut bytes = Vec::new();
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        // An error is either end of file or the deadline. Both mean the
+        // payload is whatever has arrived so far, which may be nothing.
+        let Ok(chunk) = receiver.recv_timeout(remaining) else {
+            break;
+        };
+        bytes.extend_from_slice(&chunk);
+        if std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            .is_some()
+        {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reader that never yields a byte and never ends, which is what an
+    /// inherited pipe with no writer looks like.
+    struct Silent;
+
+    impl Read for Silent {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_secs(60));
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn a_silent_source_returns_empty_at_the_deadline() {
+        let started = Instant::now();
+        let payload = read_within(Silent, Duration::from_millis(50));
+        assert_eq!(payload, "");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_complete_document_does_not_wait_for_the_source_to_end() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        std::io::Write::write_all(&mut writer, br#"{"stop_hook_active": true}"#).unwrap();
+
+        // `writer` stays alive, so the read end never reaches end of file.
+        let payload = read_within(reader, Duration::from_secs(30));
+
+        assert!(Retry::parse(&payload).stop_hook_active, "{payload}");
+        drop(writer);
+    }
 }

@@ -10,6 +10,7 @@ pub mod context;
 pub mod git;
 pub mod hook;
 pub mod inspect;
+pub mod install;
 pub mod list;
 pub mod matcher;
 pub mod mcp;
@@ -61,6 +62,8 @@ pub enum Command {
     Ui(ui::Args),
     /// Run the MCP server on stdio
     Mcp(mcp::Args),
+    /// Write the MCP registration and the gate hook into a host's config
+    Install(install::Args),
     /// Inspect or control opt-in local-only aggregate telemetry
     Telemetry(telemetry::Args),
 }
@@ -75,6 +78,9 @@ impl Command {
             Self::Archive(_) => CommandMetric::Archive,
             Self::Ui(_) => CommandMetric::Ui,
             Self::Mcp(_) => CommandMetric::Mcp,
+            // Installing is a one-off setup step, not a use of the
+            // collection, and it never opens the learnings database.
+            Self::Install(_) => return None,
             // Administration does not observe itself: dump/show must be a
             // stable disclosure, and purge must not recreate what it removed.
             Self::Telemetry(_) => return None,
@@ -141,6 +147,19 @@ pub fn dispatch(cli: Cli) -> ExitCode {
         }
         Command::Mcp(args) => {
             mcp::run(&args, &paths, &config).map(|code| (code, TelemetryBatch::default()))
+        }
+        Command::Install(args) => {
+            // `--project` needs the repository, and the default scope
+            // needs $HOME. Neither is fatal here: `install::plan` says
+            // which one is missing for the scope the caller asked for.
+            let roots = install::Roots {
+                home: Env::from_os().home,
+                project: std::env::current_dir()
+                    .ok()
+                    .and_then(|cwd| git::discover(&cwd).ok())
+                    .map(|repo| repo.root),
+            };
+            install::run(&args, &roots).map(|()| (ExitCode::SUCCESS, TelemetryBatch::default()))
         }
         Command::Telemetry(args) => {
             telemetry::run(&args, &paths, &config).map(|code| (code, TelemetryBatch::default()))

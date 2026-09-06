@@ -193,6 +193,82 @@ fn ingesting_findings_through_mcp_matches_the_ingest_flag() {
     assert_eq!(through_mcp["unfixed_blocking"], 0);
 }
 
+/// The loop closes. Spec section 7.1 steps 4 and 5.
+///
+/// This is the test the shipped behaviour did not have. The prompt used to
+/// end with "reply with this JSON", the reply landed in the conversation,
+/// and nothing consumed it, so `times_applied` stayed at 0 for every
+/// learning in the collection. Everything that reads it went with it:
+/// `--never-applied`, the Health bucket, the acceptance rate in step 3
+/// ranking, the ingest gate that gives `blocking` its only teeth, and
+/// recurrence.
+///
+/// So the assertion is not that ingest returns a report. It is that the
+/// counter on the learning moved, through the path the prompt now names.
+#[test]
+fn findings_returned_through_the_writ_audit_tool_move_times_applied() {
+    let home = Sandbox::new();
+    let repo = home.repo();
+    let id = home.record_json(&[
+        "--title",
+        "prefer sd",
+        "--rule",
+        "use sd",
+        "--rationale",
+        "sed is terse",
+        "--activate",
+    ])[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let before = home.show(&id)["learning"].clone();
+    assert_eq!(before["times_applied"], 0);
+    assert!(before["last_applied_at"].is_null(), "{before}");
+
+    // The audit the agent is answering. The prompt hands it this id.
+    let report = home.audit_json::<&str>(&repo, &[]);
+    let audit_id = report["audit_id"].as_str().unwrap().to_string();
+    assert_eq!(report["sent"], 1);
+
+    let selected = home.show(&id)["learning"].clone();
+    assert_eq!(selected["times_selected"], 1, "reach moves at emit");
+    assert_eq!(
+        selected["times_applied"], 0,
+        "usefulness must not move at emit"
+    );
+
+    // Exactly what the prompt asks for: the whole document, audit id and
+    // all, as the `findings` argument of `writ_audit`.
+    let mut server = home.server_at(&repo);
+    let ingested = server.call(
+        "writ_audit",
+        &json!({
+            "findings": {
+                "audit_id": audit_id,
+                "findings": [{
+                    "learning_id": id,
+                    "path": "a.rs",
+                    "line": 1,
+                    "detail": "let, not sd",
+                    "outcome": "fixed",
+                }],
+            }
+        }),
+    );
+    server.close();
+    assert_eq!(ingested["audit_id"], audit_id.as_str());
+    assert_eq!(ingested["findings"], 1);
+
+    let after = home.show(&id)["learning"].clone();
+    assert_eq!(after["times_applied"], 1, "the loop is open again: {after}");
+    assert!(
+        after["last_applied_at"].is_string(),
+        "last_applied_at is what the recurrence report reads: {after}"
+    );
+    assert_eq!(after["times_selected"], 1, "ingest must not move reach");
+}
+
 /// An agent holds snippet text, not a path. Without `--example-text`
 /// this surface could attach no exemplar at all, and an exemplar is what
 /// makes a rule teach instead of assert. Invariant 3 holds here too: the

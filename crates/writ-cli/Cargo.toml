@@ -20,9 +20,15 @@ axum.workspace = true
 clap.workspace = true
 regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
+# `preserve_order` is not a preference. `writ install` merges into live
+# host configuration files, and the default map reorders every key it
+# rewrites, which turns a one-key addition into a whole-file diff.
+serde_json = { workspace = true, features = ["preserve_order"] }
 tokio.workspace = true
 rust-embed.workspace = true
+# `writ install codex` parses config.toml to decide whether writ is
+# already registered. It never reprints it: see install.rs.
+toml.workspace = true
 writ-core = { path = "../writ-core", version = "0.1.0" }
 
 [dev-dependencies]

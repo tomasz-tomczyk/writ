@@ -195,7 +195,10 @@ const AUDIT_ARGS: &[ToolArg] = &[
         name: "findings",
         flag: "ingest",
         kind: Kind::Stdin,
-        about: "The findings document to write back. The CLI reads this on stdin as --ingest",
+        about: "The whole findings document to write back: the audit_id the audit \
+                prompt printed, and a findings array. This is how a review closes \
+                the loop, and it is what moves times_applied. The CLI reads the \
+                same document on stdin as --ingest",
     },
 ];
 
