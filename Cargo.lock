@@ -1779,6 +1779,7 @@ dependencies = [
  "clap",
  "regex",
  "reqwest",
+ "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",

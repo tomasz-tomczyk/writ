@@ -156,6 +156,30 @@ fn active_learning(store: &mut Store, title: &str) -> String {
     store.record(&learning, 0).unwrap().id
 }
 
+fn select_learning(store: &mut Store, learning_id: &str) {
+    let learning = store.get(learning_id).unwrap();
+    let exemplars = store.exemplars_of(learning_id).unwrap();
+    let selected = vec![Selected { learning, exemplars }];
+    let audit_id = store
+        .start_audit("repo", "HEAD", selected.len(), &selected)
+        .unwrap();
+    store
+        .ingest(&writ_core::FindingsInput {
+            audit_id,
+            findings: Vec::new(),
+        })
+        .unwrap();
+}
+
+fn backdate_last_selected(db: &std::path::Path, learning_id: &str) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute(
+        "UPDATE learnings SET last_selected_at = '2000-01-01 00:00:00' WHERE id = ?1",
+        [learning_id],
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn inbox_lists_proposed_with_exemplars_and_near_matches() {
     let dir = tempfile::tempdir().unwrap();
@@ -516,4 +540,118 @@ async fn open_editor_runs_configured_command() {
         "editor command should create marker file at {}",
         marker.display()
     );
+}
+
+#[tokio::test]
+async fn health_lists_unused_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("old and unused", "rule", "rationale");
+        learning.status = Some(Status::Active);
+        learning.created_at = Some("2000-01-01 00:00:00".into());
+        store.record(&learning, 0).unwrap();
+    }
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("{}/health", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains("old and unused"), "{body}");
+    assert!(body.contains("Not selected in 90 days"), "{body}");
+}
+
+#[tokio::test]
+async fn health_lists_never_applied_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let id = active_learning(&mut store, "selected but silent");
+        select_learning(&mut store, &id);
+    }
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("{}/health", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains("selected but silent"), "{body}");
+    assert!(body.contains("Selected but never applied"), "{body}");
+}
+
+#[tokio::test]
+async fn health_marks_rows_in_both_buckets() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        let id = active_learning(&mut store, "in both buckets");
+        select_learning(&mut store, &id);
+        id
+    };
+    backdate_last_selected(&db, &id);
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("{}/health", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains("in both buckets"), "{body}");
+    assert!(body.contains("in-both"), "{body}");
+}
+
+#[tokio::test]
+async fn health_archive_removes_from_health() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("archive me", "rule", "rationale");
+        learning.status = Some(Status::Active);
+        learning.created_at = Some("2000-01-01 00:00:00".into());
+        store.record(&learning, 0).unwrap().id
+    };
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = client
+        .post(format!("{}/learnings/{id}/archive", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 303);
+
+    let body = client
+        .get(format!("{}/health", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!body.contains("archive me"), "{body}");
 }

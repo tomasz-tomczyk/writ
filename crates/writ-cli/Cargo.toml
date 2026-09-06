@@ -28,4 +28,5 @@ writ-core = { path = "../writ-core", version = "0.1.0" }
 [dev-dependencies]
 tempfile.workspace = true
 serde_json.workspace = true
+rusqlite.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
