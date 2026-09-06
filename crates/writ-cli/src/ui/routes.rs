@@ -1,5 +1,5 @@
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -53,8 +53,25 @@ async fn inbox(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn collection(State(state): State<AppState>) -> Response {
-    match collection::render(&state, None, None, None, None) {
+#[derive(Debug, serde::Deserialize)]
+struct CollectionQuery {
+    q: Option<String>,
+    sort: Option<String>,
+    dir: Option<String>,
+    status: Option<String>,
+}
+
+async fn collection(
+    State(state): State<AppState>,
+    Query(query): Query<CollectionQuery>,
+) -> Response {
+    match collection::render(
+        &state,
+        query.q.as_deref(),
+        query.sort.as_deref(),
+        query.dir.as_deref(),
+        query.status.as_deref(),
+    ) {
         Ok(body) => layout::render(&state, "Collection", &body),
         Err(error) => layout::error_response(error),
     }

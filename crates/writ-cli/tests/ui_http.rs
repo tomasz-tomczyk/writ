@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use writ_cli::ui::{AppState, router};
-use writ_core::{Config, ExemplarKind, NewExemplar, NewLearning, Status, Store};
+use writ_core::{Config, ExemplarKind, NewExemplar, NewLearning, Selected, Status, Store};
 
 async fn start_app(db: &Path, config: Config) -> String {
     let store = Store::open(db).unwrap();
@@ -276,4 +276,107 @@ async fn merge_reinforces_target_and_archives_proposal() {
         target_exemplars.iter().any(|e| e.snippet == "merged snippet"),
         "target should receive the proposed exemplars"
     );
+}
+
+fn bump_applied(store: &mut Store, learning_id: &str, count: usize) {
+    for _ in 0..count {
+        let learning = store.get(learning_id).unwrap();
+        let exemplars = store.exemplars_of(learning_id).unwrap();
+        let selected = vec![Selected { learning, exemplars }];
+        let audit_id = store
+            .start_audit("repo", "HEAD", selected.len(), &selected)
+            .unwrap();
+        store
+            .ingest(&writ_core::FindingsInput {
+                audit_id,
+                findings: vec![writ_core::IncomingFinding {
+                    learning_id: learning_id.into(),
+                    path: None,
+                    line: None,
+                    detail: None,
+                    outcome: writ_core::Outcome::Fixed,
+                }],
+            })
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn collection_search_filters_by_title() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        active_learning(&mut store, "alpha rule");
+        active_learning(&mut store, "beta rule");
+    }
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("{}/collection?q=alpha", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains("alpha rule"), "{body}");
+    assert!(!body.contains("beta rule"), "{body}");
+}
+
+#[tokio::test]
+async fn collection_hides_archived_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let active_id = {
+        let mut store = Store::open(&db).unwrap();
+        let active = active_learning(&mut store, "still active");
+        let archived = active_learning(&mut store, "now archived");
+        store.set_status(&archived, Status::Archived).unwrap();
+        active
+    };
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("{}/collection", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains(&active_id), "{body}");
+    assert!(!body.contains("now archived"), "{body}");
+}
+
+#[tokio::test]
+async fn collection_sorts_by_hits_descending() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let high = active_learning(&mut store, "high hits");
+        let low = active_learning(&mut store, "low hits");
+        bump_applied(&mut store, &high, 3);
+        bump_applied(&mut store, &low, 1);
+    }
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("{}/collection?sort=hit&dir=desc", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    let high_pos = body.find("high hits").unwrap();
+    let low_pos = body.find("low hits").unwrap();
+    assert!(high_pos < low_pos, "high hits should come first: {body}");
 }
