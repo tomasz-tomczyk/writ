@@ -76,22 +76,29 @@ impl Sandbox {
         Output::from(self.cmd_at(dir.to_path_buf(), args).output().unwrap())
     }
 
-    /// A PATH holding git and nothing else, so a test can take `ast-grep`
-    /// away without taking git with it.
-    fn path_with_git_only(&self) -> PathBuf {
-        let bin = self.path("bin");
+    /// A PATH holding exactly the named tools and nothing else.
+    ///
+    /// Every matcher test sets this. Inheriting the ambient PATH means the
+    /// suite asserts whatever the machine happens to have installed: a
+    /// laptop with `ast-grep` proves the matcher path and a clean runner
+    /// silently proves the degradation path instead, with the same green
+    /// tick. A tool that is asked for and missing panics here rather than
+    /// letting a test pass for the wrong reason.
+    fn path_with(&self, tools: &[&str]) -> PathBuf {
+        let bin = self.path(&format!("bin-{}", tools.join("-")));
         std::fs::create_dir_all(&bin).unwrap();
-        let git = String::from_utf8(
-            Command::new("/usr/bin/env")
-                .args(["which", "git"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-        let link = bin.join("git");
-        if !link.exists() {
-            std::os::unix::fs::symlink(git.trim(), &link).unwrap();
+        for tool in tools {
+            let link = bin.join(tool);
+            if link.exists() {
+                continue;
+            }
+            let found = which(tool).unwrap_or_else(|| {
+                panic!(
+                    "{tool} is not on PATH. mise.toml declares it, so run the suite \
+                     through `mise run test` or `mise exec -- cargo test`"
+                )
+            });
+            std::os::unix::fs::symlink(found, &link).unwrap();
         }
         bin
     }
@@ -184,12 +191,32 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> Output {
     Output::from(child.wait_with_output().unwrap())
 }
 
-/// Run git with an identity of its own, so the suite does not depend on
-/// whoever runs it.
+/// The first PATH entry holding an executable of this name.
+///
+/// It walks `PATH` rather than shelling out to `which`, because `which` is
+/// itself a host binary and this function exists to stop the suite
+/// depending on those.
+fn which(tool: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(tool);
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+/// Run git with an identity and a configuration of its own.
+///
+/// `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are pointed at `/dev/null`
+/// as well as the author fields. Without them the host's `~/.gitconfig`
+/// reaches this git: `core.abbrev`, `diff.noprefix` and `diff.algorithm`
+/// all change what `git diff` prints, and the prompt golden file asserts
+/// that text byte for byte.
 fn git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_AUTHOR_NAME", "writ tests")
         .env("GIT_AUTHOR_EMAIL", "tests@example.com")
         .env("GIT_COMMITTER_NAME", "writ tests")
@@ -1359,7 +1386,15 @@ fn a_matcher_that_hits_selects_the_learning() {
         "--activate",
     ]);
     std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
-    assert!(audit_ids(&sandbox, &root, &[]).contains(&learning));
+
+    let output = audit_with_ast_grep(&sandbox, &root, &[]);
+    output.assert_code(0);
+    assert!(output.stdout.contains(&learning), "{}", output.stdout);
+    assert!(
+        !output.stderr.contains("on scope alone"),
+        "the matcher must have been evaluated, not skipped: {}",
+        output.stderr
+    );
 }
 
 #[test]
@@ -1376,9 +1411,18 @@ fn a_matcher_that_misses_drops_the_learning() {
         "--activate",
     ]);
     std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
-    let output = sandbox.run_at(&root, &["audit"]);
+
+    let output = audit_with_ast_grep(&sandbox, &root, &[]);
     output.assert_code(0);
     assert!(!output.stdout.contains(&learning), "{}", output.stdout);
+    // Without this the test passes on a machine with no ast-grep: an
+    // unevaluable matcher keeps the rule, and the rule is then absent for
+    // the wrong reason. That is the CI failure this test caused.
+    assert!(
+        !output.stderr.contains("on scope alone"),
+        "the matcher must have been evaluated, not skipped: {}",
+        output.stderr
+    );
 }
 
 /// A hit selects a learning. It does not create a finding: `times_applied`
@@ -1395,7 +1439,9 @@ fn a_matcher_hit_is_not_a_finding() {
         "--activate",
     ]);
     std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
-    assert!(audit_ids(&sandbox, &root, &[]).contains(&learning));
+    let output = audit_with_ast_grep(&sandbox, &root, &[]);
+    output.assert_code(0);
+    assert!(output.stdout.contains(&learning), "{}", output.stdout);
 
     let after = &sandbox.learnings()[0];
     assert_eq!(after["times_applied"], 0, "a matcher hit is not a finding");
@@ -1422,7 +1468,7 @@ fn an_absent_ast_grep_keeps_the_learning_and_exits_zero() {
     // git must still be reachable, or the audit would fail on step 1 for
     // a different reason. Only ast-grep is taken away.
     let mut command = sandbox.cmd_at(root.clone(), &["audit"]);
-    command.env("PATH", sandbox.path_with_git_only().to_str().unwrap());
+    command.env("PATH", sandbox.path_with(&["git"]));
     let output = Output::from(command.output().unwrap());
     output.assert_code(0);
     assert!(
@@ -1454,12 +1500,12 @@ fn a_pattern_that_does_not_parse_keeps_the_learning_and_exits_zero() {
     ]);
     std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
 
-    let output = sandbox.run_at(&root, &["audit"]);
+    let output = audit_with_ast_grep(&sandbox, &root, &[]);
     output.assert_code(0);
     assert!(output.stdout.contains(&learning), "{}", output.stdout);
     assert!(
-        output.stderr.contains("on scope alone"),
-        "{}",
+        output.stderr.contains("does not parse"),
+        "the reason must be the pattern, not a missing binary: {}",
         output.stderr
     );
 }
@@ -1934,6 +1980,21 @@ fn a_storage_failure_names_the_database_exactly_once() {
 }
 
 // --- helpers -----------------------------------------------------------
+
+/// Run `writ audit` with `ast-grep` guaranteed present.
+///
+/// The matcher tests must exercise the matcher, not whatever the host has
+/// installed. `path_with` panics when the binary is missing, so a clean
+/// runner fails loudly here instead of quietly taking the P6 degradation
+/// path and making a "the matcher missed" assertion pass for the wrong
+/// reason. That is exactly how this suite broke in CI.
+fn audit_with_ast_grep(sandbox: &Sandbox, root: &Path, args: &[&str]) -> Output {
+    let mut all = vec!["audit"];
+    all.extend_from_slice(args);
+    let mut command = sandbox.cmd_at(root.to_path_buf(), &all);
+    command.env("PATH", sandbox.path_with(&["git", "ast-grep"]));
+    Output::from(command.output().unwrap())
+}
 
 /// Run an audit in `root` and read its JSON report.
 fn audit_json(sandbox: &Sandbox, root: &Path, args: &[&str]) -> serde_json::Value {

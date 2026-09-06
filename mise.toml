@@ -2,6 +2,10 @@
 # components are explicit so CI installs the same toolchain as a laptop.
 # Without them, `mise exec -- cargo fmt` fails on a clean machine.
 rust = { version = "1.98.1", components = "rustfmt,clippy" }
+# ast-grep is declared because the matcher tests shell out to it. Without
+# it the suite passes on a laptop that happens to have it and fails on a
+# clean machine, which is how CI caught this.
+ast-grep = "0.45.3"
 
 [tasks.test]
 description = "Run the full test suite"
