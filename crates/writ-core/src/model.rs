@@ -289,6 +289,76 @@ pub struct NewExemplar {
     pub note: Option<String>,
 }
 
+/// The editable fields on a stored learning.
+///
+/// Status, provenance, counters and activation history are deliberately
+/// absent: the Detail editor must not rewrite runtime state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearningUpdate {
+    /// A short name.
+    pub title: String,
+    /// What to do.
+    pub rule: String,
+    /// Why.
+    pub rationale: String,
+    /// Whether breaking the rule stops the handoff.
+    pub blocking: bool,
+    /// The dialect of `matcher`.
+    pub matcher_kind: Option<MatcherKind>,
+    /// A retrieval matcher.
+    pub matcher: Option<String>,
+    /// The full replacement scope set. Empty means `global`.
+    pub scopes: Vec<Scope>,
+    /// The full replacement exemplar set.
+    pub exemplars: Vec<NewExemplar>,
+}
+
+impl LearningUpdate {
+    pub(crate) fn effective_scopes(&self) -> Vec<Scope> {
+        if self.scopes.is_empty() {
+            vec![Scope::global()]
+        } else {
+            self.scopes.clone()
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        for (field, value) in [
+            ("title", &self.title),
+            ("rule", &self.rule),
+            ("rationale", &self.rationale),
+        ] {
+            if value.trim().is_empty() {
+                return Err(Error::validation(format!("{field} is required and empty")));
+            }
+        }
+        match (&self.matcher, &self.matcher_kind) {
+            (Some(_), None) => {
+                return Err(Error::validation(
+                    "--matcher needs --matcher-kind: ast_grep or regex",
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(Error::validation("--matcher-kind needs --matcher"));
+            }
+            _ => {}
+        }
+        let mut scopes = self.effective_scopes();
+        scopes.sort();
+        let before = scopes.len();
+        scopes.dedup();
+        if scopes.len() != before {
+            return Err(Error::validation("the same scope is given twice"));
+        }
+        for exemplar in &self.exemplars {
+            if exemplar.snippet.is_empty() {
+                return Err(Error::validation("an exemplar snippet is empty"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// An exemplar as it is stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Exemplar {

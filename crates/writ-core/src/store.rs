@@ -10,8 +10,8 @@ use crate::fts;
 use crate::id::new_id;
 use crate::migrate;
 use crate::model::{
-    Exemplar, ExemplarKind, Finding, Learning, ListFilter, MatcherKind, NearMatch, NewExemplar,
-    NewLearning, Recorded, Scope, ScopeKind, SourceKind, Status,
+    Exemplar, ExemplarKind, Finding, Learning, LearningUpdate, ListFilter, MatcherKind, NearMatch,
+    NewExemplar, NewLearning, Recorded, Scope, ScopeKind, SourceKind, Status,
 };
 
 /// An open writ database.
@@ -90,6 +90,61 @@ impl Store {
         }
         tx.commit()?;
         Ok(written)
+    }
+
+    /// Replace the fields owned by the Detail editor.
+    ///
+    /// Status, provenance, counters and activation history are not part of
+    /// [`LearningUpdate`], so this write cannot change them. `updated_at` is
+    /// deliberately omitted from the UPDATE and left to the trigger.
+    pub fn update_learning(&mut self, id: &str, update: &LearningUpdate) -> Result<()> {
+        update.validate()?;
+        let tx = self.conn.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM learnings WHERE id = ?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(Error::NotFound { id: id.to_string() });
+        }
+
+        tx.execute(
+            "UPDATE learnings
+                SET title = ?1,
+                    rule = ?2,
+                    rationale = ?3,
+                    blocking = ?4,
+                    matcher_kind = ?5,
+                    matcher = ?6
+              WHERE id = ?7",
+            params![
+                &update.title,
+                &update.rule,
+                &update.rationale,
+                update.blocking,
+                update.matcher_kind.map(MatcherKind::as_str),
+                &update.matcher,
+                id,
+            ],
+        )?;
+
+        tx.execute("DELETE FROM learning_scopes WHERE learning_id = ?1", [id])?;
+        for scope in update.effective_scopes() {
+            tx.execute(
+                "INSERT INTO learning_scopes (learning_id, kind, value)
+                 VALUES (?1, ?2, ?3)",
+                params![id, scope.kind.as_str(), &scope.value],
+            )?;
+        }
+
+        tx.execute("DELETE FROM exemplars WHERE learning_id = ?1", [id])?;
+        for exemplar in &update.exemplars {
+            insert_exemplar(&tx, id, exemplar, None)?;
+        }
+
+        tx.commit()?;
+        Ok(())
     }
 
     /// Attach to an existing learning instead of creating one.
@@ -1248,6 +1303,156 @@ mod tests {
 
     fn record(store: &mut Store, learning: &NewLearning) -> String {
         store.record(learning, 0).unwrap().id
+    }
+
+    fn learning_update() -> crate::model::LearningUpdate {
+        crate::model::LearningUpdate {
+            title: "updated title".into(),
+            rule: "updated rule".into(),
+            rationale: "updated rationale".into(),
+            blocking: false,
+            matcher_kind: Some(MatcherKind::Regex),
+            matcher: Some("updated.*".into()),
+            scopes: vec!["language:rust".parse().unwrap()],
+            exemplars: vec![NewExemplar {
+                kind: ExemplarKind::Good,
+                language: Some("rust".into()),
+                snippet: "let updated = true;".into(),
+                note: Some("new exemplar".into()),
+            }],
+        }
+    }
+
+    #[test]
+    fn update_learning_replaces_fields_scopes_and_exemplars() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut original = NewLearning::new("old title", "old rule", "old rationale");
+        original.status = Some(Status::Active);
+        original.source_kind = Some(SourceKind::Session);
+        original.source_adapter = Some("claude-code".into());
+        original.source_ref = Some("session-1".into());
+        original.author = Some("author@example.com".into());
+        original.activated_at = Some(BACKDATED.into());
+        original.scopes = vec!["project:github.com/example/repo".parse().unwrap()];
+        original.exemplars = vec![NewExemplar {
+            kind: ExemplarKind::Bad,
+            language: None,
+            snippet: "old exemplar".into(),
+            note: None,
+        }];
+        let id = record(&mut store, &original);
+        store
+            .conn
+            .execute(
+                "UPDATE learnings
+                    SET reinforced = 2,
+                        times_selected = 3,
+                        last_selected_at = ?1,
+                        times_applied = 4,
+                        last_applied_at = ?1,
+                        last_verified = ?1,
+                        updated_at = ?1
+                  WHERE id = ?2",
+                (BACKDATED, &id),
+            )
+            .unwrap();
+
+        store.update_learning(&id, &learning_update()).unwrap();
+
+        let updated = store.get(&id).unwrap();
+        assert_eq!(updated.title, "updated title");
+        assert_eq!(updated.rule, "updated rule");
+        assert_eq!(updated.rationale, "updated rationale");
+        assert!(!updated.blocking);
+        assert_eq!(updated.matcher_kind, Some(MatcherKind::Regex));
+        assert_eq!(updated.matcher.as_deref(), Some("updated.*"));
+        assert_eq!(
+            updated.scopes,
+            vec!["language:rust".parse::<Scope>().unwrap()]
+        );
+        assert_eq!(updated.status, Status::Active);
+        assert_eq!(updated.source_kind, SourceKind::Session);
+        assert_eq!(updated.source_adapter.as_deref(), Some("claude-code"));
+        assert_eq!(updated.source_ref.as_deref(), Some("session-1"));
+        assert_eq!(updated.author.as_deref(), Some("author@example.com"));
+        assert_eq!(updated.activated_at.as_deref(), Some(BACKDATED));
+        assert_eq!(updated.reinforced, 2);
+        assert_eq!(updated.times_selected, 3);
+        assert_eq!(updated.last_selected_at.as_deref(), Some(BACKDATED));
+        assert_eq!(updated.times_applied, 4);
+        assert_eq!(updated.last_applied_at.as_deref(), Some(BACKDATED));
+        assert_eq!(updated.last_verified.as_deref(), Some(BACKDATED));
+
+        let exemplars = store.exemplars_of(&id).unwrap();
+        assert_eq!(exemplars.len(), 1);
+        assert_eq!(exemplars[0].kind, ExemplarKind::Good);
+        assert_eq!(exemplars[0].language.as_deref(), Some("rust"));
+        assert_eq!(exemplars[0].snippet, "let updated = true;");
+        assert_eq!(exemplars[0].note.as_deref(), Some("new exemplar"));
+    }
+
+    #[test]
+    fn update_learning_does_not_set_updated_at_in_sql() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = record(&mut store, &NewLearning::new("t", "r", "why"));
+        store
+            .conn
+            .execute(
+                "UPDATE learnings SET updated_at = ?1 WHERE id = ?2",
+                (BACKDATED, &id),
+            )
+            .unwrap();
+
+        store.update_learning(&id, &learning_update()).unwrap();
+
+        let updated = store.get(&id).unwrap().updated_at;
+        assert!(
+            updated.as_str() > BACKDATED,
+            "updated_at stayed at {updated}"
+        );
+    }
+
+    #[test]
+    fn update_learning_rejects_invalid_editable_fields() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = record(&mut store, &NewLearning::new("t", "r", "why"));
+
+        for field in ["title", "rule", "rationale"] {
+            let mut update = learning_update();
+            match field {
+                "title" => update.title = "   ".into(),
+                "rule" => update.rule = "   ".into(),
+                "rationale" => update.rationale = "   ".into(),
+                _ => unreachable!(),
+            }
+            let error = store.update_learning(&id, &update).unwrap_err();
+            assert!(matches!(error, Error::Validation { .. }), "{error}");
+            assert!(error.to_string().contains(field), "{error}");
+        }
+
+        let mut update = learning_update();
+        update.exemplars[0].snippet.clear();
+        let error = store.update_learning(&id, &update).unwrap_err();
+        assert!(matches!(error, Error::Validation { .. }), "{error}");
+
+        let mut update = learning_update();
+        update.matcher_kind = None;
+        let error = store.update_learning(&id, &update).unwrap_err();
+        assert!(matches!(error, Error::Validation { .. }), "{error}");
+
+        let mut update = learning_update();
+        update.matcher = None;
+        let error = store.update_learning(&id, &update).unwrap_err();
+        assert!(matches!(error, Error::Validation { .. }), "{error}");
+    }
+
+    #[test]
+    fn update_learning_unknown_id_is_not_found() {
+        let mut store = Store::open_in_memory().unwrap();
+        let error = store
+            .update_learning("nope", &learning_update())
+            .unwrap_err();
+        assert!(matches!(error, Error::NotFound { .. }), "{error}");
     }
 
     #[test]

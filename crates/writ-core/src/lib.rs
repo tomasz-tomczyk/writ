@@ -30,8 +30,8 @@ pub use id::new_id;
 pub use jsonl::parse_jsonl;
 pub use migrate::SCHEMA_VERSION;
 pub use model::{
-    Exemplar, ExemplarKind, Finding, Learning, ListFilter, MatcherKind, NearMatch, NewExemplar,
-    NewLearning, Recorded, Scope, ScopeKind, SourceKind, Status,
+    Exemplar, ExemplarKind, Finding, Learning, LearningUpdate, ListFilter, MatcherKind, NearMatch,
+    NewExemplar, NewLearning, Recorded, Scope, ScopeKind, SourceKind, Status,
 };
 pub use paths::{Env, Paths, resolve_paths};
 pub use repo::{RepoIdentity, normalize_remote};
