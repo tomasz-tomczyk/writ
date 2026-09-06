@@ -28,4 +28,47 @@ pub enum Error {
     /// SQLite refused a statement or a connection.
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+
+    /// `config.toml` is not valid TOML, or a value in it is not usable.
+    ///
+    /// A malformed configuration is never ignored. A silently dropped
+    /// setting is the invisible failure P7 exists to prevent.
+    #[error("cannot read the configuration: {message}")]
+    Config {
+        /// What is wrong, in the author's terms.
+        message: String,
+    },
+
+    /// A caller asked for something the rules do not allow.
+    #[error("{message}")]
+    Validation {
+        /// What is wrong, in the author's terms.
+        message: String,
+    },
+
+    /// A JSONL line could not be parsed. The line number is 1-based, so it
+    /// matches what an editor shows.
+    #[error("line {line} is not valid JSON: {message}")]
+    BadJson {
+        /// The 1-based line number in the stream.
+        line: usize,
+        /// The parser's complaint.
+        message: String,
+    },
+
+    /// No learning carries this id.
+    #[error("no learning has id {id}")]
+    NotFound {
+        /// The id the caller asked for.
+        id: String,
+    },
+}
+
+impl Error {
+    /// Build a [`Error::Validation`] from anything printable.
+    pub(crate) fn validation(message: impl Into<String>) -> Self {
+        Self::Validation {
+            message: message.into(),
+        }
+    }
 }
