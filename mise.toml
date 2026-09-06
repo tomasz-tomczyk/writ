@@ -1,0 +1,18 @@
+[tools]
+rust = "1.98.1"
+
+[tasks.test]
+description = "Run the full test suite"
+run = "cargo test --workspace"
+
+[tasks.check]
+description = "Format, lint, and test"
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo test --workspace",
+]
+
+[tasks.build]
+description = "Build the writ binary"
+run = "cargo build --release"
