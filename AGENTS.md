@@ -31,7 +31,7 @@ mise run build
 crates/writ-core/   storage, selection, budget, dedupe.
                     Knows nothing about a terminal, socket, or HTTP.
 crates/writ-cli/    the `writ` binary. The only crate that does I/O.
-plugins/claude-code/  the /learn skill and the Stop hook.
+plugins/claude-code/  the /record skill and the Stop hook.
 ```
 
 ## Invariants
@@ -50,7 +50,13 @@ These are decisions, not preferences. Breaking one is a spec violation.
    caps at `max_rules` and `max_chars`.
 6. **Fail honestly.** Every error names its real cause and exits with
    its own code. Never hang on stdin. See spec P7.
-7. **Docs, skills, and the CLI agree.** A flag in the README or a
+7. **Never set `updated_at` by hand in a write.** A database trigger
+   maintains it. The trigger guards on
+   `WHEN new.updated_at = old.updated_at`, so an UPDATE that sets the
+   column explicitly silently bypasses it. Setting it deliberately is
+   reserved for import, where a learning keeps the timestamps it
+   arrived with.
+8. **Docs, skills, and the CLI agree.** A flag in the README or a
    SKILL.md that the binary rejects is a bug. See spec P8.
 
 ## Working style

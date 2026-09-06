@@ -1,0 +1,16 @@
+[package]
+name = "writ-cli"
+description = "writ: a local-first ledger of the steering you give coding agents."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "writ"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+writ-core = { path = "../writ-core", version = "0.1.0" }

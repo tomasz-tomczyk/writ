@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/writ-core", "crates/writ-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/tomasztomczyk/writ"
+
+[workspace.dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v7"] }
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
