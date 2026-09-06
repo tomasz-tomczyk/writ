@@ -1,5 +1,7 @@
 [tools]
-rust = "1.98.1"
+# components are explicit so CI installs the same toolchain as a laptop.
+# Without them, `mise exec -- cargo fmt` fails on a clean machine.
+rust = { version = "1.98.1", components = "rustfmt,clippy" }
 
 [tasks.test]
 description = "Run the full test suite"
