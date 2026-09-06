@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the pinned toolchain
+        uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: mise exec -- cargo fmt --all --check
+
+      - name: Clippy
+        run: mise exec -- cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: mise exec -- cargo test --workspace
+
+  install:
+    name: cargo install resolves the writ binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - name: Install from source
+        run: mise exec -- cargo install --path crates/writ-cli --locked
+      - name: The binary is named writ, not writ-cli
+        run: writ --version
