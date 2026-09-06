@@ -10,8 +10,8 @@ use crate::fts;
 use crate::id::new_id;
 use crate::migrate;
 use crate::model::{
-    Exemplar, ExemplarKind, Learning, ListFilter, MatcherKind, NearMatch, NewExemplar, NewLearning,
-    Recorded, Scope, ScopeKind, SourceKind, Status,
+    Exemplar, ExemplarKind, Finding, Learning, ListFilter, MatcherKind, NearMatch, NewExemplar,
+    NewLearning, Recorded, Scope, ScopeKind, SourceKind, Status,
 };
 
 /// An open writ database.
@@ -475,6 +475,48 @@ impl Store {
         })
     }
 
+    /// Read the findings for one learning, oldest first.
+    pub fn findings_of(&self, learning_id: &str) -> Result<Vec<Finding>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, audit_id, learning_id, path, line, detail, outcome
+               FROM findings
+              WHERE learning_id = ?1
+              ORDER BY id",
+        )?;
+        let rows = stmt.query_map([learning_id], |row| {
+            let outcome: String = row.get(6)?;
+            Ok(Finding {
+                id: row.get(0)?,
+                audit_id: row.get(1)?,
+                learning_id: row.get(2)?,
+                path: row.get(3)?,
+                line: row.get(4)?,
+                detail: row.get(5)?,
+                outcome: parse_outcome(&outcome).map_err(to_sqlite_error)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Record that the developer rejected a finding.
+    ///
+    /// This is the only core path that writes `rejected`; audited agents
+    /// cannot set it through [`Store::ingest`]. Repeating the rejection is
+    /// harmless.
+    pub fn reject_finding(&mut self, finding_id: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE findings SET outcome = 'rejected' WHERE id = ?1",
+            [finding_id],
+        )?;
+        if changed == 0 {
+            return Err(Error::NotFound {
+                id: finding_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// How past findings settled for one learning. Spec section 7.5.
     fn outcomes_of(&self, id: &str) -> Result<Outcomes> {
         let mut outcomes = Outcomes::default();
@@ -774,6 +816,18 @@ fn scope_kind(text: &str) -> Result<ScopeKind> {
 
 fn to_sqlite_error(error: Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+}
+
+fn parse_outcome(outcome: &str) -> Result<Outcome> {
+    match outcome {
+        "open" => Ok(Outcome::Open),
+        "fixed" => Ok(Outcome::Fixed),
+        "ignored" => Ok(Outcome::Ignored),
+        "rejected" => Ok(Outcome::Rejected),
+        other => Err(Error::validation(format!(
+            "unknown finding outcome in database: {other}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -1966,6 +2020,70 @@ mod tests {
         assert!(matches!(error, Error::Validation { .. }), "{error}");
         // The whole call is one transaction, so nothing landed.
         assert_eq!(store.get(&id).unwrap().times_applied, 0);
+    }
+
+    #[test]
+    fn findings_of_returns_rows_for_a_learning() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = active(&mut store, "t", &["global"]);
+        let audit = store.start_audit("repo", "HEAD", 1, &[]).unwrap();
+        store
+            .ingest(&FindingsInput {
+                audit_id: audit.clone(),
+                findings: vec![IncomingFinding {
+                    learning_id: id.clone(),
+                    path: Some("a.rs".into()),
+                    line: Some(3),
+                    detail: Some("bad".into()),
+                    outcome: Outcome::Open,
+                }],
+            })
+            .unwrap();
+
+        let rows = store.findings_of(&id).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].audit_id, audit);
+        assert_eq!(rows[0].learning_id, id);
+        assert_eq!(rows[0].path.as_deref(), Some("a.rs"));
+        assert_eq!(rows[0].line, Some(3));
+        assert_eq!(rows[0].detail.as_deref(), Some("bad"));
+        assert_eq!(rows[0].outcome, Outcome::Open);
+    }
+
+    #[test]
+    fn reject_finding_sets_outcome_rejected() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = active(&mut store, "t", &["global"]);
+        let audit = store.start_audit("repo", "HEAD", 1, &[]).unwrap();
+        store
+            .ingest(&FindingsInput {
+                audit_id: audit,
+                findings: vec![IncomingFinding {
+                    learning_id: id.clone(),
+                    path: None,
+                    line: None,
+                    detail: None,
+                    outcome: Outcome::Open,
+                }],
+            })
+            .unwrap();
+        let finding_id = store.findings_of(&id).unwrap()[0].id.clone();
+
+        store.reject_finding(&finding_id).unwrap();
+        store.reject_finding(&finding_id).unwrap();
+
+        assert_eq!(
+            store.findings_of(&id).unwrap()[0].outcome,
+            Outcome::Rejected
+        );
+    }
+
+    #[test]
+    fn reject_finding_unknown_id_is_not_found() {
+        let mut store = Store::open_in_memory().unwrap();
+        let error = store.reject_finding("missing").unwrap_err();
+        assert!(matches!(error, Error::NotFound { .. }), "{error}");
     }
 
     /// A rejection still has to rank, once a developer path writes one.

@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::audit::Outcome;
 use crate::error::{Error, Result};
 
 /// Where a learning stands. `archived` is reached by `writ archive`, never
@@ -301,6 +302,25 @@ pub struct Exemplar {
     pub snippet: String,
     /// A note that travels with the snippet.
     pub note: Option<String>,
+}
+
+/// One finding as it is stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Finding {
+    /// UUIDv7.
+    pub id: String,
+    /// The audit that produced this finding.
+    pub audit_id: String,
+    /// The learning the diff broke.
+    pub learning_id: String,
+    /// Where, for this audit only.
+    pub path: Option<String>,
+    /// Which line, for this audit only.
+    pub line: Option<i64>,
+    /// What was wrong.
+    pub detail: Option<String>,
+    /// What happened to the finding.
+    pub outcome: Outcome,
 }
 
 fn blocking_default() -> bool {
