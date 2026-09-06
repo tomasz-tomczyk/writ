@@ -12,7 +12,10 @@ pub fn render(state: &AppState) -> Result<String, Error> {
         })?;
 
         if proposed.is_empty() {
-            return Ok(r#"<div class="shell empty">Inbox is empty. Every proposal is curated.</div>"#.into());
+            return Ok(
+                r#"<div class="shell empty">Inbox is empty. Every proposal is curated.</div>"#
+                    .into(),
+            );
         }
 
         let mut html = String::from(r#"<div class="inbox">"#);
@@ -22,10 +25,7 @@ pub fn render(state: &AppState) -> Result<String, Error> {
                 &format!("{} {}", learning.title, learning.rule),
                 state.config.dedupe.warn_top_n,
             )?;
-            let near: Vec<NearMatch> = near
-                .into_iter()
-                .filter(|m| m.id != learning.id)
-                .collect();
+            let near: Vec<NearMatch> = near.into_iter().filter(|m| m.id != learning.id).collect();
 
             html.push_str("<article class=\"proposal\">");
             html.push_str(&format!("<h2>{}</h2>", escape(&learning.title)));
@@ -38,7 +38,8 @@ pub fn render(state: &AppState) -> Result<String, Error> {
                 escape(&learning.rationale)
             ));
 
-            if let (Some(kind), Some(pattern)) = (learning.matcher_kind, learning.matcher.as_ref()) {
+            if let (Some(kind), Some(pattern)) = (learning.matcher_kind, learning.matcher.as_ref())
+            {
                 html.push_str(&format!(
                     "<p><span class=\"badge matcher\">{}: {}</span></p>",
                     escape(kind.as_str()),

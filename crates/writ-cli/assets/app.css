@@ -76,9 +76,387 @@ h1 {
   margin: 0 0 var(--gap);
 }
 
+h2 {
+  font-size: 1.25rem;
+  margin: 1.5rem 0 0.75rem;
+}
+
+h4 {
+  font-size: 0.875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 0.25rem;
+  color: var(--muted);
+}
+
 .shell {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: var(--gap);
+}
+
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 2.5rem var(--gap);
+}
+
+/* Buttons and links styled as buttons */
+
+button,
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font: inherit;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  line-height: 1.25;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.45rem 0.85rem;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+button:hover,
+.button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+button.primary,
+.button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+button.primary:hover,
+.button.primary:hover {
+  filter: brightness(0.95);
+}
+
+button.danger,
+.button.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+button.danger:hover,
+.button.danger:hover {
+  background: var(--danger);
+  color: var(--accent-ink);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.actions form {
+  margin: 0;
+}
+
+/* Forms */
+
+form {
+  margin: 0 0 var(--gap);
+}
+
+form.detail {
+  margin-bottom: 0;
+}
+
+form.danger-form {
+  margin: var(--gap) 0;
+}
+
+.field {
+  margin-bottom: var(--gap);
+}
+
+.field.inline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.field.inline label {
+  font-weight: 500;
+}
+
+label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+input[type="text"],
+input[type="search"],
+select,
+textarea {
+  width: 100%;
+  font: inherit;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+}
+
+textarea {
+  min-height: 6rem;
+  resize: vertical;
+}
+
+input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
+/* Tables */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+th,
+td {
+  padding: 0.65rem 0.85rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+th {
+  background: var(--bg);
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+/* Chips and badges */
+
+.chip,
+.badge,
+.status-badge,
+.outcome {
+  display: inline-block;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  margin: 0.15rem 0.15rem 0.15rem 0;
+  white-space: nowrap;
+}
+
+.badge.matcher,
+.status-badge.active,
+.outcome.fixed {
+  background: #dcfce7;
+  border-color: #86efac;
+  color: #14532d;
+}
+
+.status-badge.proposed {
+  background: #fef3c7;
+  border-color: #fde68a;
+  color: #78350f;
+}
+
+.status-badge.archived,
+.outcome.rejected {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #7f1d1d;
+}
+
+.outcome.open,
+.outcome.ignored {
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+/* Health dots */
+
+.health-dot {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.health-dot.amber {
+  background: var(--warn);
+}
+
+.health-dot.red {
+  background: var(--danger);
+}
+
+/* Collection */
+
+.collection-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap);
+  margin-bottom: var(--gap);
+}
+
+.collection-controls form.search {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0;
+  flex: 1 1 18rem;
+}
+
+.collection-controls form.search input {
+  flex: 1;
+}
+
+.collection-controls .chips {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.collection-controls .chips a {
+  text-decoration: none;
+}
+
+.collection-controls .chips a.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--panel);
+}
+
+/* Inbox proposals */
+
+.proposal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap);
+  margin-bottom: var(--gap);
+}
+
+.proposal h2 {
+  margin: 0 0 0.5rem;
+}
+
+.proposal .rule,
+.proposal .rationale {
+  margin: 0.5rem 0;
+}
+
+.exemplars {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--gap);
+  margin: var(--gap) 0;
+}
+
+.exemplar pre {
+  margin: 0;
+  padding: 0.75rem;
+  background: #1e1e1e;
+  color: #f3f4f6;
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.exemplar.good pre {
+  border-left: 4px solid var(--ok);
+}
+
+.exemplar.bad pre {
+  border-left: 4px solid var(--danger);
+}
+
+.near-match {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.35rem 0;
+}
+
+form.merge {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  margin: var(--gap) 0;
+}
+
+form.merge fieldset {
+  border: none;
+  padding: 0;
+  margin: 0 0 0.75rem;
+}
+
+form.merge legend {
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+/* Detail */
+
+.detail .field input[type="text"],
+.detail .field textarea,
+.detail .field select {
+  max-width: 40rem;
+}
+
+.findings {
+  margin-top: var(--gap);
+}
+
+.findings td.actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Health */
+
+.health tr.in-both {
+  background: #fff7ed;
+}
+
+.health a.keep {
+  color: var(--muted);
+}
+
+/* Code */
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+pre code {
+  font-size: 0.875rem;
+}
+
+.muted {
+  color: var(--muted);
 }

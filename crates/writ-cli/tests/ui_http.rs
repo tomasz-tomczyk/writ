@@ -159,7 +159,10 @@ fn active_learning(store: &mut Store, title: &str) -> String {
 fn select_learning(store: &mut Store, learning_id: &str) {
     let learning = store.get(learning_id).unwrap();
     let exemplars = store.exemplars_of(learning_id).unwrap();
-    let selected = vec![Selected { learning, exemplars }];
+    let selected = vec![Selected {
+        learning,
+        exemplars,
+    }];
     let audit_id = store
         .start_audit("repo", "HEAD", selected.len(), &selected)
         .unwrap();
@@ -205,7 +208,10 @@ async fn inbox_lists_proposed_with_exemplars_and_near_matches() {
     assert!(body.contains("prefer ripgrep over grep"), "{body}");
     assert!(body.contains("let x = 1;"), "{body}");
     assert!(body.contains("Near matches"), "{body}");
-    assert!(body.contains("/learnings/"), "edit link should be present: {body}");
+    assert!(
+        body.contains("/learnings/"),
+        "edit link should be present: {body}"
+    );
 }
 
 #[tokio::test]
@@ -297,7 +303,9 @@ async fn merge_reinforces_target_and_archives_proposal() {
     assert_eq!(store.get(&proposed_id).unwrap().status, Status::Archived);
     let target_exemplars = store.exemplars_of(&target_id).unwrap();
     assert!(
-        target_exemplars.iter().any(|e| e.snippet == "merged snippet"),
+        target_exemplars
+            .iter()
+            .any(|e| e.snippet == "merged snippet"),
         "target should receive the proposed exemplars"
     );
 }
@@ -316,7 +324,10 @@ fn finding_with_path(
 ) -> String {
     let learning = store.get(learning_id).unwrap();
     let exemplars = store.exemplars_of(learning_id).unwrap();
-    let selected = vec![Selected { learning, exemplars }];
+    let selected = vec![Selected {
+        learning,
+        exemplars,
+    }];
     let audit_id = store
         .start_audit("repo", "HEAD", selected.len(), &selected)
         .unwrap();
@@ -529,7 +540,12 @@ async fn open_editor_runs_configured_command() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 303, "body: {}", response.text().await.unwrap());
+    assert_eq!(
+        response.status(),
+        303,
+        "body: {}",
+        response.text().await.unwrap()
+    );
     assert_eq!(
         response.headers()["location"],
         format!("/learnings/{learning_id}")
@@ -619,6 +635,45 @@ async fn health_marks_rows_in_both_buckets() {
 
     assert!(body.contains("in both buckets"), "{body}");
     assert!(body.contains("in-both"), "{body}");
+}
+
+#[tokio::test]
+async fn inbox_empty_state_shows_curation_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("{}/inbox", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains("Inbox is empty"), "{body}");
+    assert!(body.contains("Every proposal is curated"), "{body}");
+}
+
+#[tokio::test]
+async fn health_empty_state_shows_clear_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("{}/health", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains("Health is clear"), "{body}");
 }
 
 #[tokio::test]

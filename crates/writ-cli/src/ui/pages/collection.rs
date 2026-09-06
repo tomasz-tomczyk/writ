@@ -16,8 +16,7 @@ pub fn render(
 ) -> Result<String, Error> {
     with_store(state, |store| {
         let filter = ListFilter {
-            status: status_filter
-                .and_then(|s| if s == "all" { None } else { s.parse().ok() }),
+            status: status_filter.and_then(|s| if s == "all" { None } else { s.parse().ok() }),
             search: q.filter(|s| !s.is_empty()).map(String::from),
             ..Default::default()
         };
@@ -162,7 +161,11 @@ fn status_chips(current: Option<&str>) -> String {
 
 fn sort_link(label: &str, field: &str, sort: Option<&str>, dir: &str, q: Option<&str>) -> String {
     let active = sort == Some(field);
-    let next_dir = if active && dir == "asc" { "desc" } else { "asc" };
+    let next_dir = if active && dir == "asc" {
+        "desc"
+    } else {
+        "asc"
+    };
     let mut href = format!("/collection?sort={field}&dir={next_dir}");
     if let Some(query) = q {
         href.push_str(&format!("&q={}", urlencode(query)));

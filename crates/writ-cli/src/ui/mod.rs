@@ -74,13 +74,13 @@ fn open_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         let status = Command::new("open").arg(url).status()?;
-        return browser_status(status);
+        browser_status(status)
     }
 
     #[cfg(target_os = "linux")]
     {
         let status = Command::new("xdg-open").arg(url).status()?;
-        return browser_status(status);
+        browser_status(status)
     }
 
     #[cfg(target_os = "windows")]
@@ -88,7 +88,7 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         let status = Command::new("cmd")
             .args(["/C", "start", "", url])
             .status()?;
-        return browser_status(status);
+        browser_status(status)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

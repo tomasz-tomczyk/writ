@@ -59,7 +59,10 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
         html.push_str("<div class=\"field\">");
         html.push_str("<label>Matcher kind</label>");
         html.push_str(r#"<select name="matcher_kind"><option value="">—</option>"#);
-        for kind in [writ_core::MatcherKind::AstGrep, writ_core::MatcherKind::Regex] {
+        for kind in [
+            writ_core::MatcherKind::AstGrep,
+            writ_core::MatcherKind::Regex,
+        ] {
             let selected = learning.matcher_kind == Some(kind);
             html.push_str(&format!(
                 "<option value=\"{}\"{}>{}</option>",
@@ -217,7 +220,11 @@ fn build_update(form: &SaveForm) -> Result<LearningUpdate, Error> {
         .filter(|s| !s.is_empty())
         .map(str::parse)
         .transpose()?;
-    let matcher = form.matcher.as_deref().filter(|s| !s.is_empty()).map(String::from);
+    let matcher = form
+        .matcher
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
 
     let scopes: Result<Vec<Scope>, Error> = form
         .scope
@@ -228,7 +235,11 @@ fn build_update(form: &SaveForm) -> Result<LearningUpdate, Error> {
         .collect();
 
     let mut exemplars = Vec::new();
-    if let Some(snippet) = form.good_snippet.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(snippet) = form
+        .good_snippet
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
         exemplars.push(NewExemplar {
             kind: ExemplarKind::Good,
             language: None,
