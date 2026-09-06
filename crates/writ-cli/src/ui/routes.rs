@@ -31,7 +31,10 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn root(State(state): State<AppState>) -> Response {
-    let proposed = layout::count_proposed(&state);
+    let proposed = match layout::count_proposed(&state) {
+        Ok(count) => count,
+        Err(error) => return layout::error_response(error),
+    };
     let target = if proposed > 0 {
         "/inbox"
     } else {

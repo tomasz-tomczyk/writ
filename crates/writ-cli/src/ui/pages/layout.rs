@@ -1,5 +1,3 @@
-use std::sync::MutexGuard;
-
 use axum::http::StatusCode;
 use axum::http::header::HeaderValue;
 use axum::response::{Html, IntoResponse, Response};
@@ -10,7 +8,10 @@ use crate::ui::UI_PROTOCOL_VERSION;
 
 /// Render a full HTML page inside the shared layout.
 pub fn render(state: &AppState, title: &str, body: &str) -> Response {
-    let proposed_count = count_proposed(state);
+    let proposed_count = match count_proposed(state) {
+        Ok(count) => count,
+        Err(error) => return error_response(error),
+    };
     let inbox_badge = if proposed_count > 0 {
         format!(r#"<span class="badge">{proposed_count}</span>"#)
     } else {
@@ -52,21 +53,15 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
     response
 }
 
-pub fn count_proposed(state: &AppState) -> usize {
-    match state.store.lock() {
-        Ok(store) => proposed_len(&store),
-        Err(poisoned) => proposed_len(&poisoned.into_inner()),
-    }
-}
-
-fn proposed_len(store: &MutexGuard<'_, Store>) -> usize {
-    store
-        .list(&ListFilter {
+/// Count proposed learnings, or surface a real store/lock failure (P7).
+pub fn count_proposed(state: &AppState) -> Result<usize, Error> {
+    with_store(state, |store| {
+        let rows = store.list(&ListFilter {
             status: Some(Status::Proposed),
             ..Default::default()
-        })
-        .map(|rows| rows.len())
-        .unwrap_or(0)
+        })?;
+        Ok(rows.len())
+    })
 }
 
 /// Escape text for insertion into HTML.
@@ -92,14 +87,14 @@ pub fn error_response(error: Error) -> Response {
     response
 }
 
-/// Lock the shared store, recovering from poisoning.
+/// Lock the shared store. A poisoned lock is reported, not papered over (P7).
 pub fn with_store<T, F>(state: &AppState, f: F) -> Result<T, Error>
 where
     F: FnOnce(&mut Store) -> Result<T, Error>,
 {
-    let mut store = state
-        .store
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut store = state.store.lock().map_err(|_| Error::Command {
+        program: "writ ui".to_string(),
+        message: "store lock was poisoned".to_string(),
+    })?;
     f(&mut store)
 }
