@@ -2,11 +2,12 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use rust_embed::RustEmbed;
 
 use crate::ui::AppState;
-use crate::ui::pages::layout;
+use crate::ui::actions;
+use crate::ui::pages::{collection, detail, health, inbox, layout};
 
 #[derive(RustEmbed)]
 #[folder = "assets/"]
@@ -16,8 +17,15 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/inbox", get(inbox))
+        .route("/inbox/{id}/approve", post(actions::approve))
+        .route("/inbox/{id}/reject", post(actions::reject_proposal))
+        .route("/inbox/{id}/merge", post(actions::merge))
         .route("/collection", get(collection))
         .route("/health", get(health))
+        .route("/learnings/{id}", get(detail::get).post(detail::post))
+        .route("/learnings/{id}/archive", post(detail::archive))
+        .route("/findings/{id}/reject", post(actions::reject_finding))
+        .route("/findings/{id}/open", post(actions::open_editor))
         .route("/assets/{*path}", get(assets))
         .with_state(state)
 }
@@ -39,27 +47,24 @@ async fn root(State(state): State<AppState>) -> Response {
 }
 
 async fn inbox(State(state): State<AppState>) -> Response {
-    layout::render(
-        &state,
-        "Inbox",
-        r#"<div class="shell">Inbox is empty.</div>"#,
-    )
+    match inbox::render(&state) {
+        Ok(body) => layout::render(&state, "Inbox", &body),
+        Err(error) => layout::error_response(error),
+    }
 }
 
 async fn collection(State(state): State<AppState>) -> Response {
-    layout::render(
-        &state,
-        "Collection",
-        r#"<div class="shell">Collection is empty.</div>"#,
-    )
+    match collection::render(&state, None, None, None, None) {
+        Ok(body) => layout::render(&state, "Collection", &body),
+        Err(error) => layout::error_response(error),
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Response {
-    layout::render(
-        &state,
-        "Health",
-        r#"<div class="shell">Health is clear.</div>"#,
-    )
+    match health::render(&state) {
+        Ok(body) => layout::render(&state, "Health", &body),
+        Err(error) => layout::error_response(error),
+    }
 }
 
 async fn assets(Path(path): Path<String>) -> Response {

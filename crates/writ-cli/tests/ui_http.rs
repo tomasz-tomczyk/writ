@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use writ_cli::ui::{AppState, router};
-use writ_core::{Config, NewLearning, Status, Store};
+use writ_core::{Config, ExemplarKind, NewExemplar, NewLearning, Status, Store};
 
 async fn start_app(db: &Path, config: Config) -> String {
     let store = Store::open(db).unwrap();
@@ -136,4 +136,144 @@ async fn embedded_assets_are_served() {
     assert!(js_type.contains("javascript"), "{js_type}");
     let js_body = js.text().await.unwrap();
     assert!(js_body.contains("htmx"), "{js_body}");
+}
+
+fn proposed_with_exemplars(store: &mut Store, title: &str, snippet: &str) -> String {
+    let mut learning = NewLearning::new(title, "rule", "rationale");
+    learning.status = Some(Status::Proposed);
+    learning.exemplars = vec![NewExemplar {
+        kind: ExemplarKind::Good,
+        language: Some("rust".into()),
+        snippet: snippet.into(),
+        note: None,
+    }];
+    store.record(&learning, 0).unwrap().id
+}
+
+fn active_learning(store: &mut Store, title: &str) -> String {
+    let mut learning = NewLearning::new(title, "rule", "rationale");
+    learning.status = Some(Status::Active);
+    store.record(&learning, 0).unwrap().id
+}
+
+#[tokio::test]
+async fn inbox_lists_proposed_with_exemplars_and_near_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        proposed_with_exemplars(&mut store, "prefer sd over sed", "let x = 1;");
+        proposed_with_exemplars(&mut store, "prefer ripgrep over grep", "let y = 2;");
+    }
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("{}/inbox", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains("prefer sd over sed"), "{body}");
+    assert!(body.contains("prefer ripgrep over grep"), "{body}");
+    assert!(body.contains("let x = 1;"), "{body}");
+    assert!(body.contains("Near matches"), "{body}");
+    assert!(body.contains("/learnings/"), "edit link should be present: {body}");
+}
+
+#[tokio::test]
+async fn approve_activates_and_removes_from_inbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        proposed_with_exemplars(&mut store, "activate me", "s")
+    };
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = client
+        .post(format!("{}/inbox/{id}/approve", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 303);
+
+    let store = Store::open(&db).unwrap();
+    let learning = store.get(&id).unwrap();
+    assert_eq!(learning.status, Status::Active);
+
+    let body = client
+        .get(format!("{}/inbox", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!body.contains("activate me"), "{body}");
+}
+
+#[tokio::test]
+async fn reject_archives_proposal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        proposed_with_exemplars(&mut store, "reject me", "s")
+    };
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = client
+        .post(format!("{}/inbox/{id}/reject", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 303);
+
+    let store = Store::open(&db).unwrap();
+    assert_eq!(store.get(&id).unwrap().status, Status::Archived);
+}
+
+#[tokio::test]
+async fn merge_reinforces_target_and_archives_proposal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let (target_id, proposed_id) = {
+        let mut store = Store::open(&db).unwrap();
+        let target = active_learning(&mut store, "target rule");
+        let proposed = proposed_with_exemplars(&mut store, "similar target rule", "merged snippet");
+        (target, proposed)
+    };
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = client
+        .post(format!("{}/inbox/{proposed_id}/merge", base))
+        .form(&[("target_id", &target_id)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 303);
+
+    let store = Store::open(&db).unwrap();
+    assert_eq!(store.get(&proposed_id).unwrap().status, Status::Archived);
+    let target_exemplars = store.exemplars_of(&target_id).unwrap();
+    assert!(
+        target_exemplars.iter().any(|e| e.snippet == "merged snippet"),
+        "target should receive the proposed exemplars"
+    );
 }

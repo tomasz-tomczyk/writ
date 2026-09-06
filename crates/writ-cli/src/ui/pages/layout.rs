@@ -1,8 +1,9 @@
 use std::sync::MutexGuard;
 
+use axum::http::StatusCode;
 use axum::http::header::HeaderValue;
 use axum::response::{Html, IntoResponse, Response};
-use writ_core::{ListFilter, Status, Store};
+use writ_core::{Error, ListFilter, Status, Store};
 
 use crate::ui::AppState;
 use crate::ui::UI_PROTOCOL_VERSION;
@@ -66,4 +67,39 @@ fn proposed_len(store: &MutexGuard<'_, Store>) -> usize {
         })
         .map(|rows| rows.len())
         .unwrap_or(0)
+}
+
+/// Escape text for insertion into HTML.
+pub fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Turn a `writ-core` error into an HTTP response.
+pub fn error_response(error: Error) -> Response {
+    let status = match error {
+        Error::NotFound { .. } => StatusCode::NOT_FOUND,
+        Error::Validation { .. } => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let mut response = (status, escape(&error.to_string())).into_response();
+    response.headers_mut().insert(
+        "x-writ-protocol-version",
+        HeaderValue::from(UI_PROTOCOL_VERSION),
+    );
+    response
+}
+
+/// Lock the shared store, recovering from poisoning.
+pub fn with_store<T, F>(state: &AppState, f: F) -> Result<T, Error>
+where
+    F: FnOnce(&mut Store) -> Result<T, Error>,
+{
+    let mut store = state
+        .store
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut store)
 }

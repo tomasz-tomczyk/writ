@@ -1,5 +1,6 @@
 //! The local web interface server.
 
+mod actions;
 mod pages;
 mod routes;
 mod state;
