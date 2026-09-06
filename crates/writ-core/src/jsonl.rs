@@ -46,7 +46,7 @@ pub fn parse_jsonl(text: &str) -> Result<Vec<NewLearning>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ExemplarKind, Scope, Status};
+    use crate::model::{ExemplarKind, Status};
 
     const ONE: &str = r#"{"title":"t","rule":"r","rationale":"why"}"#;
 
@@ -62,15 +62,20 @@ mod tests {
 
     #[test]
     fn every_portable_field_parses() {
+        // Two narrowing kinds, not `global` beside one. Section 7.1 step 2
+        // ANDs the kinds, so `global` cannot be combined with another.
         let line = r#"{"title":"t","rule":"r","rationale":"why",
-          "scopes":["global","language:rust"],"blocking":false,
+          "scopes":["project:github.com/o/r","language:rust"],"blocking":false,
           "matcher":"$A","matcher_kind":"ast_grep","author":"dev@example.com",
           "exemplars":[{"kind":"bad","snippet":"let x = 1;","language":"rust"}]}"#
             .replace('\n', " ");
         let learning = &parse_jsonl(&line).unwrap()[0];
         assert_eq!(
             learning.scopes,
-            vec![Scope::global(), "language:rust".parse().unwrap()]
+            vec![
+                "project:github.com/o/r".parse().unwrap(),
+                "language:rust".parse().unwrap()
+            ]
         );
         assert!(!learning.blocking);
         assert_eq!(learning.exemplars[0].kind, ExemplarKind::Bad);
@@ -88,6 +93,18 @@ mod tests {
         let text = format!("{ONE}\nnot json\n{ONE}\n");
         let error = parse_jsonl(&text).unwrap_err();
         assert!(matches!(error, Error::BadJson { line: 2, .. }), "{error}");
+    }
+
+    /// A pack authored under the old OR semantics carries `global` beside
+    /// another kind. Importing it must fail loudly rather than keeping
+    /// half of what it says. Section 7.4 imports through this path.
+    #[test]
+    fn an_imported_global_plus_narrow_scope_is_refused() {
+        let line = r#"{"title":"t","rule":"r","rationale":"why",
+          "scopes":["global","project:github.com/o/r"]}"#
+            .replace('\n', " ");
+        let error = parse_jsonl(&line).unwrap_err();
+        assert!(error.to_string().contains("cannot be combined"), "{error}");
     }
 
     #[test]

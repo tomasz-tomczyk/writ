@@ -350,6 +350,7 @@ impl LearningUpdate {
         if scopes.len() != before {
             return Err(Error::validation("the same scope is given twice"));
         }
+        reject_global_with_another_kind(&scopes)?;
         for exemplar in &self.exemplars {
             if exemplar.snippet.is_empty() {
                 return Err(Error::validation("an exemplar snippet is empty"));
@@ -542,6 +543,7 @@ impl NewLearning {
         if scopes.len() != before {
             return Err(Error::validation("the same scope is given twice"));
         }
+        reject_global_with_another_kind(&scopes)?;
         for exemplar in &self.exemplars {
             if exemplar.snippet.is_empty() {
                 return Err(Error::validation("an exemplar snippet is empty"));
@@ -549,6 +551,25 @@ impl NewLearning {
         }
         Ok(())
     }
+}
+
+/// Refuse `global` beside any other scope kind. Spec section 7.1 step 2.
+///
+/// Kinds AND across each other, so every other kind narrows a rule and
+/// `global` does not. "Everywhere, and also only Elixir" has no meaning,
+/// and silently keeping one half of the pair is the invisible failure P7
+/// exists to prevent.
+///
+/// Both `NewLearning` and `LearningUpdate` call this, so a write and an
+/// edit cannot drift apart on it.
+fn reject_global_with_another_kind(scopes: &[Scope]) -> Result<()> {
+    if scopes.iter().any(|one| one.kind == ScopeKind::Global) && scopes.len() > 1 {
+        return Err(Error::validation(
+            "the global scope cannot be combined with another scope. \
+             Every other scope kind narrows the rule, and global does not",
+        ));
+    }
+    Ok(())
 }
 
 /// One learning as it is read back.
@@ -735,6 +756,25 @@ mod tests {
         learning.validate().unwrap();
         learning.matcher = None;
         assert!(learning.validate().is_err());
+    }
+
+    /// Section 7.1 step 2: kinds AND across each other, so "everywhere,
+    /// and also only Elixir" has no meaning. Keeping one half of the pair
+    /// silently is the invisible failure P7 exists to prevent.
+    #[test]
+    fn global_cannot_be_combined_with_another_scope() {
+        let mut learning = NewLearning::new("t", "r", "why");
+        learning.scopes = vec!["global".parse().unwrap(), "language:rust".parse().unwrap()];
+        let error = learning.validate().unwrap_err();
+        assert!(error.to_string().contains("cannot be combined"), "{error}");
+
+        learning.scopes = vec!["global".parse().unwrap()];
+        learning.validate().unwrap();
+        learning.scopes = vec![
+            "language:rust".parse().unwrap(),
+            "project:github.com/o/r".parse().unwrap(),
+        ];
+        learning.validate().unwrap();
     }
 
     #[test]

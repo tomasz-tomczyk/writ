@@ -1,0 +1,9 @@
+{
+  "name": "writ",
+  "description": "Capture the steering you give coding agents once, and audit every diff against it.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "homepage": "https://github.com/tomasztomczyk/writ",
+  "keywords": ["code-review", "conventions", "memory"],
+  "hooks": "./hooks/hooks.json"
+}

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "writ audit --hook claude-code",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

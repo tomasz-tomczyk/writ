@@ -19,6 +19,13 @@ run = [
   "cargo test --workspace",
 ]
 
+[tasks.docs]
+description = "Check every flag in the README and the skills against writ --help"
+run = [
+  "cargo build --bin writ",
+  "./scripts/check-doc-flags.sh",
+]
+
 [tasks.build]
 description = "Build the writ binary"
 run = "cargo build --release"

@@ -1,0 +1,14 @@
+{
+  "name": "writ",
+  "owner": {
+    "name": "Tomasz Tomczyk",
+    "url": "https://github.com/tomasztomczyk/writ"
+  },
+  "plugins": [
+    {
+      "name": "writ",
+      "source": "./plugins/claude-code",
+      "description": "Capture the steering you give coding agents once, and audit every diff against it."
+    }
+  ]
+}

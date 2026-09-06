@@ -10,10 +10,12 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use writ_core::{
-    AuditScope, Budget, Config, Diff, Error, Result, Store, parse_findings, rank, render_prompt,
+    AuditScope, Budget, Config, Diff, Error, Ingested, Result, Selected, Store, parse_findings,
+    rank, render_prompt,
 };
 
 use crate::git;
+use crate::hook::{self, Host};
 use crate::matcher::{Verdict, evaluate};
 use crate::output::AuditFormat;
 
@@ -30,28 +32,86 @@ const DRY_RUN_ID: &str = "dry-run-nothing-recorded-no-audit-id";
 pub struct Args {
     /// Git range. Defaults to the working tree against HEAD
     #[arg(long, value_name = "RANGE", conflicts_with = "ingest")]
-    diff: Option<String>,
+    pub diff: Option<String>,
 
     /// prompt, json or text
     #[arg(long, default_value_t = AuditFormat::Prompt, value_name = "FORMAT")]
-    format: AuditFormat,
+    pub format: AuditFormat,
 
     /// Read findings JSON on stdin, write rows, update counters
     #[arg(long)]
-    ingest: bool,
+    pub ingest: bool,
 
     /// The most learnings one prompt may carry
     #[arg(long = "max-rules", value_name = "N", conflicts_with = "ingest")]
-    max_rules: Option<u32>,
+    pub max_rules: Option<u32>,
 
     /// The most characters of rule text one prompt may carry
     #[arg(long = "max-chars", value_name = "N", conflicts_with = "ingest")]
-    max_chars: Option<u32>,
+    pub max_chars: Option<u32>,
 
     /// Select, rank and render, but write nothing. No audit row and no
     /// counters, so the findings cannot be ingested
     #[arg(long = "dry-run", conflicts_with = "ingest")]
-    dry_run: bool,
+    pub dry_run: bool,
+
+    /// Emit the verdict in a host's gate protocol: claude-code, codex or
+    /// cursor. Spec section 9.2
+    ///
+    /// It conflicts with `--ingest` because both want stdin, and the two
+    /// documents are different: `--ingest` reads findings, `--hook` reads
+    /// the host's retry signal. Reading one and guessing at the other is
+    /// the silent misread P7 forbids.
+    #[arg(long, value_name = "HOST", conflicts_with = "ingest")]
+    pub hook: Option<Host>,
+
+    /// How many times Cursor may resubmit before the gate gives up
+    #[arg(
+        long = "loop-limit",
+        value_name = "N",
+        default_value_t = hook::DEFAULT_LOOP_LIMIT,
+        requires = "hook",
+    )]
+    pub loop_limit: u64,
+}
+
+/// What one selection run produced, before anything is printed.
+///
+/// [`select`] returns this and prints nothing, so the CLI, the MCP tool
+/// and the host gate all render the same result three ways instead of
+/// three code paths computing it three times. Invariant 1 keeps this out
+/// of `writ-core`, because building it runs git.
+#[derive(Debug)]
+pub struct Selection {
+    /// The `audits` row this run wrote, or [`DRY_RUN_ID`].
+    pub audit_id: String,
+    /// The repository and the diff the run looked at.
+    pub scope: AuditScope,
+    /// How many learnings the scope query returned.
+    pub considered: usize,
+    /// The learnings that fit the budget.
+    pub selected: Vec<Selected>,
+    /// Things worth saying on stderr. They are not the result, so the
+    /// caller decides whether a hook protocol wants them.
+    pub notices: Vec<String>,
+}
+
+impl Selection {
+    /// Whether the gate should send the agent back. Spec section 9.2.
+    ///
+    /// **Any** selected learning gates, blocking or advisory. `blocking`
+    /// decides whether an unfixed violation stops the work at ingest, not
+    /// whether the agent is sent back to review. Gating here on
+    /// `blocking` would select an advisory learning, count it against the
+    /// budget, and drop it unread.
+    pub fn gates(&self) -> bool {
+        !self.selected.is_empty()
+    }
+
+    /// The prompt the host sends back to the agent.
+    pub fn prompt(&self) -> String {
+        render_prompt(&self.audit_id, &self.scope, &self.selected)
+    }
 }
 
 /// Run the command and return the process exit code.
@@ -59,11 +119,83 @@ pub fn run(args: &Args, db: &Path, config: &Config) -> Result<ExitCode> {
     if args.ingest {
         return ingest(args, db);
     }
+    if let Some(host) = args.hook {
+        return hook::run(host, args, db, config);
+    }
     emit(args, db, config)
 }
 
 /// Steps 1 to 4: scope, select, budget, emit.
 fn emit(args: &Args, db: &Path, config: &Config) -> Result<ExitCode> {
+    let run = select(args, db, config)?;
+    for notice in &run.notices {
+        eprintln!("{notice}");
+    }
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    match args.format {
+        AuditFormat::Prompt => {
+            let _ = write!(out, "{}", run.prompt());
+        }
+        AuditFormat::Json => {
+            let _ = writeln!(out, "{}", report(&run, args.dry_run));
+        }
+        AuditFormat::Text => {
+            let _ = writeln!(out, "audit {}", run.audit_id);
+            let _ = writeln!(
+                out,
+                "{} on {}: {} considered, {} sent",
+                run.scope.diff_range,
+                run.scope.identity.value(),
+                run.considered,
+                run.selected.len()
+            );
+            for one in &run.selected {
+                let _ = writeln!(
+                    out,
+                    "  {}  {:<9}  {}",
+                    one.learning.id,
+                    if one.learning.blocking {
+                        "blocking"
+                    } else {
+                        "advisory"
+                    },
+                    one.learning.title
+                );
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The `--format json` body. The MCP tool returns this same value, so the
+/// two surfaces cannot describe one audit differently.
+pub fn report(run: &Selection, dry_run: bool) -> serde_json::Value {
+    serde_json::json!({
+        "audit_id": run.audit_id,
+        "repo": run.scope.identity.value(),
+        "repo_identity_is_path_fallback": run.scope.identity.is_fallback(),
+        "diff_range": run.scope.diff_range,
+        "considered": run.considered,
+        "sent": run.selected.len(),
+        "dry_run": dry_run,
+        "learnings": run.selected
+            .iter()
+            .map(|one| serde_json::json!({
+                "id": one.learning.id,
+                "title": one.learning.title,
+                "rule": one.learning.rule,
+                "rationale": one.learning.rationale,
+                "blocking": one.learning.blocking,
+                "exemplars": one.exemplars,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Steps 1 to 3: scope, select, budget. This prints nothing.
+pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     let cwd = std::env::current_dir().map_err(|error| Error::Command {
         program: "getcwd".into(),
         message: error.to_string(),
@@ -88,15 +220,16 @@ fn emit(args: &Args, db: &Path, config: &Config) -> Result<ExitCode> {
     let mut store = Store::open(db)?;
     let mut candidates = store.candidates(&scope)?;
     let considered = candidates.len();
+    let mut notices = Vec::new();
 
     // A matcher hit selects a learning. It never creates a finding.
     candidates.retain(|candidate| {
         let verdict = evaluate(&candidate.learning, &scope.diff, &repo.root);
         if let Verdict::Unevaluable(why) = &verdict {
-            eprintln!(
+            notices.push(format!(
                 "writ: keeping {} on scope alone: {why}",
                 candidate.learning.id
-            );
+            ));
         }
         verdict.keeps()
     });
@@ -121,75 +254,25 @@ fn emit(args: &Args, db: &Path, config: &Config) -> Result<ExitCode> {
     };
 
     if scope.identity.is_fallback() {
-        eprintln!(
+        notices.push(format!(
             "writ: this repository has no git remote, so its identity is the checkout path {}. \
              A project: scope recorded against a remote will not match it.",
             scope.identity.value()
-        );
+        ));
     }
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    match args.format {
-        AuditFormat::Prompt => {
-            let prompt = render_prompt(&audit_id, &scope, &selected);
-            let _ = write!(out, "{prompt}");
-        }
-        AuditFormat::Json => {
-            let report = serde_json::json!({
-                "audit_id": audit_id,
-                "repo": scope.identity.value(),
-                "repo_identity_is_path_fallback": scope.identity.is_fallback(),
-                "diff_range": scope.diff_range,
-                "considered": considered,
-                "sent": selected.len(),
-                "dry_run": args.dry_run,
-                "learnings": selected
-                    .iter()
-                    .map(|one| serde_json::json!({
-                        "id": one.learning.id,
-                        "title": one.learning.title,
-                        "rule": one.learning.rule,
-                        "rationale": one.learning.rationale,
-                        "blocking": one.learning.blocking,
-                        "exemplars": one.exemplars,
-                    }))
-                    .collect::<Vec<_>>(),
-            });
-            let _ = writeln!(out, "{report}");
-        }
-        AuditFormat::Text => {
-            let _ = writeln!(out, "audit {audit_id}");
-            let _ = writeln!(
-                out,
-                "{} on {}: {considered} considered, {} sent",
-                scope.diff_range,
-                scope.identity.value(),
-                selected.len()
-            );
-            for one in &selected {
-                let _ = writeln!(
-                    out,
-                    "  {}  {:<9}  {}",
-                    one.learning.id,
-                    if one.learning.blocking {
-                        "blocking"
-                    } else {
-                        "advisory"
-                    },
-                    one.learning.title
-                );
-            }
-        }
-    }
-    Ok(ExitCode::SUCCESS)
+    Ok(Selection {
+        audit_id,
+        scope,
+        considered,
+        selected,
+        notices,
+    })
 }
 
 /// Steps 5 and 6: write the findings, then gate on them.
 fn ingest(args: &Args, db: &Path) -> Result<ExitCode> {
-    let input = parse_findings(&read_stdin()?)?;
-    let mut store = Store::open(db)?;
-    let written = store.ingest(&input)?;
+    let written = ingest_text(&read_stdin()?, db)?;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -213,6 +296,17 @@ fn ingest(args: &Args, db: &Path) -> Result<ExitCode> {
         return Ok(ExitCode::from(1));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Write the findings and update the counters.
+///
+/// `--ingest` reads the same text off stdin and the MCP tool passes it as
+/// an argument, because stdin there is the transport. Both land here, so
+/// neither surface can drift from the other.
+pub fn ingest_text(text: &str, db: &Path) -> Result<Ingested> {
+    let input = parse_findings(text)?;
+    let mut store = Store::open(db)?;
+    store.ingest(&input)
 }
 
 /// Read the whole stream, and never wait on a person. crit #693.

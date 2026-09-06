@@ -445,6 +445,65 @@ fn scopes_are_stored_as_given() {
     assert_eq!(scopes[1], "language:rust");
 }
 
+/// Section 7.1 step 2. Every other kind narrows a rule and `global` does
+/// not, so the pair has no meaning and the write refuses it rather than
+/// keeping half of it.
+#[test]
+fn global_with_another_scope_is_refused() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&[
+        "record",
+        "--title",
+        "t",
+        "--rule",
+        "r",
+        "--rationale",
+        "why",
+        "--scope",
+        "global",
+        "--scope",
+        "language:rust",
+    ]);
+    output.assert_code(2);
+    assert!(
+        output.stderr.contains("cannot be combined"),
+        "{}",
+        output.stderr
+    );
+    assert!(sandbox.learnings().as_array().unwrap().is_empty());
+}
+
+/// A second scope narrows a rule. Under the old semantics it widened one,
+/// so `project:X` plus `language:elixir` fired on markdown edits in X.
+#[test]
+fn a_second_scope_narrows_the_rule_rather_than_widening_it() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    let narrow = sandbox.record(&[
+        "--scope",
+        "project:github.com/owner/repo",
+        "--scope",
+        "language:rust",
+        "--activate",
+    ]);
+
+    std::fs::write(root.join("a.rs"), "fn main() { }\n").unwrap();
+    assert!(
+        audit_ids(&sandbox, &root, &[]).contains(&narrow),
+        "a Rust file in the right repo matches both kinds"
+    );
+
+    // A markdown edit in the same repository matches the project kind and
+    // fails the language kind, so the rule must not fire.
+    std::fs::write(root.join("a.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("README.md"), "text\n").unwrap();
+    git(&root, &["add", "-A"]);
+    assert!(
+        !audit_ids(&sandbox, &root, &["--diff", "HEAD"]).contains(&narrow),
+        "a markdown edit fails the language kind"
+    );
+}
+
 #[test]
 fn an_unknown_scope_kind_is_refused() {
     let sandbox = Sandbox::new();
@@ -497,6 +556,85 @@ fn an_example_copies_the_snippet_text_never_the_path() {
     assert!(dump.contains("let x = 1;"), "the snippet was not stored");
     assert!(!dump.contains("findme.rs"), "a path reached the database");
     assert!(!id.is_empty());
+}
+
+/// Section 5: the snippet inline. An agent holds text, not a path, so
+/// without this form MCP cannot attach an exemplar at all -- and an
+/// exemplar is what makes a rule teach instead of assert.
+#[test]
+fn an_example_text_stores_the_snippet_it_was_given() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&["--example-text", "bad:sed -i '' s/a/b/ file"]);
+
+    let shown = sandbox.run(&["show", &id, "--format", "json"]);
+    shown.assert_code(0);
+    let shown: serde_json::Value = serde_json::from_str(&shown.stdout).unwrap();
+    let exemplars = shown["exemplars"].as_array().unwrap();
+    assert_eq!(exemplars.len(), 1);
+    assert_eq!(exemplars[0]["kind"], "bad");
+    assert_eq!(exemplars[0]["snippet"], "sed -i '' s/a/b/ file");
+}
+
+/// Invariant 3 again, from the other direction: the inline form has no
+/// path to leak, and it must not invent one.
+#[test]
+fn example_text_and_example_file_land_in_one_collection() {
+    let sandbox = Sandbox::new();
+    sandbox.write_file("findme.rs", "let x = 1;\n");
+    let id = sandbox.record(&[
+        "--example",
+        &format!("bad:{}", sandbox.path("findme.rs").display()),
+        "--example-text",
+        "good:let x = 1usize;",
+    ]);
+
+    let shown = sandbox.run(&["show", &id, "--format", "json"]);
+    shown.assert_code(0);
+    let shown: serde_json::Value = serde_json::from_str(&shown.stdout).unwrap();
+    let exemplars = shown["exemplars"].as_array().unwrap();
+    assert_eq!(exemplars.len(), 2);
+    let kinds: Vec<_> = exemplars
+        .iter()
+        .map(|one| one["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["bad", "good"]);
+
+    let dump = std::fs::read(sandbox.db()).unwrap();
+    assert!(!String::from_utf8_lossy(&dump).contains("findme.rs"));
+}
+
+#[test]
+fn an_example_text_with_no_kind_is_refused() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&[
+        "record",
+        "--title",
+        "t",
+        "--rule",
+        "r",
+        "--rationale",
+        "why",
+        "--example-text",
+        "let x = 1;",
+    ]);
+    output.assert_code(2);
+}
+
+#[test]
+fn an_empty_example_text_is_refused() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&[
+        "record",
+        "--title",
+        "t",
+        "--rule",
+        "r",
+        "--rationale",
+        "why",
+        "--example-text",
+        "good:",
+    ]);
+    output.assert_code(2);
 }
 
 #[test]
@@ -2035,4 +2173,223 @@ fn audit_ids(sandbox: &Sandbox, root: &Path, args: &[&str]) -> Vec<String> {
         .iter()
         .map(|one| one["id"].as_str().unwrap().to_string())
         .collect()
+}
+
+// --- writ audit --hook: the gate, spec section 9.2 ---------------------
+
+/// A repository with one uncommitted change and one active learning that
+/// applies to it, so an audit selects something.
+fn gated_repo(sandbox: &Sandbox, blocking: bool) -> PathBuf {
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+    let mut args = vec!["--activate"];
+    if !blocking {
+        args.push("--advisory");
+    }
+    sandbox.record(&args);
+    root
+}
+
+/// Run `writ audit --hook HOST` in `root` with a host payload on stdin.
+fn hook(sandbox: &Sandbox, root: &Path, host: &str, stdin: &str) -> Output {
+    let command = sandbox.cmd_at(root.to_path_buf(), &["audit", "--hook", host]);
+    run_with_stdin(command, stdin)
+}
+
+#[test]
+fn the_claude_code_hook_blocks_with_exit_two_and_findings_on_stderr() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let output = hook(&sandbox, &root, "claude-code", "{}");
+
+    output.assert_code(2);
+    assert!(output.stdout.is_empty(), "stdout: {}", output.stdout);
+    assert!(output.stderr.contains("prefer sd"), "{}", output.stderr);
+}
+
+#[test]
+fn the_codex_hook_blocks_on_stdout_with_exit_zero() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let output = hook(&sandbox, &root, "codex", "{}");
+
+    output.assert_code(0);
+    let body: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+    assert_eq!(body["decision"], "block");
+    assert!(
+        body["reason"].as_str().unwrap().contains("prefer sd"),
+        "{body}"
+    );
+}
+
+#[test]
+fn the_cursor_hook_submits_a_followup_message() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let output = hook(&sandbox, &root, "cursor", "{}");
+
+    output.assert_code(0);
+    let body: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+    assert!(
+        body["followup_message"]
+            .as_str()
+            .unwrap()
+            .contains("prefer sd"),
+        "{body}"
+    );
+    assert!(body.get("decision").is_none(), "{body}");
+}
+
+/// Section 9.2: hook entry gates on **any** selected learning, blocking or
+/// advisory. `blocking` decides whether an unfixed violation stops the
+/// work at ingest, not whether the agent is sent back to review. Gating
+/// entry on `blocking` would select an advisory learning, count it, and
+/// drop it unread.
+#[test]
+fn an_advisory_selection_still_sends_the_agent_back() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, false);
+
+    let claude = hook(&sandbox, &root, "claude-code", "{}");
+    claude.assert_code(2);
+    assert!(claude.stderr.contains("prefer sd"), "{}", claude.stderr);
+
+    let cursor = hook(&sandbox, &root, "cursor", "{}");
+    cursor.assert_code(0);
+    assert!(
+        cursor.stdout.contains("followup_message"),
+        "{}",
+        cursor.stdout
+    );
+}
+
+/// Nothing selected is the only pass-through. There is nothing to hand
+/// the agent, so the turn ends.
+#[test]
+fn an_empty_selection_passes_every_host_through() {
+    for host in ["claude-code", "codex", "cursor"] {
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+        std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+        // Recorded, and never activated, so no audit can select it.
+        sandbox.record(&[]);
+
+        let output = hook(&sandbox, &root, host, "{}");
+
+        output.assert_code(0);
+        assert!(output.stdout.is_empty(), "{host} stdout: {}", output.stdout);
+    }
+}
+
+/// The retry cap of section 9.2. Without it the `ignored` case loops
+/// forever, because writ sees every audit fresh and reports the same
+/// blocking learning again.
+#[test]
+fn stop_hook_active_stops_the_second_block() {
+    for host in ["claude-code", "codex"] {
+        let sandbox = Sandbox::new();
+        let root = gated_repo(&sandbox, true);
+
+        let output = hook(&sandbox, &root, host, r#"{"stop_hook_active": true}"#);
+
+        output.assert_code(0);
+        assert!(output.stdout.is_empty(), "{host} stdout: {}", output.stdout);
+    }
+}
+
+#[test]
+fn cursor_stops_blocking_at_the_loop_limit() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let under = hook(&sandbox, &root, "cursor", r#"{"loop_count": 4}"#);
+    under.assert_code(0);
+    assert!(
+        under.stdout.contains("followup_message"),
+        "{}",
+        under.stdout
+    );
+
+    let at_cap = hook(&sandbox, &root, "cursor", r#"{"loop_count": 5}"#);
+    at_cap.assert_code(0);
+    assert!(at_cap.stdout.is_empty(), "{}", at_cap.stdout);
+}
+
+#[test]
+fn the_cursor_loop_limit_is_overridable() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let command = sandbox.cmd_at(
+        root.to_path_buf(),
+        &["audit", "--hook", "cursor", "--loop-limit", "2"],
+    );
+    let output = run_with_stdin(command, r#"{"loop_count": 2}"#);
+
+    output.assert_code(0);
+    assert!(output.stdout.is_empty(), "{}", output.stdout);
+}
+
+/// A Stop hook fires after every turn, including turns that wrote no code.
+/// Exiting 6 or 7 there would put a red error in front of the user on each
+/// one. There is nothing to gate, so the gate passes and says why.
+#[test]
+fn a_hook_with_nothing_to_audit_passes_through_and_says_so() {
+    let sandbox = Sandbox::new();
+    let clean = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+
+    let empty = hook(&sandbox, &clean, "claude-code", "{}");
+    empty.assert_code(0);
+    assert!(empty.stdout.is_empty(), "{}", empty.stdout);
+    assert!(empty.stderr.contains("is empty"), "{}", empty.stderr);
+
+    let outside = hook(&sandbox, sandbox.dir.path(), "codex", "{}");
+    outside.assert_code(0);
+    assert!(outside.stdout.is_empty(), "{}", outside.stdout);
+}
+
+/// Never hang on stdin. crit #693 applied to the gate: a host that sends
+/// no payload must not stall the turn forever.
+#[test]
+fn a_hook_with_no_payload_still_runs() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let output = hook(&sandbox, &root, "claude-code", "");
+
+    output.assert_code(2);
+}
+
+/// A payload writ cannot parse is not a reason to skip the gate.
+#[test]
+fn an_unreadable_hook_payload_still_blocks() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let output = hook(&sandbox, &root, "claude-code", "not json");
+
+    output.assert_code(2);
+    assert!(output.stderr.contains("prefer sd"), "{}", output.stderr);
+}
+
+/// An unknown host is a usage error, not a silent pass.
+#[test]
+fn an_unknown_hook_host_exits_two() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let output = hook(&sandbox, &root, "opencode", "{}");
+
+    output.assert_code(2);
+}
+
+/// Both want stdin, and they read different documents.
+#[test]
+fn hook_and_ingest_conflict() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["audit", "--hook", "codex", "--ingest"]);
+    output.assert_code(2);
 }

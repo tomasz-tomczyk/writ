@@ -57,6 +57,19 @@ pub struct Args {
     #[arg(long = "example", value_name = "KIND:FILE", conflicts_with = "json")]
     examples: Vec<String>,
 
+    /// The snippet inline: good:TEXT or bad:TEXT
+    ///
+    /// This is the form MCP uses. An agent holds snippet text, not a
+    /// path, so without it the MCP surface cannot attach an exemplar at
+    /// all -- and an exemplar is what makes a rule teach instead of
+    /// assert. Invariant 3 holds either way: both forms store text.
+    #[arg(
+        long = "example-text",
+        value_name = "KIND:TEXT",
+        conflicts_with = "json"
+    )]
+    example_texts: Vec<String>,
+
     /// A retrieval pattern. Needs --matcher-kind
     #[arg(
         long,
@@ -95,11 +108,20 @@ pub struct Args {
 
     /// text or json
     #[arg(long, default_value_t = Format::Text, value_name = "FORMAT")]
-    format: Format,
+    pub format: Format,
 }
 
-/// Run the command. Returns the process exit code.
+/// Run the command and print what it wrote.
 pub fn run(args: &Args, db: &Path, config: &Config) -> Result<()> {
+    let written = execute(args, db, config)?;
+    report(&written, args.format)
+}
+
+/// Write the learnings and return them. This prints nothing.
+///
+/// The MCP tool calls this, so the two surfaces cannot validate or store
+/// one learning differently. Spec section 9.1.
+pub fn execute(args: &Args, db: &Path, config: &Config) -> Result<Vec<Recorded>> {
     // `--force` is accepted so the flag exists the day `block_above` is
     // calibrated. Nothing refuses a write while block_above is false, so
     // there is nothing for it to override. Spec section 7.3.
@@ -141,7 +163,7 @@ pub fn run(args: &Args, db: &Path, config: &Config) -> Result<()> {
         vec![store.record(&learning, warn_top_n)?]
     };
 
-    report(&written, args.format)
+    Ok(written)
 }
 
 impl Args {
@@ -159,29 +181,45 @@ impl Args {
         self.scopes.iter().map(|text| text.parse()).collect()
     }
 
-    /// Parse `good:FILE` and copy the snippet text in.
+    /// Every exemplar, from both forms. Files first, then inline text.
     fn exemplars(&self) -> Result<Vec<NewExemplar>> {
-        self.examples
-            .iter()
-            .map(|text| {
-                let (kind, path) = text.split_once(':').ok_or_else(|| Error::Validation {
-                    message: format!("--example takes good:FILE or bad:FILE, not {text}"),
-                })?;
-                let kind: ExemplarKind = kind.parse()?;
-                let snippet = read_snippet(Path::new(path))?;
-                if snippet.is_empty() {
-                    return Err(Error::Validation {
-                        message: format!("the example file {path} is empty"),
-                    });
-                }
-                Ok(NewExemplar {
-                    kind,
-                    language: None,
-                    snippet,
-                    note: None,
-                })
-            })
-            .collect()
+        let files = self.examples.iter().map(|text| {
+            let (kind, path) = split_kind(text, "--example", "FILE")?;
+            let snippet = read_snippet(Path::new(path))?;
+            if snippet.is_empty() {
+                return Err(Error::Validation {
+                    message: format!("the example file {path} is empty"),
+                });
+            }
+            Ok(exemplar(kind, snippet))
+        });
+        let inline = self.example_texts.iter().map(|text| {
+            let (kind, snippet) = split_kind(text, "--example-text", "TEXT")?;
+            if snippet.is_empty() {
+                return Err(Error::Validation {
+                    message: "an --example-text snippet is empty".to_string(),
+                });
+            }
+            Ok(exemplar(kind, snippet.to_string()))
+        });
+        files.chain(inline).collect()
+    }
+}
+
+/// Split `good:REST`, and say which flag wanted it.
+fn split_kind<'a>(text: &'a str, flag: &str, rest: &str) -> Result<(ExemplarKind, &'a str)> {
+    let (kind, value) = text.split_once(':').ok_or_else(|| Error::Validation {
+        message: format!("{flag} takes good:{rest} or bad:{rest}, not {text}"),
+    })?;
+    Ok((kind.parse()?, value))
+}
+
+fn exemplar(kind: ExemplarKind, snippet: String) -> NewExemplar {
+    NewExemplar {
+        kind,
+        language: None,
+        snippet,
+        note: None,
     }
 }
 

@@ -320,6 +320,11 @@ impl Store {
     /// A matcher is not evaluated here. Running `ast-grep` is I/O, so the
     /// caller does that and drops what missed. Invariant 1.
     pub fn candidates(&self, scope: &AuditScope) -> Result<Vec<Candidate>> {
+        // Every kind the learning carries must match, and the rows inside
+        // one kind are alternatives. This SQL can only over-select: it
+        // drops a learning whose `project` or `language` kind cannot
+        // match, and lets `glob` through because SQLite has no dialect
+        // with `**` in it. [`scope_hits`] is the authoritative test.
         let mut sql = String::from(
             "SELECT id, created_at, updated_at, status, title, rule, rationale, blocking,
                     matcher_kind, matcher, source_kind, source_adapter, source_ref,
@@ -328,19 +333,21 @@ impl Store {
              FROM learnings
              WHERE status = 'active'
                AND EXISTS (SELECT 1 FROM learning_scopes s
-                            WHERE s.learning_id = learnings.id
-                              AND (s.kind = 'global'
-                                   OR s.kind = 'glob'
-                                   OR (s.kind = 'project' AND s.value = ?)",
+                            WHERE s.learning_id = learnings.id)
+               AND NOT EXISTS (
+                     SELECT 1 FROM learning_scopes s
+                      WHERE s.learning_id = learnings.id
+                      GROUP BY s.kind
+                     HAVING MAX(CASE
+                              WHEN s.kind IN ('global', 'glob') THEN 1
+                              WHEN s.kind = 'project' AND s.value = ? THEN 1",
         );
         let mut values: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(scope.identity.value().to_string())];
 
         let languages = scope.diff.languages();
-        if languages.is_empty() {
-            sql.push_str("))");
-        } else {
-            sql.push_str(" OR (s.kind = 'language' AND s.value IN (");
+        if !languages.is_empty() {
+            sql.push_str(" WHEN s.kind = 'language' AND s.value IN (");
             for (index, language) in languages.iter().enumerate() {
                 if index > 0 {
                     sql.push_str(", ");
@@ -348,9 +355,9 @@ impl Store {
                 sql.push('?');
                 values.push(Box::new(language.clone()));
             }
-            sql.push_str("))))");
+            sql.push_str(") THEN 1");
         }
-        sql.push_str(" ORDER BY id");
+        sql.push_str(" ELSE 0 END) = 0) ORDER BY id");
 
         let mut stmt = self.conn.prepare(&sql)?;
         let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|value| value.as_ref()).collect();
@@ -662,19 +669,48 @@ impl Store {
     }
 }
 
-/// Whether any one of a learning's scopes matches this diff.
+/// Whether this learning's scopes match this diff. Spec section 7.1 step 2.
 ///
-/// The SQL in [`Store::candidates`] lets every `glob:` row through, so a
-/// learning scoped only to a glob that missed is dropped here. Without
-/// this second pass a `glob:web/**` rule would fire on an `api/` diff,
-/// which is the invisible failure P7 exists to prevent.
+/// **Every kind the learning carries must match. Within one kind the rows
+/// are alternatives.** `language:elixir` plus `project:X` means Elixir
+/// files in X, not either. Pure OR across kinds would make a second scope
+/// *widen* a rule, so the only way to write a narrow one would be to give
+/// it a single scope — and then a `project:` rule fires on markdown edits
+/// in that repository.
+///
+/// `global` short-circuits. A write cannot combine it with another kind,
+/// so there is nothing to intersect it with.
 fn scope_hits(learning: &Learning, scope: &AuditScope, languages: &[String]) -> bool {
-    learning.scopes.iter().any(|one| match one.kind {
-        ScopeKind::Global => true,
-        ScopeKind::Project => one.value == scope.identity.value(),
-        ScopeKind::Language => languages.iter().any(|language| language == &one.value),
-        ScopeKind::Glob => scope.diff.matches_glob(&one.value),
-    })
+    if learning.scopes.is_empty() {
+        return false;
+    }
+    if learning
+        .scopes
+        .iter()
+        .any(|one| one.kind == ScopeKind::Global)
+    {
+        return true;
+    }
+    for kind in [ScopeKind::Project, ScopeKind::Language, ScopeKind::Glob] {
+        let mut rows = learning
+            .scopes
+            .iter()
+            .filter(|one| one.kind == kind)
+            .peekable();
+        if rows.peek().is_none() {
+            continue;
+        }
+        let matched = rows.any(|one| match kind {
+            ScopeKind::Project => one.value == scope.identity.value(),
+            ScopeKind::Language => languages.iter().any(|language| language == &one.value),
+            ScopeKind::Glob => scope.diff.matches_glob(&one.value),
+            ScopeKind::Global => true,
+        });
+        if !matched {
+            return false;
+        }
+    }
+    true
 }
 
 /// `QueryRow` returning `None` for no row instead of an error.
@@ -2051,13 +2087,89 @@ mod tests {
         assert_eq!(selected_titles(&store, &scope_for(DIFF)), ["api"]);
     }
 
-    /// Any one scope matching is enough, so a learning is not dropped by
-    /// its other scopes.
+    /// Section 7.1 step 2. Every kind the learning carries must match, so
+    /// a second scope narrows a rule rather than widening it. Under the
+    /// old OR this rule fired on markdown edits in the right repository,
+    /// which is the defect the seed exposed.
     #[test]
-    fn one_matching_scope_out_of_several_is_enough() {
+    fn every_scope_kind_a_learning_carries_must_match() {
         let mut store = Store::open_in_memory().unwrap();
-        active(&mut store, "either", &["language:rust", "glob:api/**"]);
-        assert_eq!(selected_titles(&store, &scope_for(DIFF)), ["either"]);
+        active(
+            &mut store,
+            "elixir in this repo",
+            &["language:elixir", "project:github.com/owner/repo"],
+        );
+
+        assert_eq!(
+            selected_titles(&store, &scope_for(DIFF)),
+            ["elixir in this repo"],
+            "an Elixir file in the right repo matches both kinds"
+        );
+
+        let elsewhere = AuditScope {
+            identity: RepoIdentity::Remote("github.com/other/thing".into()),
+            diff: Diff::parse(DIFF),
+            diff_range: "HEAD".into(),
+        };
+        assert!(
+            selected_titles(&store, &elsewhere).is_empty(),
+            "the same Elixir file in another repo fails the project kind"
+        );
+
+        let markdown = "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n+text\n";
+        assert!(
+            selected_titles(&store, &scope_for(markdown)).is_empty(),
+            "a markdown edit in the right repo fails the language kind"
+        );
+    }
+
+    /// Within one kind the rows are alternatives, so two globs mean either
+    /// path rather than both at once.
+    #[test]
+    fn rows_of_one_kind_are_alternatives() {
+        let mut store = Store::open_in_memory().unwrap();
+        active(&mut store, "either tree", &["glob:api/**", "glob:web/**"]);
+        assert_eq!(selected_titles(&store, &scope_for(DIFF)), ["either tree"]);
+
+        let web = "--- a/web/src/app.ex\n+++ b/web/src/app.ex\n@@ -1 +1 @@\n+x\n";
+        assert_eq!(selected_titles(&store, &scope_for(web)), ["either tree"]);
+
+        let neither = "--- a/docs/a.ex\n+++ b/docs/a.ex\n@@ -1 +1 @@\n+x\n";
+        assert!(selected_titles(&store, &scope_for(neither)).is_empty());
+    }
+
+    /// A glob and a language still AND, so the narrow rule an author meant
+    /// is the rule they get.
+    #[test]
+    fn a_glob_and_a_language_narrow_each_other() {
+        let mut store = Store::open_in_memory().unwrap();
+        active(
+            &mut store,
+            "elixir under api",
+            &["glob:api/**", "language:elixir"],
+        );
+        assert_eq!(
+            selected_titles(&store, &scope_for(DIFF)),
+            ["elixir under api"]
+        );
+
+        let wrong_tree = "--- a/web/a.ex\n+++ b/web/a.ex\n@@ -1 +1 @@\n+x\n";
+        assert!(selected_titles(&store, &scope_for(wrong_tree)).is_empty());
+
+        let wrong_language = "--- a/api/a.md\n+++ b/api/a.md\n@@ -1 +1 @@\n+x\n";
+        assert!(selected_titles(&store, &scope_for(wrong_language)).is_empty());
+    }
+
+    #[test]
+    fn a_global_scope_matches_every_diff() {
+        let mut store = Store::open_in_memory().unwrap();
+        active(&mut store, "everywhere", &["global"]);
+        for diff in [
+            DIFF,
+            "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n+text\n",
+        ] {
+            assert_eq!(selected_titles(&store, &scope_for(diff)), ["everywhere"]);
+        }
     }
 
     #[test]

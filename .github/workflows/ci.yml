@@ -38,6 +38,23 @@ jobs:
       - name: Test
         run: mise exec -- cargo test --workspace
 
+  docs:
+    name: the documented flags are real flags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the binary the documentation is checked against
+        run: mise exec -- cargo build --bin writ
+      # Spec section 11, from crit #873. A flag in the README or a
+      # SKILL.md that the binary rejects is a bug. Invariant 8.
+      - name: README and every SKILL.md against writ --help
+        run: ./scripts/check-doc-flags.sh
+
   install:
     name: cargo install resolves the writ binary
     runs-on: ubuntu-latest
