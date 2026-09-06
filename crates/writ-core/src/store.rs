@@ -530,6 +530,33 @@ impl Store {
         })
     }
 
+    /// One finding by id, or [`Error::NotFound`].
+    pub fn finding(&self, id: &str) -> Result<Finding> {
+        self.conn
+            .query_row(
+                "SELECT id, audit_id, learning_id, path, line, detail, outcome
+                   FROM findings
+                  WHERE id = ?1",
+                [id],
+                |row| {
+                    let outcome: String = row.get(6)?;
+                    Ok(Finding {
+                        id: row.get(0)?,
+                        audit_id: row.get(1)?,
+                        learning_id: row.get(2)?,
+                        path: row.get(3)?,
+                        line: row.get(4)?,
+                        detail: row.get(5)?,
+                        outcome: parse_outcome(&outcome).map_err(to_sqlite_error)?,
+                    })
+                },
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Error::NotFound { id: id.into() },
+                _ => error.into(),
+            })
+    }
+
     /// Read the findings for one learning, oldest first.
     pub fn findings_of(&self, learning_id: &str) -> Result<Vec<Finding>> {
         let mut stmt = self.conn.prepare(

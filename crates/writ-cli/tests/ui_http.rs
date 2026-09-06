@@ -280,25 +280,36 @@ async fn merge_reinforces_target_and_archives_proposal() {
 
 fn bump_applied(store: &mut Store, learning_id: &str, count: usize) {
     for _ in 0..count {
-        let learning = store.get(learning_id).unwrap();
-        let exemplars = store.exemplars_of(learning_id).unwrap();
-        let selected = vec![Selected { learning, exemplars }];
-        let audit_id = store
-            .start_audit("repo", "HEAD", selected.len(), &selected)
-            .unwrap();
-        store
-            .ingest(&writ_core::FindingsInput {
-                audit_id,
-                findings: vec![writ_core::IncomingFinding {
-                    learning_id: learning_id.into(),
-                    path: None,
-                    line: None,
-                    detail: None,
-                    outcome: writ_core::Outcome::Fixed,
-                }],
-            })
-            .unwrap();
+        finding_with_path(store, learning_id, None, None);
     }
+}
+
+fn finding_with_path(
+    store: &mut Store,
+    learning_id: &str,
+    path: Option<&str>,
+    line: Option<i64>,
+) -> String {
+    let learning = store.get(learning_id).unwrap();
+    let exemplars = store.exemplars_of(learning_id).unwrap();
+    let selected = vec![Selected { learning, exemplars }];
+    let audit_id = store
+        .start_audit("repo", "HEAD", selected.len(), &selected)
+        .unwrap();
+    store
+        .ingest(&writ_core::FindingsInput {
+            audit_id,
+            findings: vec![writ_core::IncomingFinding {
+                learning_id: learning_id.into(),
+                path: path.map(Into::into),
+                line,
+                detail: None,
+                outcome: writ_core::Outcome::Open,
+            }],
+        })
+        .unwrap();
+    let findings = store.findings_of(learning_id).unwrap();
+    findings.last().unwrap().id.clone()
 }
 
 #[tokio::test]
@@ -379,4 +390,130 @@ async fn collection_sorts_by_hits_descending() {
     let high_pos = body.find("high hits").unwrap();
     let low_pos = body.find("low hits").unwrap();
     assert!(high_pos < low_pos, "high hits should come first: {body}");
+}
+
+fn active_with_exemplar(store: &mut Store, title: &str) -> String {
+    let mut learning = NewLearning::new(title, "rule", "rationale");
+    learning.status = Some(Status::Active);
+    learning.exemplars = vec![NewExemplar {
+        kind: ExemplarKind::Good,
+        language: Some("rust".into()),
+        snippet: "let good = true;".into(),
+        note: None,
+    }];
+    store.record(&learning, 0).unwrap().id
+}
+
+#[tokio::test]
+async fn detail_save_updates_rule_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        active_with_exemplar(&mut store, "editable")
+    };
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = client
+        .post(format!("{}/learnings/{id}", base))
+        .form(&[
+            ("title", "editable"),
+            ("rule", "updated rule"),
+            ("rationale", "updated rationale"),
+            ("good_snippet", "let good = true;"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 303);
+    assert_eq!(response.headers()["location"], format!("/learnings/{id}"));
+
+    let store = Store::open(&db).unwrap();
+    let learning = store.get(&id).unwrap();
+    assert_eq!(learning.rule, "updated rule");
+    assert_eq!(learning.rationale, "updated rationale");
+}
+
+#[tokio::test]
+async fn reject_finding_from_detail_sets_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let (learning_id, finding_id) = {
+        let mut store = Store::open(&db).unwrap();
+        let id = active_with_exemplar(&mut store, "finding owner");
+        let finding_id = finding_with_path(&mut store, &id, Some("a.rs"), Some(3));
+        (id, finding_id)
+    };
+
+    let base = start_app(&db, config()).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = client
+        .post(format!("{}/findings/{finding_id}/reject", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 303);
+    assert_eq!(
+        response.headers()["location"],
+        format!("/learnings/{learning_id}")
+    );
+
+    let store = Store::open(&db).unwrap();
+    let finding = store.findings_of(&learning_id).unwrap().pop().unwrap();
+    assert_eq!(finding.outcome, writ_core::Outcome::Rejected);
+}
+
+#[tokio::test]
+async fn open_editor_runs_configured_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let target_file = dir.path().join("source.rs");
+    std::fs::write(&target_file, "fn main() {}").unwrap();
+    let marker = dir.path().join("source.rs.opened");
+    let config = {
+        let mut c = Config::default();
+        c.ui.editor_cmd = format!("touch {}", marker.display());
+        c
+    };
+
+    let (learning_id, finding_id) = {
+        let mut store = Store::open(&db).unwrap();
+        let id = active_with_exemplar(&mut store, "open editor");
+        let finding_id = finding_with_path(
+            &mut store,
+            &id,
+            Some(target_file.to_str().unwrap()),
+            Some(12),
+        );
+        (id, finding_id)
+    };
+
+    let base = start_app(&db, config).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = client
+        .post(format!("{}/findings/{finding_id}/open", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 303, "body: {}", response.text().await.unwrap());
+    assert_eq!(
+        response.headers()["location"],
+        format!("/learnings/{learning_id}")
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        marker.exists(),
+        "editor command should create marker file at {}",
+        marker.display()
+    );
 }
