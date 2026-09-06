@@ -71,22 +71,33 @@ pub fn run(args: &Args, paths: &Paths, config: &Config) -> Result<ExitCode, Erro
 
 fn open_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
-    let status = Command::new("open").arg(url).status()?;
+    {
+        let status = Command::new("open").arg(url).status()?;
+        return browser_status(status);
+    }
 
     #[cfg(target_os = "linux")]
-    let status = Command::new("xdg-open").arg(url).status()?;
+    {
+        let status = Command::new("xdg-open").arg(url).status()?;
+        return browser_status(status);
+    }
 
     #[cfg(target_os = "windows")]
-    let status = Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .status()?;
+    {
+        let status = Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .status()?;
+        return browser_status(status);
+    }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    return Err(std::io::Error::new(
+    Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "this platform has no configured browser opener",
-    ));
+    ))
+}
 
+fn browser_status(status: std::process::ExitStatus) -> std::io::Result<()> {
     if status.success() {
         Ok(())
     } else {
