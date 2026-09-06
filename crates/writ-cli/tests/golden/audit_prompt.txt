@@ -1,0 +1,40 @@
+# writ audit
+
+Check the diff below against the learnings below it. Report every violation you find.
+
+audit-id: <AUDIT>
+repo: github.com/owner/repo
+diff-range: HEAD
+
+## Diff
+
+```diff
+diff --git a/a.rs b/a.rs
+index f328e4d..4dbe88e 100644
+--- a/a.rs
++++ b/a.rs
+@@ -1 +1 @@
+-fn main() {}
++fn main() { let x = 1; }
+```
+
+## Learnings
+
+### 1. prefer sd
+id: <LEARNING>
+enforcement: blocking
+scopes: language:rust
+rule: use sd
+why: sed is terse
+good:
+```
+let y = 2;
+```
+
+## Reply
+
+Reply with this JSON and nothing else. Do not rewrite the tree.
+
+{"audit_id":"AUDIT","findings":[{"learning_id":"ID","path":"PATH","line":1,"detail":"WHAT IS WRONG"}]}
+
+An empty findings array is the right answer when the diff breaks no rule.

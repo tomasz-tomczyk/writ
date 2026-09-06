@@ -1,7 +1,8 @@
 //! `writ list`. Spec section 5.
 //!
-//! `writ list --stale-days 90 --format json` is the Health screen as a
-//! query, which keeps the UI free of logic the CLI lacks.
+//! `writ list --unused-days 90 --format json` and
+//! `writ list --never-applied --format json` are the Health screen as two
+//! queries, which keeps the UI free of logic the CLI lacks.
 
 use std::io::Write;
 use std::path::Path;
@@ -21,14 +22,14 @@ pub struct Args {
     #[arg(long, value_name = "KIND:VALUE")]
     scope: Option<String>,
 
-    /// Last used at least this many days ago. A learning that was never
-    /// used does not match: ask for --never-used instead
-    #[arg(long = "stale-days", value_name = "N")]
-    stale_days: Option<u32>,
+    /// Not selected by an audit for this many days. Reach. The row's
+    /// times_selected says whether it is misscoped or dead
+    #[arg(long = "unused-days", value_name = "N")]
+    unused_days: Option<u32>,
 
-    /// Never selected by an audit. The other Health bucket
-    #[arg(long = "never-used")]
-    never_used: bool,
+    /// Selected at least once and never caught anything. Usefulness
+    #[arg(long = "never-applied")]
+    never_applied: bool,
 
     /// Full-text search over title, rule and rationale
     #[arg(long, value_name = "QUERY")]
@@ -48,8 +49,8 @@ pub fn run(args: &Args, db: &Path) -> Result<()> {
             .map(str::parse::<Status>)
             .transpose()?,
         scope: args.scope.as_deref().map(str::parse).transpose()?,
-        stale_days: args.stale_days,
-        never_used: args.never_used,
+        unused_days: args.unused_days,
+        never_applied: args.never_applied,
         search: args.search.clone(),
     };
     let store = Store::open(db)?;

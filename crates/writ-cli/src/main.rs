@@ -1,7 +1,11 @@
 //! The `writ` binary. This crate is the only one that does I/O.
 
+mod audit;
 mod context;
+mod git;
+mod inspect;
 mod list;
+mod matcher;
 mod output;
 mod record;
 
@@ -33,6 +37,12 @@ enum Command {
     Record(record::Args),
     /// Read learnings back
     List(list::Args),
+    /// Check a diff against the learnings that apply to it
+    Audit(audit::Args),
+    /// Read one learning in full
+    Show(inspect::ShowArgs),
+    /// Prune a learning. It stops being selected and stays in the database
+    Archive(inspect::ArchiveArgs),
 }
 
 fn main() -> ExitCode {
@@ -55,14 +65,20 @@ fn main() -> ExitCode {
 
     let result = match command {
         Command::Record(args) => match context::load_config(&paths.config) {
-            Ok(config) => record::run(&args, &paths.db, &config),
+            Ok(config) => record::run(&args, &paths.db, &config).map(|()| ExitCode::SUCCESS),
             Err(error) => Err(error),
         },
-        Command::List(args) => list::run(&args, &paths.db),
+        Command::List(args) => list::run(&args, &paths.db).map(|()| ExitCode::SUCCESS),
+        Command::Audit(args) => match context::load_config(&paths.config) {
+            Ok(config) => audit::run(&args, &paths.db, &config),
+            Err(error) => Err(error),
+        },
+        Command::Show(args) => inspect::show(&args, &paths.db).map(|()| ExitCode::SUCCESS),
+        Command::Archive(args) => inspect::archive(&args, &paths.db).map(|()| ExitCode::SUCCESS),
     };
 
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => fail(&error, Some(&paths.db)),
     }
 }
@@ -71,10 +87,16 @@ fn main() -> ExitCode {
 ///
 /// A storage failure names the database, because "database error: unable to
 /// open database file" without a path leaves the user guessing which file.
+/// SQLite already puts the path in some of its messages and not others, so
+/// the path is appended only when it is missing. Printing it twice reads as
+/// two different failures, which is exactly what P7 forbids.
 fn fail(error: &Error, db: Option<&Path>) -> ExitCode {
+    let message = error.to_string();
     match (error, db) {
-        (Error::Sqlite(_), Some(db)) => eprintln!("writ: {error}: {}", db.display()),
-        _ => eprintln!("writ: {error}"),
+        (Error::Sqlite(_), Some(db)) if !message.contains(&*db.to_string_lossy()) => {
+            eprintln!("writ: {message}: {}", db.display());
+        }
+        _ => eprintln!("writ: {message}"),
     }
     ExitCode::from(exit_code(error))
 }
@@ -90,7 +112,12 @@ fn exit_code(error: &Error) -> u8 {
     match error {
         Error::BadJson { .. } => 4,
         Error::NotFound { .. } => 5,
+        Error::NotAGitRepository { .. } => 6,
+        Error::EmptyDiff { .. } => 7,
         Error::Sqlite(_) | Error::CreateDirectory { .. } => 8,
-        Error::NoBaseDirectory { .. } | Error::Config { .. } | Error::Validation { .. } => 2,
+        Error::NoBaseDirectory { .. }
+        | Error::Config { .. }
+        | Error::Validation { .. }
+        | Error::Command { .. } => 2,
     }
 }

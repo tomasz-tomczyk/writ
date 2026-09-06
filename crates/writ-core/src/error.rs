@@ -62,6 +62,39 @@ pub enum Error {
         /// The id the caller asked for.
         id: String,
     },
+
+    /// `writ audit` ran somewhere git does not manage.
+    ///
+    /// It has its own code because P7 forbids reporting a wrong working
+    /// directory as a usage error. Spec section 5.7 code 6.
+    #[error("{path} is not inside a git repository")]
+    NotAGitRepository {
+        /// The directory the audit ran in.
+        path: PathBuf,
+    },
+
+    /// The diff changed nothing, so there is nothing to audit.
+    ///
+    /// Spec section 5.7 code 7. An empty diff is not a failure of the
+    /// audit, but it must not look like a clean pass either.
+    #[error("the diff {range} is empty. There is nothing to audit")]
+    EmptyDiff {
+        /// The range the caller asked for.
+        range: String,
+    },
+
+    /// A program writ shelled out to could not be run at all.
+    ///
+    /// This is never how a missing `ast-grep` is reported: P6 says an
+    /// absent optional tool degrades the result. It is how a broken `git`
+    /// is reported.
+    #[error("cannot run {program}: {message}")]
+    Command {
+        /// The program writ tried to run.
+        program: String,
+        /// What went wrong.
+        message: String,
+    },
 }
 
 impl Error {

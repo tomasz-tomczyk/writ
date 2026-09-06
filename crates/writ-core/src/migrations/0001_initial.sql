@@ -20,8 +20,10 @@ CREATE TABLE learnings (
   author         TEXT,
   activated_at   TEXT,
   reinforced     INTEGER NOT NULL DEFAULT 0,
-  times_applied  INTEGER NOT NULL DEFAULT 0,
-  last_used_at   TEXT,
+  times_selected    INTEGER NOT NULL DEFAULT 0,
+  last_selected_at  TEXT,
+  times_applied     INTEGER NOT NULL DEFAULT 0,
+  last_applied_at   TEXT,
   last_verified  TEXT
 );
 

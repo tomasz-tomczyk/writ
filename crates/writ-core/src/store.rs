@@ -2,6 +2,9 @@ use std::path::Path;
 
 use rusqlite::{Connection, Row, Transaction, params};
 
+use crate::audit::{
+    AuditScope, Budget, Candidate, FindingsInput, Ingested, Outcome, Outcomes, Selected, rule_block,
+};
 use crate::error::{Error, Result};
 use crate::fts;
 use crate::id::new_id;
@@ -161,15 +164,23 @@ impl Store {
 
     /// Read learnings back, filtered. This is `writ list`.
     pub fn list(&self, filter: &ListFilter) -> Result<Vec<Learning>> {
+        self.list_where(filter, None)
+    }
+
+    fn list_where(&self, filter: &ListFilter, id: Option<&str>) -> Result<Vec<Learning>> {
         let mut sql = String::from(
             "SELECT id, created_at, updated_at, status, title, rule, rationale, blocking,
                     matcher_kind, matcher, source_kind, source_adapter, source_ref,
-                    author, activated_at, reinforced, times_applied, last_used_at,
-                    last_verified
+                    author, activated_at, reinforced, times_selected, last_selected_at,
+                    times_applied, last_applied_at, last_verified
              FROM learnings WHERE 1 = 1",
         );
         let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
+        if let Some(id) = id {
+            sql.push_str(" AND id = ?");
+            values.push(Box::new(id.to_string()));
+        }
         if let Some(status) = filter.status {
             sql.push_str(" AND status = ?");
             values.push(Box::new(status.as_str().to_string()));
@@ -183,21 +194,30 @@ impl Store {
             values.push(Box::new(scope.kind.as_str().to_string()));
             values.push(Box::new(scope.value.clone()));
         }
-        if filter.never_used && filter.stale_days.is_some() {
-            // The two buckets are disjoint, so the pair can only ever
-            // return nothing. Say that rather than print an empty list.
-            return Err(Error::validation(
-                "--never-used and --stale-days are disjoint. Ask for one of them",
-            ));
+        // Two filters, one per axis. Reach is whether audits put the rule
+        // in front of a reviewer. Usefulness is whether it ever caught
+        // anything. They combine freely, and a rule in both is the
+        // clearest delete candidate in the collection.
+        //
+        // Both imply `status = 'active'`. Only an active learning can be
+        // selected, so a proposed one would otherwise sit in both forever
+        // and the Inbox would leak into Health. An explicit status wins,
+        // because asking for it is asking for it.
+        if (filter.never_applied || filter.unused_days.is_some()) && filter.status.is_none() {
+            sql.push_str(" AND status = 'active'");
         }
-        if filter.never_used {
-            sql.push_str(" AND last_used_at IS NULL");
+        if filter.never_applied {
+            // `times_selected > 0` keeps a rule no audit ever reached out
+            // of this bucket. It has caught nothing trivially, and the fix
+            // it needs is the other filter's, not this one's.
+            sql.push_str(" AND times_selected > 0 AND times_applied = 0");
         }
-        if let Some(days) = filter.stale_days {
-            // The boundary is inclusive: exactly N days of silence is
-            // stale. A learning no audit ever selected is not stale, it is
-            // never used, which is the other bucket.
-            sql.push_str(" AND last_used_at IS NOT NULL AND last_used_at <= datetime('now', ?)");
+        if let Some(days) = filter.unused_days {
+            // The boundary is inclusive: exactly N days of silence counts.
+            // A rule no audit has reached yet falls back to when it was
+            // written, so one recorded this morning is not unused, and
+            // `times_selected` on the row says which case a match is.
+            sql.push_str(" AND COALESCE(last_selected_at, created_at) <= datetime('now', ?)");
             values.push(Box::new(format!("-{days} days")));
         }
         if let Some(search) = &filter.search {
@@ -224,6 +244,258 @@ impl Store {
             learnings.push(learning);
         }
         Ok(learnings)
+    }
+
+    /// One learning by id, or [`Error::NotFound`]. This is `writ show`.
+    pub fn get(&self, id: &str) -> Result<Learning> {
+        let filter = ListFilter::default();
+        let mut found = self.list_where(&filter, Some(id))?;
+        if found.is_empty() {
+            return Err(Error::NotFound { id: id.to_string() });
+        }
+        Ok(found.remove(0))
+    }
+
+    /// Active learnings this diff could be about. Spec section 7.1 step 2.
+    ///
+    /// The `global`, `project:` and `language:` tests are SQL. `glob:` is
+    /// matched in Rust afterwards, because SQLite has no glob dialect with
+    /// `**` in it. A learning is kept when any one of its scopes matches.
+    ///
+    /// A matcher is not evaluated here. Running `ast-grep` is I/O, so the
+    /// caller does that and drops what missed. Invariant 1.
+    pub fn candidates(&self, scope: &AuditScope) -> Result<Vec<Candidate>> {
+        let mut sql = String::from(
+            "SELECT id, created_at, updated_at, status, title, rule, rationale, blocking,
+                    matcher_kind, matcher, source_kind, source_adapter, source_ref,
+                    author, activated_at, reinforced, times_selected, last_selected_at,
+                    times_applied, last_applied_at, last_verified
+             FROM learnings
+             WHERE status = 'active'
+               AND EXISTS (SELECT 1 FROM learning_scopes s
+                            WHERE s.learning_id = learnings.id
+                              AND (s.kind = 'global'
+                                   OR s.kind = 'glob'
+                                   OR (s.kind = 'project' AND s.value = ?)",
+        );
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(scope.identity.value().to_string())];
+
+        let languages = scope.diff.languages();
+        if languages.is_empty() {
+            sql.push_str("))");
+        } else {
+            sql.push_str(" OR (s.kind = 'language' AND s.value IN (");
+            for (index, language) in languages.iter().enumerate() {
+                if index > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push('?');
+                values.push(Box::new(language.clone()));
+            }
+            sql.push_str("))))");
+        }
+        sql.push_str(" ORDER BY id");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|value| value.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), read_learning)?;
+
+        let mut candidates = Vec::new();
+        for row in rows {
+            let mut learning = row?;
+            learning.scopes = self.scopes_of(&learning.id)?;
+            if !scope_hits(&learning, scope, &languages) {
+                continue;
+            }
+            let outcomes = self.outcomes_of(&learning.id)?;
+            candidates.push(Candidate { learning, outcomes });
+        }
+        Ok(candidates)
+    }
+
+    /// Take rules off the ranked list until a cap stops it. Section 7.1
+    /// step 3, and the P3 contract section 11 turns into a benchmark.
+    ///
+    /// Exemplars are loaded one learning at a time, so a collection of a
+    /// thousand costs the same reads as a collection of fifty. A rule that
+    /// does not fit in the remaining characters stops the loop rather than
+    /// being skipped over: the ranking says this rule matters more than
+    /// every rule behind it, so filling the gap with a lesser one would
+    /// spend the budget against its own order.
+    pub fn take_budget(&self, ranked: &[Candidate], budget: &Budget) -> Result<Vec<Selected>> {
+        let mut selected: Vec<Selected> = Vec::new();
+        let mut chars = 0usize;
+        for candidate in ranked {
+            if selected.len() as u32 >= budget.max_rules {
+                break;
+            }
+            let one = Selected {
+                learning: candidate.learning.clone(),
+                exemplars: self.exemplars_of(&candidate.learning.id)?,
+            };
+            let cost = rule_block(selected.len() + 1, &one).chars().count();
+            if chars + cost > budget.max_chars as usize {
+                break;
+            }
+            chars += cost;
+            selected.push(one);
+        }
+        Ok(selected)
+    }
+
+    /// Open an `audits` row, stamp the rules it sent, and return its id.
+    /// Spec section 7.1 step 4.
+    ///
+    /// The row is written when the prompt is emitted, not when findings
+    /// come back, because `considered` and `sent` are only known here,
+    /// `findings.audit_id` is `NOT NULL`, and `started_at` is what the
+    /// recurrence query in section 7.5 compares against `activated_at`.
+    ///
+    /// `times_selected` and `last_selected_at` move here and nowhere else.
+    /// They measure reach: this rule was put in front of a reviewer.
+    /// Whether it caught anything is the other pair, moved by
+    /// [`Store::ingest`]. `updated_at` is never named. Invariant 7.
+    pub fn start_audit(
+        &mut self,
+        repo: &str,
+        diff_range: &str,
+        considered: usize,
+        selected: &[Selected],
+    ) -> Result<String> {
+        let id = new_id();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO audits (id, repo, diff_range, considered, sent)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &id,
+                repo,
+                diff_range,
+                considered as i64,
+                selected.len() as i64
+            ],
+        )?;
+        for one in selected {
+            tx.execute(
+                "UPDATE learnings
+                    SET times_selected = times_selected + 1,
+                        last_selected_at = datetime('now')
+                  WHERE id = ?1",
+                [&one.learning.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Write the findings a host reported. Spec section 7.1 step 5.
+    ///
+    /// `times_applied` and `last_applied_at` move for the learnings the
+    /// findings name. They measure usefulness: this rule caught something.
+    /// `updated_at` is never named: the trigger owns it. Invariant 7.
+    ///
+    /// An `outcome` of `rejected` is refused. Section 7.5 says the
+    /// developer sets it and section 7.1 step 5 says why the audited agent
+    /// must not: one call would escape the gate and demote the rule that
+    /// caught it, in the same write.
+    pub fn ingest(&mut self, input: &FindingsInput) -> Result<Ingested> {
+        let tx = self.conn.transaction()?;
+        let known: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM audits WHERE id = ?1)",
+            [&input.audit_id],
+            |row| row.get(0),
+        )?;
+        if !known {
+            return Err(Error::NotFound {
+                id: input.audit_id.clone(),
+            });
+        }
+
+        let mut blocking = 0usize;
+        let mut unfixed_blocking = 0usize;
+        for finding in &input.findings {
+            if finding.outcome == Outcome::Rejected {
+                return Err(Error::validation(format!(
+                    "--ingest cannot set outcome rejected on {}. \
+                     Only a developer rejects a finding",
+                    finding.learning_id
+                )));
+            }
+            let is_blocking: Option<bool> = tx
+                .query_row(
+                    "SELECT blocking FROM learnings WHERE id = ?1",
+                    [&finding.learning_id],
+                    |row| row.get(0),
+                )
+                .optional_row()?;
+            let Some(is_blocking) = is_blocking else {
+                return Err(Error::NotFound {
+                    id: finding.learning_id.clone(),
+                });
+            };
+            if is_blocking {
+                blocking += 1;
+                if finding.outcome != Outcome::Fixed {
+                    unfixed_blocking += 1;
+                }
+            }
+            tx.execute(
+                "INSERT INTO findings (id, audit_id, learning_id, path, line, detail, outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    new_id(),
+                    &input.audit_id,
+                    &finding.learning_id,
+                    &finding.path,
+                    &finding.line,
+                    &finding.detail,
+                    finding.outcome.as_str(),
+                ],
+            )?;
+            tx.execute(
+                "UPDATE learnings
+                    SET times_applied = times_applied + 1,
+                        last_applied_at = datetime('now')
+                  WHERE id = ?1",
+                [&finding.learning_id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE audits SET findings = ?1 WHERE id = ?2",
+            params![input.findings.len() as i64, &input.audit_id],
+        )?;
+        tx.commit()?;
+
+        Ok(Ingested {
+            audit_id: input.audit_id.clone(),
+            findings: input.findings.len(),
+            blocking,
+            unfixed_blocking,
+        })
+    }
+
+    /// How past findings settled for one learning. Spec section 7.5.
+    fn outcomes_of(&self, id: &str) -> Result<Outcomes> {
+        let mut outcomes = Outcomes::default();
+        let mut stmt = self.conn.prepare(
+            "SELECT outcome, COUNT(*) FROM findings
+              WHERE learning_id = ?1 GROUP BY outcome",
+        )?;
+        let rows = stmt.query_map([id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (outcome, count) = row?;
+            match outcome.as_str() {
+                "fixed" => outcomes.fixed = count,
+                "ignored" => outcomes.ignored = count,
+                "rejected" => outcomes.rejected = count,
+                // `open` is not a judgement yet, so it weighs nothing.
+                _ => {}
+            }
+        }
+        Ok(outcomes)
     }
 
     /// The exemplars attached to one learning, oldest first.
@@ -263,6 +535,36 @@ impl Store {
             });
         }
         Ok(scopes)
+    }
+}
+
+/// Whether any one of a learning's scopes matches this diff.
+///
+/// The SQL in [`Store::candidates`] lets every `glob:` row through, so a
+/// learning scoped only to a glob that missed is dropped here. Without
+/// this second pass a `glob:web/**` rule would fire on an `api/` diff,
+/// which is the invisible failure P7 exists to prevent.
+fn scope_hits(learning: &Learning, scope: &AuditScope, languages: &[String]) -> bool {
+    learning.scopes.iter().any(|one| match one.kind {
+        ScopeKind::Global => true,
+        ScopeKind::Project => one.value == scope.identity.value(),
+        ScopeKind::Language => languages.iter().any(|language| language == &one.value),
+        ScopeKind::Glob => scope.diff.matches_glob(&one.value),
+    })
+}
+
+/// `QueryRow` returning `None` for no row instead of an error.
+trait OptionalRow<T> {
+    fn optional_row(self) -> Result<Option<T>>;
+}
+
+impl<T> OptionalRow<T> for rusqlite::Result<T> {
+    fn optional_row(self) -> Result<Option<T>> {
+        match self {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -426,9 +728,11 @@ fn read_learning(row: &Row<'_>) -> rusqlite::Result<Learning> {
         author: row.get(13)?,
         activated_at: row.get(14)?,
         reinforced: row.get(15)?,
-        times_applied: row.get(16)?,
-        last_used_at: row.get(17)?,
-        last_verified: row.get(18)?,
+        times_selected: row.get(16)?,
+        last_selected_at: row.get(17)?,
+        times_applied: row.get(18)?,
+        last_applied_at: row.get(19)?,
+        last_verified: row.get(20)?,
         scopes: Vec::new(),
     })
 }
@@ -475,8 +779,49 @@ fn to_sqlite_error(error: Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::{FindingsInput, IncomingFinding, Outcome};
+    use crate::diff::Diff;
     use crate::id::new_id;
     use crate::migrate::SCHEMA_VERSION;
+    use crate::repo::RepoIdentity;
+
+    const DIFF: &str = "diff --git a/api/lib/a.ex b/api/lib/a.ex\n\
+        --- a/api/lib/a.ex\n\
+        +++ b/api/lib/a.ex\n\
+        @@ -1 +1 @@\n\
+        +IO.inspect(x)\n";
+
+    fn scope_for(diff: &str) -> AuditScope {
+        AuditScope {
+            identity: RepoIdentity::Remote("github.com/owner/repo".into()),
+            diff: Diff::parse(diff),
+            diff_range: "HEAD".into(),
+        }
+    }
+
+    /// A global, active learning. The Health filters imply `active`, so a
+    /// proposed row would drop out of every one of those tests.
+    fn active_row(store: &mut Store, title: &str) -> String {
+        let mut learning = NewLearning::new(title, "r", "why");
+        learning.status = Some(Status::Active);
+        record(store, &learning)
+    }
+
+    fn active(store: &mut Store, title: &str, scopes: &[&str]) -> String {
+        let mut learning = NewLearning::new(title, "r", "why");
+        learning.scopes = scopes.iter().map(|s| s.parse().unwrap()).collect();
+        learning.status = Some(Status::Active);
+        store.record(&learning, 0).unwrap().id
+    }
+
+    fn selected_titles(store: &Store, scope: &AuditScope) -> Vec<String> {
+        let mut candidates = store.candidates(scope).unwrap();
+        crate::audit::rank(&mut candidates);
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.learning.title)
+            .collect()
+    }
 
     fn table_names(store: &Store) -> Vec<String> {
         let mut stmt = store
@@ -1157,94 +1502,187 @@ mod tests {
     }
 
     #[test]
-    fn stale_days_counts_from_the_last_use_and_includes_the_boundary() {
+    fn unused_days_counts_from_the_last_selection_and_includes_the_boundary() {
         let mut store = Store::open_in_memory().unwrap();
-        let id = record(&mut store, &NewLearning::new("t", "r", "why"));
+        let id = active_row(&mut store, "t");
         store
             .conn
             .execute(
-                "UPDATE learnings SET last_used_at = datetime('now', '-90 days')
-                 WHERE id = ?1",
+                "UPDATE learnings
+                    SET times_selected = 1,
+                        last_selected_at = datetime('now', '-90 days')
+                  WHERE id = ?1",
                 [&id],
             )
             .unwrap();
 
-        let stale = |days: u32| {
+        let unused = |days: u32| {
             store
                 .list(&ListFilter {
-                    stale_days: Some(days),
+                    unused_days: Some(days),
                     ..ListFilter::default()
                 })
                 .unwrap()
                 .len()
         };
-        assert_eq!(stale(91), 0, "90 days of silence is not 91 days");
-        assert_eq!(stale(90), 1, "exactly N days counts as stale");
-        assert_eq!(stale(89), 1);
+        assert_eq!(unused(91), 0, "90 days of silence is not 91 days");
+        assert_eq!(unused(90), 1, "exactly N days counts");
+        assert_eq!(unused(89), 1);
     }
 
+    /// Section 5 gives `writ list` two filters, one per axis. Reach is
+    /// whether audits put the rule in front of a reviewer. Usefulness is
+    /// whether it ever caught anything.
     #[test]
-    fn a_learning_never_used_is_never_stale() {
-        // Two Health buckets, not one. A rule that has never fired and a
-        // rule that fired last year need different actions. Section 9.3.
+    fn the_two_health_filters_measure_reach_and_usefulness() {
         let mut store = Store::open_in_memory().unwrap();
-        let mut old = NewLearning::new("old and unused", "r", "why");
-        old.created_at = Some(BACKDATED.to_string());
-        old.updated_at = Some(BACKDATED.to_string());
-        record(&mut store, &old);
+        let misscoped = active_row(&mut store, "never reached");
+        let dead = active_row(&mut store, "reached, then stopped");
+        let noisy = active_row(&mut store, "reached daily, catches nothing");
+        let working = active_row(&mut store, "reached and useful");
 
-        let stale = store
-            .list(&ListFilter {
-                stale_days: Some(90),
-                ..ListFilter::default()
-            })
-            .unwrap();
-        assert!(stale.is_empty(), "age is not use");
-
-        let unused = store
-            .list(&ListFilter {
-                never_used: true,
-                ..ListFilter::default()
-            })
-            .unwrap();
-        assert_eq!(unused.len(), 1);
-        assert_eq!(unused[0].title, "old and unused");
-    }
-
-    #[test]
-    fn a_used_learning_is_not_in_the_never_used_bucket() {
-        let mut store = Store::open_in_memory().unwrap();
-        let used = record(&mut store, &NewLearning::new("used", "r", "why"));
-        record(&mut store, &NewLearning::new("unused", "r", "why"));
+        // Never selected, and written long ago.
         store
             .conn
             .execute(
-                "UPDATE learnings SET last_used_at = datetime('now') WHERE id = ?1",
-                [&used],
+                "UPDATE learnings SET created_at = '2000-01-01 00:00:00' WHERE id = ?1",
+                [&misscoped],
+            )
+            .unwrap();
+        // Selected a year ago and not since.
+        store
+            .conn
+            .execute(
+                "UPDATE learnings
+                    SET times_selected = 5,
+                        last_selected_at = datetime('now', '-365 days'),
+                        times_applied = 2
+                  WHERE id = ?1",
+                [&dead],
+            )
+            .unwrap();
+        // Selected today, has never caught anything.
+        store
+            .conn
+            .execute(
+                "UPDATE learnings SET times_selected = 9, last_selected_at = datetime('now')
+                 WHERE id = ?1",
+                [&noisy],
+            )
+            .unwrap();
+        // Selected today and useful.
+        store
+            .conn
+            .execute(
+                "UPDATE learnings
+                    SET times_selected = 9,
+                        last_selected_at = datetime('now'),
+                        times_applied = 4
+                  WHERE id = ?1",
+                [&working],
             )
             .unwrap();
 
-        let unused = store
-            .list(&ListFilter {
-                never_used: true,
+        let titles = |filter: ListFilter| {
+            let mut found: Vec<String> = store
+                .list(&filter)
+                .unwrap()
+                .into_iter()
+                .map(|learning| learning.title)
+                .collect();
+            found.sort();
+            found
+        };
+
+        // Reach. Both the misscoped rule and the dead one are here, and
+        // `times_selected` on the row is what tells them apart: 0 means
+        // reword it, 5 means it stopped being reached.
+        assert_eq!(
+            titles(ListFilter {
+                unused_days: Some(90),
+                ..ListFilter::default()
+            }),
+            ["never reached", "reached, then stopped"]
+        );
+        // Usefulness. The misscoped rule is deliberately absent: it caught
+        // nothing trivially, and "make it advisory" is the wrong advice.
+        assert_eq!(
+            titles(ListFilter {
+                never_applied: true,
+                ..ListFilter::default()
+            }),
+            ["reached daily, catches nothing"]
+        );
+        // They combine, and nothing here answers badly to both.
+        assert!(
+            titles(ListFilter {
+                unused_days: Some(90),
+                never_applied: true,
                 ..ListFilter::default()
             })
-            .unwrap();
-        assert_eq!(unused.len(), 1);
-        assert_eq!(unused[0].title, "unused");
+            .is_empty()
+        );
     }
 
+    /// A rule written this morning that no audit has reached yet is not
+    /// unused. Without the fallback to `created_at`, the Health screen
+    /// would open on the rules the user just wrote.
     #[test]
-    fn the_two_health_buckets_cannot_be_asked_for_together() {
-        let store = Store::open_in_memory().unwrap();
-        let error = store
-            .list(&ListFilter {
-                never_used: true,
-                stale_days: Some(90),
+    fn a_learning_no_audit_has_reached_falls_back_to_when_it_was_written() {
+        let mut store = Store::open_in_memory().unwrap();
+        active_row(&mut store, "written today");
+        assert!(
+            store
+                .list(&ListFilter {
+                    unused_days: Some(1),
+                    ..ListFilter::default()
+                })
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Both imply `status = 'active'`. A proposed learning can never be
+    /// selected, so it would sit in both buckets forever.
+    #[test]
+    fn the_health_filters_imply_active_unless_a_status_is_given() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = record(&mut store, &NewLearning::new("proposed", "r", "why"));
+        store
+            .conn
+            .execute(
+                "UPDATE learnings
+                    SET created_at = '2000-01-01 00:00:00', times_selected = 3
+                  WHERE id = ?1",
+                [&id],
+            )
+            .unwrap();
+
+        for filter in [
+            ListFilter {
+                unused_days: Some(90),
                 ..ListFilter::default()
-            })
-            .unwrap_err();
-        assert!(matches!(error, Error::Validation { .. }), "{error}");
+            },
+            ListFilter {
+                never_applied: true,
+                ..ListFilter::default()
+            },
+        ] {
+            assert!(store.list(&filter).unwrap().is_empty(), "{filter:?}");
+        }
+
+        assert_eq!(
+            store
+                .list(&ListFilter {
+                    status: Some(Status::Proposed),
+                    unused_days: Some(90),
+                    ..ListFilter::default()
+                })
+                .unwrap()
+                .len(),
+            1,
+            "an explicit status wins"
+        );
     }
 
     #[test]
@@ -1263,8 +1701,7 @@ mod tests {
                 status: Some(Status::Active),
                 scope: Some("language:rust".parse().unwrap()),
                 search: Some("sd".into()),
-                stale_days: None,
-                never_used: false,
+                ..ListFilter::default()
             })
             .unwrap();
         assert_eq!(listed.len(), 1);
@@ -1283,5 +1720,316 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "proposed");
+    }
+
+    // --- selection, section 7.1 step 2 ---------------------------------
+
+    #[test]
+    fn selection_takes_global_this_project_and_this_language() {
+        let mut store = Store::open_in_memory().unwrap();
+        active(&mut store, "everywhere", &["global"]);
+        active(&mut store, "this repo", &["project:github.com/owner/repo"]);
+        active(&mut store, "elixir", &["language:elixir"]);
+        active(
+            &mut store,
+            "another repo",
+            &["project:github.com/other/thing"],
+        );
+        active(&mut store, "rust", &["language:rust"]);
+
+        let mut titles = selected_titles(&store, &scope_for(DIFF));
+        titles.sort();
+        assert_eq!(titles, ["elixir", "everywhere", "this repo"]);
+    }
+
+    /// A proposed or archived learning is never selected. Invariant 2, P4.
+    #[test]
+    fn selection_takes_active_learnings_only() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .record(&NewLearning::new("proposed", "r", "why"), 0)
+            .unwrap();
+        let archived = active(&mut store, "archived", &["global"]);
+        store.set_status(&archived, Status::Archived).unwrap();
+        assert!(selected_titles(&store, &scope_for(DIFF)).is_empty());
+    }
+
+    /// The glob rows all pass the SQL, so the Rust pass has to drop the
+    /// ones that missed. Without it a `web/**` rule fires on an `api/`
+    /// diff and nothing says so.
+    #[test]
+    fn a_glob_scope_is_matched_against_the_changed_paths() {
+        let mut store = Store::open_in_memory().unwrap();
+        active(&mut store, "api", &["glob:api/**"]);
+        active(&mut store, "web", &["glob:web/**"]);
+        assert_eq!(selected_titles(&store, &scope_for(DIFF)), ["api"]);
+    }
+
+    /// Any one scope matching is enough, so a learning is not dropped by
+    /// its other scopes.
+    #[test]
+    fn one_matching_scope_out_of_several_is_enough() {
+        let mut store = Store::open_in_memory().unwrap();
+        active(&mut store, "either", &["language:rust", "glob:api/**"]);
+        assert_eq!(selected_titles(&store, &scope_for(DIFF)), ["either"]);
+    }
+
+    #[test]
+    fn a_diff_of_files_with_no_known_language_still_selects_global_rules() {
+        let mut store = Store::open_in_memory().unwrap();
+        active(&mut store, "everywhere", &["global"]);
+        active(&mut store, "elixir", &["language:elixir"]);
+        let diff = "--- a/Makefile\n+++ b/Makefile\n@@ -1 +1 @@\n+all:\n";
+        assert_eq!(selected_titles(&store, &scope_for(diff)), ["everywhere"]);
+    }
+
+    // --- the budget, section 7.1 step 3 --------------------------------
+
+    #[test]
+    fn the_budget_stops_at_max_rules() {
+        let mut store = Store::open_in_memory().unwrap();
+        for index in 0..10 {
+            active(&mut store, &format!("rule {index}"), &["global"]);
+        }
+        let scope = scope_for(DIFF);
+        let mut candidates = store.candidates(&scope).unwrap();
+        crate::audit::rank(&mut candidates);
+        let budget = Budget {
+            max_rules: 3,
+            max_chars: 100_000,
+        };
+        assert_eq!(store.take_budget(&candidates, &budget).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_budget_stops_at_max_chars() {
+        let mut store = Store::open_in_memory().unwrap();
+        for index in 0..10 {
+            active(&mut store, &format!("rule {index}"), &["global"]);
+        }
+        let scope = scope_for(DIFF);
+        let mut candidates = store.candidates(&scope).unwrap();
+        crate::audit::rank(&mut candidates);
+        let one = store
+            .take_budget(
+                &candidates,
+                &Budget {
+                    max_rules: 1,
+                    max_chars: 100_000,
+                },
+            )
+            .unwrap();
+        let width = rule_block(1, &one[0]).chars().count() as u32;
+
+        let two = store
+            .take_budget(
+                &candidates,
+                &Budget {
+                    max_rules: 40,
+                    max_chars: width * 2 + 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(two.len(), 2, "two rules fit and a third does not");
+        let none = store
+            .take_budget(
+                &candidates,
+                &Budget {
+                    max_rules: 40,
+                    max_chars: 1,
+                },
+            )
+            .unwrap();
+        assert!(none.is_empty(), "a budget of one character sends nothing");
+    }
+
+    // --- ingest, section 7.1 step 5 ------------------------------------
+
+    #[test]
+    fn ingesting_writes_a_finding_and_moves_the_counters() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = active(&mut store, "rule", &["global"]);
+        let audit = store
+            .start_audit("github.com/owner/repo", "HEAD", 1, &[])
+            .unwrap();
+        let before = store.get(&id).unwrap();
+        assert_eq!(before.times_applied, 0);
+        assert_eq!(before.last_applied_at, None);
+
+        let written = store
+            .ingest(&FindingsInput {
+                audit_id: audit.clone(),
+                findings: vec![IncomingFinding {
+                    learning_id: id.clone(),
+                    path: Some("api/lib/a.ex".into()),
+                    line: Some(1),
+                    detail: Some("here".into()),
+                    outcome: Outcome::Open,
+                }],
+            })
+            .unwrap();
+        assert_eq!(written.findings, 1);
+        assert_eq!(written.blocking, 1);
+
+        let after = store.get(&id).unwrap();
+        assert_eq!(after.times_applied, 1);
+        assert!(after.last_applied_at.is_some());
+        // Ingest moves usefulness only. Reach moved at emit, and this
+        // audit row was opened with no selection.
+        assert_eq!(after.times_selected, 0);
+        // Invariant 7: the trigger owns updated_at, and no write named it.
+        assert_eq!(after.created_at, before.created_at);
+    }
+
+    #[test]
+    fn an_advisory_finding_is_not_a_blocking_one() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut learning = NewLearning::new("advisory", "r", "why");
+        learning.blocking = false;
+        learning.status = Some(Status::Active);
+        let id = store.record(&learning, 0).unwrap().id;
+        let audit = store.start_audit("repo", "HEAD", 1, &[]).unwrap();
+        let written = store
+            .ingest(&FindingsInput {
+                audit_id: audit,
+                findings: vec![IncomingFinding {
+                    learning_id: id,
+                    path: None,
+                    line: None,
+                    detail: None,
+                    outcome: Outcome::Open,
+                }],
+            })
+            .unwrap();
+        assert_eq!(written.blocking, 0);
+    }
+
+    #[test]
+    fn ingesting_against_an_unknown_audit_is_not_found() {
+        let mut store = Store::open_in_memory().unwrap();
+        let error = store
+            .ingest(&FindingsInput {
+                audit_id: "nope".into(),
+                findings: Vec::new(),
+            })
+            .unwrap_err();
+        assert!(matches!(error, Error::NotFound { .. }), "{error}");
+    }
+
+    /// Section 7.5 reads outcomes back as the ranking signal, so an
+    /// outcome the agent may set has to survive the write.
+    #[test]
+    fn an_ingested_outcome_is_stored_and_ranks_the_learning_down() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = active(&mut store, "rule", &["global"]);
+        let audit = store
+            .start_audit("github.com/owner/repo", "HEAD", 1, &[])
+            .unwrap();
+        store
+            .ingest(&FindingsInput {
+                audit_id: audit,
+                findings: vec![IncomingFinding {
+                    learning_id: id.clone(),
+                    path: None,
+                    line: None,
+                    detail: None,
+                    outcome: Outcome::Ignored,
+                }],
+            })
+            .unwrap();
+        let candidates = store.candidates(&scope_for(DIFF)).unwrap();
+        assert_eq!(candidates[0].outcomes.ignored, 1);
+        assert!(candidates[0].outcomes.acceptance() < 1.0);
+    }
+
+    /// Section 7.1 step 5. The developer owns `rejected`, and it is the
+    /// heaviest negative in the ranking. If the audited agent could write
+    /// it, one call would escape the gate and demote the rule that caught
+    /// it.
+    #[test]
+    fn ingest_refuses_to_set_rejected() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = active(&mut store, "rule", &["global"]);
+        let audit = store.start_audit("repo", "HEAD", 1, &[]).unwrap();
+        let error = store
+            .ingest(&FindingsInput {
+                audit_id: audit,
+                findings: vec![IncomingFinding {
+                    learning_id: id.clone(),
+                    path: None,
+                    line: None,
+                    detail: None,
+                    outcome: Outcome::Rejected,
+                }],
+            })
+            .unwrap_err();
+        assert!(matches!(error, Error::Validation { .. }), "{error}");
+        // The whole call is one transaction, so nothing landed.
+        assert_eq!(store.get(&id).unwrap().times_applied, 0);
+    }
+
+    /// A rejection still has to rank, once a developer path writes one.
+    #[test]
+    fn a_rejected_finding_ranks_the_learning_to_the_bottom() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = active(&mut store, "rule", &["global"]);
+        let audit = store
+            .start_audit("github.com/owner/repo", "HEAD", 1, &[])
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO findings (id, audit_id, learning_id, outcome)
+                 VALUES (?1, ?2, ?3, 'rejected')",
+                params![new_id(), &audit, &id],
+            )
+            .unwrap();
+        let candidates = store.candidates(&scope_for(DIFF)).unwrap();
+        assert_eq!(candidates[0].outcomes.rejected, 1);
+        assert_eq!(candidates[0].outcomes.acceptance(), 0.0);
+    }
+
+    /// Reach moves at emit and nowhere else. Section 6.
+    #[test]
+    fn emitting_stamps_the_rules_it_sent_and_no_others() {
+        let mut store = Store::open_in_memory().unwrap();
+        let sent = active(&mut store, "sent", &["global"]);
+        let held = active(&mut store, "held back", &["global"]);
+        let scope = scope_for(DIFF);
+        let mut candidates = store.candidates(&scope).unwrap();
+        crate::audit::rank(&mut candidates);
+        let selected = store
+            .take_budget(
+                &candidates,
+                &Budget {
+                    max_rules: 1,
+                    max_chars: 100_000,
+                },
+            )
+            .unwrap();
+        assert_eq!(selected.len(), 1);
+        let chosen = selected[0].learning.id.clone();
+        store
+            .start_audit("github.com/owner/repo", "HEAD", 2, &selected)
+            .unwrap();
+
+        let other = if chosen == sent { held } else { sent };
+        let stamped = store.get(&chosen).unwrap();
+        assert_eq!(stamped.times_selected, 1);
+        assert!(stamped.last_selected_at.is_some());
+        // Selection is not application. The other pair must not move.
+        assert_eq!(stamped.times_applied, 0);
+        assert_eq!(stamped.last_applied_at, None);
+
+        let untouched = store.get(&other).unwrap();
+        assert_eq!(untouched.times_selected, 0);
+        assert_eq!(untouched.last_selected_at, None);
+    }
+
+    #[test]
+    fn getting_an_unknown_id_is_not_found() {
+        let store = Store::open_in_memory().unwrap();
+        let error = store.get(&new_id()).unwrap_err();
+        assert!(matches!(error, Error::NotFound { .. }), "{error}");
     }
 }

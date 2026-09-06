@@ -496,10 +496,14 @@ pub struct Learning {
     pub activated_at: Option<String>,
     /// How many times it was reinforced.
     pub reinforced: i64,
-    /// How many findings it has produced.
+    /// How many audits put it in front of a reviewer. Moved at emit.
+    pub times_selected: i64,
+    /// When an audit last selected it. Moved at emit.
+    pub last_selected_at: Option<String>,
+    /// How many findings it has produced. Moved at ingest.
     pub times_applied: i64,
-    /// When an audit last selected it.
-    pub last_used_at: Option<String>,
+    /// When it last caught something. Moved at ingest.
+    pub last_applied_at: Option<String>,
     /// When it was last confirmed to still hold.
     pub last_verified: Option<String>,
     /// Where it applies.
@@ -539,13 +543,24 @@ pub struct ListFilter {
     pub status: Option<Status>,
     /// Only learnings carrying this exact scope row.
     pub scope: Option<Scope>,
-    /// Only learnings whose last use is at least this many days old. A
-    /// learning that was never used does not match: that is
-    /// [`ListFilter::never_used`], and section 9.3 keeps the two Health
-    /// buckets apart because they call for different actions.
-    pub stale_days: Option<u32>,
-    /// Only learnings no audit has ever selected.
-    pub never_used: bool,
+    /// Only learnings whose last selection, or creation when no audit has
+    /// reached them yet, is at least this many days old. This is the reach
+    /// axis: has anything put the rule in front of a reviewer?
+    ///
+    /// `times_selected` on each row says which case a match is. `0` means
+    /// misscoped and needs rewording. A larger number means the rule used
+    /// to be reached and stopped, so it is probably dead. Splitting that
+    /// into two flags is right about the diagnosis and wrong about the
+    /// interface: the caller reads it off the output.
+    pub unused_days: Option<u32>,
+    /// Only learnings that were selected at least once and have never
+    /// caught anything. This is the usefulness axis.
+    ///
+    /// `times_selected > 0` is part of the filter, not an accident. A rule
+    /// nothing ever selected has caught nothing trivially, and reporting
+    /// that here would put one row in both buckets with two contradictory
+    /// suggested fixes.
+    pub never_applied: bool,
     /// Only learnings whose title, rule or rationale match.
     pub search: Option<String>,
 }
