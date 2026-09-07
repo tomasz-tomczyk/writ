@@ -542,7 +542,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
         "controls should share a ledger wrapper with the table: {body}"
     );
     assert!(
-        body.contains(r#"class="filter" aria-current="true""#),
+        body.contains(r#"class="filter filter-chip" aria-current="true""#),
         "{body}"
     );
     assert!(
@@ -557,13 +557,13 @@ async fn collection_uses_attached_ledger_table_chrome() {
     );
     assert!(
         body.contains(
-            r##"<form method="get" action="/collection" hx-get="/collection" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="search""##
+            r##"<form method="get" action="/collection" hx-get="/collection" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="search search-form""##
         ),
         "{body}"
     );
     assert!(
         body.contains(
-            r##"hx-get="/collection?status=active" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter" aria-current="true""##
+            r##"hx-get="/collection?status=active" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
         ),
         "{body}"
     );

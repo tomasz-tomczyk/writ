@@ -159,20 +159,18 @@ pub fn render(
 fn search_form(q: Option<&str>) -> String {
     let value = q.map_or(String::new(), escape);
     format!(
-        r#"<form method="get" action="/collection" hx-get="/collection"{SWAP} class="search" role="search">
-             <label class="search-wrap">
-               <svg class="search-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3"></circle><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"></path></svg>
-               <input class="search-input" type="search" name="q" value="{}" placeholder="Search learnings…" aria-label="Search learnings">
-             </label>
-             <button class="search-button" type="submit">Search</button>
+        r#"<form method="get" action="/collection" hx-get="/collection"{SWAP} class="search search-form" role="search">
+             <input class="form-control search-input" type="search" name="q" value="{}" placeholder="Search learnings, rationales, scopes…" aria-label="Search learnings">
+             <button class="btn search-button" type="submit">Search</button>
            </form>"#,
         value
     )
 }
 
 fn status_chips(current: Option<&str>) -> String {
-    let mut html =
-        String::from(r#"<div class="filters" role="group" aria-label="Filter by status">"#);
+    let mut html = String::from(
+        r#"<div class="filters filter-chips" role="group" aria-label="Filter by status">"#,
+    );
     for (label, param) in [
         ("Active", Some("active")),
         ("Proposed", Some("proposed")),
@@ -189,7 +187,7 @@ fn status_chips(current: Option<&str>) -> String {
             None => "/collection".into(),
         };
         html.push_str(&format!(
-            "<a href=\"{href}\" hx-get=\"{href}\"{SWAP} class=\"filter\"{current_attr}>{label}</a>"
+            "<a href=\"{href}\" hx-get=\"{href}\"{SWAP} class=\"filter filter-chip\"{current_attr}>{label}</a>"
         ));
     }
     html.push_str("</div>");
