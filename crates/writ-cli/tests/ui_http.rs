@@ -486,14 +486,29 @@ async fn collection_uses_project_scope_and_mode_columns() {
     let app = start_app(&db, config());
     let body = get(&app, "/collection").await.body;
 
-    assert!(body.contains("<th>Project</th>"), "{body}");
-    assert!(body.contains("<th>Scope</th>"), "{body}");
-    assert!(body.contains("<th>Mode</th>"), "{body}");
-    assert!(!body.contains("<th>Matcher</th>"), "{body}");
+    assert!(body.contains(">Project</th>"), "{body}");
+    assert!(body.contains(">Scope</th>"), "{body}");
+    assert!(body.contains(">Mode</th>"), "{body}");
+    assert!(!body.contains(">Matcher</th>"), "{body}");
     assert!(!body.contains("collection-only-secret"), "{body}");
-    assert!(body.contains(">github.com/acme/writ</span>"), "{body}");
-    assert!(body.contains(">language:rust</span>"), "{body}");
-    assert!(body.contains(">glob:crates/**/*.rs</span>"), "{body}");
+    assert!(
+        body.contains(
+            r#"<th scope="col" aria-sort="ascending"><a class="sort-button" data-direction="asc""#
+        ),
+        "the default title order should be announced: {body}"
+    );
+    assert!(
+        body.contains(r#"<span class="scope-kind">project:</span>github.com/acme/writ"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"<span class="scope-kind">language:</span>rust"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"<span class="scope-kind">glob:</span>crates/**/*.rs"#),
+        "{body}"
+    );
     assert!(
         body.contains(r#"class="mode-badge blocking">blocking</span>"#),
         "{body}"
@@ -506,6 +521,97 @@ async fn collection_uses_project_scope_and_mode_columns() {
         body.contains(r#"class="muted empty-value">—</span>"#),
         "{body}"
     );
+}
+
+#[tokio::test]
+async fn collection_uses_attached_ledger_table_chrome() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        active_learning(&mut store, "ledger row");
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?status=active&sort=title&dir=asc")
+        .await
+        .body;
+
+    assert!(
+        body.contains(r#"<section class="collection-ledger"><div class="collection-controls">"#),
+        "controls should share a ledger wrapper with the table: {body}"
+    );
+    assert!(
+        body.contains(r#"class="filter" aria-current="true""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"class="result-count">1 learning"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            r#"<colgroup><col class="title"><col class="project"><col class="scope"><col class="mode"><col class="hits"><col class="used"><col class="status"><col class="health"></colgroup>"#
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            r##"<form method="get" action="/collection" hx-get="/collection" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="search""##
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            r##"hx-get="/collection?status=active" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter" aria-current="true""##
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"class="sort-button" data-direction="asc""#),
+        "{body}"
+    );
+    assert!(body.contains(r#"aria-sort="ascending""#), "{body}");
+    assert!(
+        body.contains(
+            r##"hx-get="/collection?sort=title&amp;dir=desc" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true""##
+        ),
+        "{body}"
+    );
+    assert!(body.contains(r#"class="sort-caret""#), "{body}");
+    assert!(body.contains(r#"class="table-shell""#), "{body}");
+}
+
+#[tokio::test]
+async fn collection_sort_controls_escape_query_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        active_learning(&mut store, r#"" onfocus="alert(2)"#);
+    }
+
+    let app = start_app(&db, config());
+    let body = get(
+        &app,
+        "/collection?sort=title&dir=%22%20onmouseover%3D%22alert(1)&q=%22%20onfocus%3D%22alert(2)",
+    )
+    .await
+    .body;
+
+    assert!(
+        body.contains(r#"class="sort-button" data-direction="asc""#),
+        "invalid directions should normalize to ascending: {body}"
+    );
+    assert!(
+        body.contains("q=%22+onfocus%3D%22alert%282%29"),
+        "search query should remain URL-encoded in sort links: {body}"
+    );
+    assert!(
+        !body.contains(r#"data-direction="" onmouseover="#),
+        "{body}"
+    );
+    assert!(!body.contains(r#"&q=" onfocus="#), "{body}");
 }
 
 #[tokio::test]

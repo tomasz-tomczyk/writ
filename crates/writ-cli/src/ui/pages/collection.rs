@@ -30,9 +30,12 @@ pub fn render(
             rows.retain(|r| r.status != Status::Archived);
         }
 
-        let sort_dir = dir.unwrap_or("asc");
+        let sort_field = sort
+            .filter(|field| matches!(*field, "hit" | "last_used" | "status"))
+            .unwrap_or("title");
+        let sort_dir = if dir == Some("desc") { "desc" } else { "asc" };
         rows.sort_by(|left, right| {
-            let ordering = match sort.unwrap_or("title") {
+            let ordering = match sort_field {
                 "hit" => left.times_applied.cmp(&right.times_applied),
                 "last_used" => left.last_selected_at.cmp(&right.last_selected_at),
                 "status" => left.status.as_str().cmp(right.status.as_str()),
@@ -64,29 +67,54 @@ pub fn render(
             .map(|l| l.id)
             .collect();
 
-        let mut html = String::from(r#"<div id="collection-body">"#);
-        html.push_str(r#"<div class="collection-controls">"#);
+        let result_count = rows.len();
+        let mut html = String::from(
+            r#"<div id="collection-body"><section class="collection-ledger"><div class="collection-controls">"#,
+        );
         html.push_str(&search_form(q));
         html.push_str(&status_chips(status_filter));
-        html.push_str("</div>");
+        html.push_str(&format!(
+            r#"<span class="result-count">{} {}</span></div>"#,
+            result_count,
+            if result_count == 1 {
+                "learning"
+            } else {
+                "learnings"
+            }
+        ));
 
         if rows.is_empty() {
             html.push_str(
-                r#"<div class="shell empty"><strong>No learnings match</strong><span>Try a different search or status filter.</span></div></div>"#,
+                r#"<div class="table-shell collection-empty empty"><strong>No learnings match</strong><span>Try a different search or status filter.</span></div></section></div>"#,
             );
             return Ok(html);
         }
 
         html.push_str(r#"<div class="table-shell"><table class="collection">"#);
+        html.push_str(
+            r#"<colgroup><col class="title"><col class="project"><col class="scope"><col class="mode"><col class="hits"><col class="used"><col class="status"><col class="health"></colgroup>"#,
+        );
         html.push_str("<thead><tr>");
-        html.push_str(&sort_link("Title", "title", sort, sort_dir, q));
-        html.push_str("<th>Project</th>");
-        html.push_str("<th>Scope</th>");
-        html.push_str("<th>Mode</th>");
-        html.push_str(&sort_link("Hits", "hit", sort, sort_dir, q));
-        html.push_str(&sort_link("Last used", "last_used", sort, sort_dir, q));
-        html.push_str(&sort_link("Status", "status", sort, sort_dir, q));
-        html.push_str("<th>Health</th>");
+        html.push_str(&sort_link("Title", "title", Some(sort_field), sort_dir, q));
+        html.push_str(r#"<th scope="col">Project</th>"#);
+        html.push_str(r#"<th scope="col">Scope</th>"#);
+        html.push_str(r#"<th scope="col">Mode</th>"#);
+        html.push_str(&sort_link("Hits", "hit", Some(sort_field), sort_dir, q));
+        html.push_str(&sort_link(
+            "Last used",
+            "last_used",
+            Some(sort_field),
+            sort_dir,
+            q,
+        ));
+        html.push_str(&sort_link(
+            "Status",
+            "status",
+            Some(sort_field),
+            sort_dir,
+            q,
+        ));
+        html.push_str(r#"<th scope="col">Health</th>"#);
         html.push_str("</tr></thead><tbody>");
 
         for row in rows {
@@ -116,13 +144,14 @@ pub fn render(
                 escape(row.status.as_str())
             ));
             html.push_str(&format!(
-                "<td><span class=\"health-dot {}\" title=\"{}\"></span></td>",
+                "<td class=\"health-cell\"><span class=\"health-dot {}\" title=\"{}\" role=\"img\" aria-label=\"{}\"></span></td>",
                 health_class,
+                health_title(is_unused, is_never_applied),
                 health_title(is_unused, is_never_applied)
             ));
             html.push_str("</tr>");
         }
-        html.push_str("</tbody></table></div></div>");
+        html.push_str("</tbody></table></div></section></div>");
         Ok(html)
     })
 }
@@ -130,30 +159,37 @@ pub fn render(
 fn search_form(q: Option<&str>) -> String {
     let value = q.map_or(String::new(), escape);
     format!(
-        r#"<form method="get" action="/collection" hx-get="/collection"{SWAP} class="search">
-             <input type="search" name="q" value="{}" placeholder="Search…">
-             <button type="submit">Search</button>
+        r#"<form method="get" action="/collection" hx-get="/collection"{SWAP} class="search" role="search">
+             <label class="search-wrap">
+               <svg class="search-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3"></circle><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"></path></svg>
+               <input class="search-input" type="search" name="q" value="{}" placeholder="Search learnings…" aria-label="Search learnings">
+             </label>
+             <button class="search-button" type="submit">Search</button>
            </form>"#,
         value
     )
 }
 
 fn status_chips(current: Option<&str>) -> String {
-    let mut html = String::from(r#"<div class="chips">"#);
+    let mut html =
+        String::from(r#"<div class="filters" role="group" aria-label="Filter by status">"#);
     for (label, param) in [
         ("Active", Some("active")),
         ("Proposed", Some("proposed")),
         ("Archived", Some("archived")),
         ("All", Some("all")),
     ] {
-        let selected = current == param;
+        let current_attr = if current == param {
+            r#" aria-current="true""#
+        } else {
+            ""
+        };
         let href = match param {
             Some(p) => format!("/collection?status={}", p),
             None => "/collection".into(),
         };
-        let class = if selected { "chip active" } else { "chip" };
         html.push_str(&format!(
-            "<a href=\"{href}\" hx-get=\"{href}\"{SWAP} class=\"{class}\">{label}</a>"
+            "<a href=\"{href}\" hx-get=\"{href}\"{SWAP} class=\"filter\"{current_attr}>{label}</a>"
         ));
     }
     html.push_str("</div>");
@@ -171,17 +207,26 @@ fn sort_link(label: &str, field: &str, sort: Option<&str>, dir: &str, q: Option<
     if let Some(query) = q {
         href.push_str(&format!("&q={}", urlencode(query)));
     }
-    let arrow = if active {
-        if dir == "asc" { " ▲" } else { " ▼" }
+    let href = escape(&href);
+    let direction = if active {
+        format!(r#" data-direction="{dir}""#)
     } else {
-        ""
+        String::new()
+    };
+    let aria_sort = if active {
+        if dir == "asc" {
+            "ascending"
+        } else {
+            "descending"
+        }
+    } else {
+        "none"
     };
     format!(
-        "<th><a href=\"{}\" hx-get=\"{}\"{SWAP}>{}{}</a></th>",
+        "<th scope=\"col\" aria-sort=\"{aria_sort}\"><a class=\"sort-button\"{direction} href=\"{}\" hx-get=\"{}\"{SWAP}>{}<svg class=\"sort-caret\" viewBox=\"0 0 12 12\" fill=\"none\" aria-hidden=\"true\"><path d=\"m3 7 3-3 3 3\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg></a></th>",
         href,
         href,
-        escape(label),
-        arrow
+        escape(label)
     )
 }
 
@@ -192,10 +237,7 @@ fn scope_cell(scopes: &[Scope], kind: ScopeKind) -> String {
         html.push_str(r#"<span class="muted empty-value">—</span>"#);
     } else {
         for scope in matching {
-            html.push_str(&format!(
-                "<span class=\"chip project\">{}</span>",
-                escape(&scope.value)
-            ));
+            html.push_str(&scope_chip(scope, "project"));
         }
     }
     html.push_str("</div></td>");
@@ -212,14 +254,29 @@ fn scope_cell_excluding(scopes: &[Scope], excluded: ScopeKind) -> String {
         html.push_str(r#"<span class="muted empty-value">—</span>"#);
     } else {
         for scope in matching {
-            html.push_str(&format!(
-                "<span class=\"chip scope\">{}</span>",
-                escape(&scope.to_string())
-            ));
+            html.push_str(&scope_chip(scope, "scope"));
         }
     }
     html.push_str("</div></td>");
     html
+}
+
+fn scope_chip(scope: &Scope, class: &str) -> String {
+    if scope.kind == ScopeKind::Global {
+        return format!(r#"<span class="chip {class}" title="global">global</span>"#);
+    }
+
+    let kind = match scope.kind {
+        ScopeKind::Project => "project:",
+        ScopeKind::Language => "language:",
+        ScopeKind::Glob => "glob:",
+        ScopeKind::Global => unreachable!("global returned above"),
+    };
+    let title = escape(&scope.to_string());
+    format!(
+        r#"<span class="chip {class}" title="{title}"><span class="scope-kind">{kind}</span>{}</span>"#,
+        escape(&scope.value)
+    )
 }
 
 fn health_class(unused: bool, never_applied: bool) -> &'static str {
@@ -240,5 +297,20 @@ fn health_title(unused: bool, never_applied: bool) -> String {
 }
 
 fn urlencode(text: &str) -> String {
-    text.replace(' ', "%20")
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            b' ' => encoded.push('+'),
+            _ => {
+                encoded.push('%');
+                encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+                encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+            }
+        }
+    }
+    encoded
 }
