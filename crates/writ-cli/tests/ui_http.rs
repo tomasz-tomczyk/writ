@@ -486,7 +486,8 @@ async fn collection_uses_project_scope_and_mode_columns() {
     let app = start_app(&db, config());
     let body = get(&app, "/collection").await.body;
 
-    assert!(body.contains(">Project</th>"), "{body}");
+    assert!(body.contains("Project"), "{body}");
+    assert!(body.contains(r#"class="project-filter""#), "{body}");
     assert!(!body.contains(">Scope</th>"), "{body}");
     assert!(body.contains(">Mode</th>"), "{body}");
     assert!(!body.contains(">Matcher</th>"), "{body}");
@@ -563,10 +564,14 @@ async fn collection_uses_attached_ledger_table_chrome() {
     );
     assert!(
         body.contains(
-            r#"<colgroup><col class="title"><col class="project"><col class="mode"><col class="hits"><col class="used"><col class="status"><col class="health"></colgroup>"#
+            r#"<colgroup><col class="title"><col class="project"><col class="mode"><col class="hits"><col class="used"><col class="status"></colgroup>"#
         ),
         "{body}"
     );
+    assert!(!body.contains(r#"col class="health""#), "{body}");
+    assert!(!body.contains(">Health</th>"), "{body}");
+    assert!(!body.contains("health-cell"), "{body}");
+    assert!(!body.contains("health-dot"), "{body}");
     assert!(
         body.contains(
             r##"<form method="get" action="/collection" hx-get="/collection" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="search search-form""##
@@ -575,7 +580,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
     );
     assert!(
         body.contains(
-            r##"hx-get="/collection?status=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
+            r##"hx-get="/collection?status=all&amp;sort=title&amp;dir=asc" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
         ),
         "{body}"
     );
@@ -586,7 +591,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
     assert!(body.contains(r#"aria-sort="ascending""#), "{body}");
     assert!(
         body.contains(
-            r##"hx-get="/collection?sort=title&amp;dir=desc" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true""##
+            r##"hx-get="/collection?sort=title&amp;dir=desc&amp;status=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true""##
         ),
         "{body}"
     );
@@ -660,7 +665,7 @@ async fn collection_defaults_to_all_including_archived() {
     assert!(body.contains("now archived"), "{body}");
     assert!(
         body.contains(
-            r##"hx-get="/collection?status=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
+            r##"hx-get="/collection?status=all&amp;sort=title&amp;dir=asc" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
         ),
         "page load should highlight All like the github mockup: {body}"
     );
@@ -684,6 +689,91 @@ async fn collection_sorts_by_hits_descending() {
     let high_pos = body.find("high hits").unwrap();
     let low_pos = body.find("low hits").unwrap();
     assert!(high_pos < low_pos, "high hits should come first: {body}");
+}
+
+#[tokio::test]
+async fn collection_sorts_by_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut zebra = NewLearning::new("zebra title", "rule", "rationale");
+        zebra.status = Some(Status::Active);
+        zebra.scopes = vec!["project:github.com/acme/zebra".parse().unwrap()];
+        store.record(&zebra).unwrap();
+
+        let mut apple = NewLearning::new("apple title", "rule", "rationale");
+        apple.status = Some(Status::Active);
+        apple.scopes = vec!["project:github.com/acme/apple".parse().unwrap()];
+        store.record(&apple).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?sort=project&dir=asc").await.body;
+
+    assert!(
+        body.contains(r#"sort=project&amp;dir=desc"#) || body.contains("sort=project&dir=desc"),
+        "project column should be sortable: {body}"
+    );
+    let apple_pos = body.find("apple title").unwrap();
+    let zebra_pos = body.find("zebra title").unwrap();
+    assert!(
+        apple_pos < zebra_pos,
+        "project asc should order by project id: {body}"
+    );
+}
+
+#[tokio::test]
+async fn collection_filters_by_selected_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut writ = NewLearning::new("writ only", "rule", "rationale");
+        writ.status = Some(Status::Active);
+        writ.scopes = vec!["project:github.com/acme/writ".parse().unwrap()];
+        store.record(&writ).unwrap();
+
+        let mut other = NewLearning::new("other only", "rule", "rationale");
+        other.status = Some(Status::Active);
+        other.scopes = vec!["project:github.com/acme/other".parse().unwrap()];
+        store.record(&other).unwrap();
+
+        let mut none = NewLearning::new("no project", "rule", "rationale");
+        none.status = Some(Status::Active);
+        none.scopes = vec!["global".parse().unwrap()];
+        store.record(&none).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let unfiltered = get(&app, "/collection").await.body;
+    assert!(
+        unfiltered.contains(r#"class="project-filter""#),
+        "project header should expose a multi-select filter: {unfiltered}"
+    );
+    assert!(
+        unfiltered.contains(r#"name="project" value="github.com/acme/writ""#),
+        "{unfiltered}"
+    );
+    assert!(
+        unfiltered.contains(r#"name="project" value="_none""#),
+        "no-project rows need a checkbox: {unfiltered}"
+    );
+
+    let body = get(
+        &app,
+        "/collection?project=github.com/acme/writ&project=_none",
+    )
+    .await
+    .body;
+    assert!(body.contains("writ only"), "{body}");
+    assert!(body.contains("no project"), "{body}");
+    assert!(!body.contains("other only"), "{body}");
+    assert!(
+        body.contains(r#"name="project" value="github.com/acme/writ" checked"#)
+            || body.contains(r#"value="github.com/acme/writ" checked"#),
+        "selected projects stay checked: {body}"
+    );
 }
 
 fn active_with_exemplar(store: &mut Store, title: &str) -> String {
@@ -879,6 +969,32 @@ async fn health_empty_state_shows_clear_copy() {
 }
 
 #[tokio::test]
+async fn inbox_opens_learning_detail_from_proposal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("open me", "rule only", "why only");
+        learning.status = Some(Status::Proposed);
+        store.record(&learning).unwrap().id
+    };
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/inbox").await.body;
+
+    assert!(
+        body.contains(&format!(
+            r#"class="proposal-open" href="/learnings/{id}" aria-label="Open open me""#
+        )),
+        "inbox proposals should open the learning detail: {body}"
+    );
+    assert!(
+        body.contains(r#"class="proposal-title""#),
+        "title stays visible while the card opens detail: {body}"
+    );
+}
+
+#[tokio::test]
 async fn inbox_uses_collection_style_chrome() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
@@ -903,7 +1019,8 @@ async fn inbox_uses_collection_style_chrome() {
         body.contains(r#"class="table-shell proposal-list""#),
         "{body}"
     );
-    assert!(body.contains(r#"class="title-link""#), "{body}");
+    assert!(body.contains(r#"class="proposal-open""#), "{body}");
+    assert!(body.contains(r#"class="proposal-title""#), "{body}");
     assert!(
         body.contains(r#"<span class="scope-kind">language:</span>rust"#),
         "{body}"

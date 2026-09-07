@@ -33,10 +33,14 @@ pub fn render(state: &AppState) -> Result<String, Error> {
             let exemplars = store.exemplars_of(&learning.id)?;
 
             html.push_str("<article class=\"proposal\">");
+            html.push_str(&format!(
+                "<a class=\"proposal-open\" href=\"/learnings/{}\" aria-label=\"Open {}\"></a>",
+                escape(&learning.id),
+                escape(&learning.title)
+            ));
             html.push_str("<div class=\"proposal-header\"><div>");
             html.push_str(&format!(
-                "<a class=\"title-link\" href=\"/learnings/{}\">{}</a>",
-                escape(&learning.id),
+                "<h2 class=\"proposal-title\">{}</h2>",
                 escape(&learning.title)
             ));
             html.push_str("<div class=\"proposal-meta title-meta\">");
