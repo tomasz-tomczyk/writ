@@ -258,7 +258,7 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
         }
         if let Verdict::MissWithNotice(why) = &verdict {
             notices.push(format!(
-                "writ: matcher {} fell back to the post-image only: {why}",
+                "writ: matcher {} could not evaluate every pre-image; those files were checked post-image only: {why}",
                 candidate.learning.id
             ));
         }

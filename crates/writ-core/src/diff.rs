@@ -79,23 +79,41 @@ impl Diff {
         let mut paths: Vec<String> = Vec::new();
         let mut added = String::new();
         let mut removed = String::new();
+        // File headers (`---` / `+++`) only appear outside hunks. Inside a
+        // hunk a content line can begin `-- `, which the patch renders as
+        // `--- …` and must not be mistaken for a header.
+        let mut in_hunk = false;
 
         for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("+++ ") {
-                if let Some(path) = strip_prefix_marker(rest)
-                    && !paths.iter().any(|seen| seen == path)
-                {
-                    paths.push(path.to_string());
+            if line.starts_with("diff ") {
+                in_hunk = false;
+                continue;
+            }
+            if line.starts_with("@@") {
+                in_hunk = true;
+                continue;
+            }
+            if !in_hunk {
+                if let Some(rest) = line.strip_prefix("+++ ") {
+                    if let Some(path) = strip_prefix_marker(rest)
+                        && !paths.iter().any(|seen| seen == path)
+                    {
+                        paths.push(path.to_string());
+                    }
+                    continue;
                 }
-            } else if let Some(rest) = line.strip_prefix("--- ") {
-                // A deletion has `+++ /dev/null`, so the old side is the
-                // only place the path appears.
-                if let Some(path) = strip_prefix_marker(rest)
-                    && !paths.iter().any(|seen| seen == path)
-                {
-                    paths.push(path.to_string());
+                if let Some(rest) = line.strip_prefix("--- ") {
+                    // A deletion has `+++ /dev/null`, so the old side is the
+                    // only place the path appears.
+                    if let Some(path) = strip_prefix_marker(rest)
+                        && !paths.iter().any(|seen| seen == path)
+                    {
+                        paths.push(path.to_string());
+                    }
+                    continue;
                 }
-            } else if let Some(rest) = line.strip_prefix('+') {
+            }
+            if let Some(rest) = line.strip_prefix('+') {
                 added.push_str(rest);
                 added.push('\n');
             } else if let Some(rest) = line.strip_prefix('-') {
@@ -219,6 +237,26 @@ mod tests {
     fn the_removed_text_holds_the_removed_lines_only() {
         let diff = Diff::parse(SAMPLE);
         assert_eq!(diff.removed, "let x = 1;\n");
+    }
+
+    /// A removed content line that begins `-- ` (SQL/shell comments) is
+    /// rendered as `--- …` in the unified diff. Headers must only be
+    /// recognised outside hunks, or that line becomes a fake path.
+    #[test]
+    fn a_removed_line_starting_with_dashes_is_not_a_file_header() {
+        let text = "\
+diff --git a/q.sql b/q.sql
+--- a/q.sql
++++ b/q.sql
+@@ -1,2 +1,2 @@
+--- comment
+-select 1;
++select 2;
+";
+        let diff = Diff::parse(text);
+        assert_eq!(diff.paths, ["q.sql"]);
+        assert_eq!(diff.removed, "-- comment\nselect 1;\n");
+        assert_eq!(diff.added, "select 2;\n");
     }
 
     #[test]

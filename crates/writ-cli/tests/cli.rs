@@ -2211,9 +2211,11 @@ fn an_ast_grep_miss_on_an_added_file_stays_a_miss_without_a_pre_image() {
     let output = audit_with_ast_grep(&sandbox, &root, &[]);
     output.assert_code(0);
     assert!(!output.stdout.contains(&learning), "{}", output.stdout);
+    // Add-only diffs have no removed content, so the pre-image path is
+    // skipped rather than emitting a fallback notice for every new file.
     assert!(
-        output.stderr.contains("cannot read pre-image HEAD:new.ex"),
-        "the post-only fallback must say why: {}",
+        !output.stderr.contains("cannot read pre-image HEAD:new.ex"),
+        "add-only misses should not probe pre-images: {}",
         output.stderr
     );
 }

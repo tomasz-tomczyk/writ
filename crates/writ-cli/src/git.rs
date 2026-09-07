@@ -105,6 +105,23 @@ pub fn diff(root: &Path, range: Option<&str>) -> Result<(String, String)> {
     Ok((String::from_utf8_lossy(&output.stdout).into_owned(), range))
 }
 
+/// Raw bytes of a git object (`HEAD:path`, a blob oid, …).
+///
+/// Unlike [`run`], this keeps the body untrimmed and allows non-UTF-8.
+/// Used by retrieval matchers for pre-image scans. Failures return the
+/// reason so the caller can degrade under P6.
+pub fn show_bytes(root: &Path, object: &str) -> std::result::Result<Vec<u8>, String> {
+    let output = Command::new("git")
+        .args(["show", object])
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("cannot run git: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(output.stdout)
+}
+
 /// Run git and return its trimmed stdout, or nothing when it refused.
 ///
 /// A refusal is an answer here, not a failure: no remote, no HEAD and no

@@ -9,11 +9,14 @@
 //! audit still succeeds. An optional capability degrades the result. It
 //! never fails it.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use writ_core::{Diff, Learning, MatcherKind, ScopeKind, language_of};
+
+use crate::git;
 
 /// What one matcher said about one diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,12 +73,13 @@ fn regex_verdict(pattern: &str, diff: &Diff) -> Verdict {
 /// Shell out to `ast-grep`. Spec section 8.2: shell out now, embed on a
 /// trigger.
 fn ast_grep_verdict(pattern: &str, learning: &Learning, diff: &Diff, root: &Path) -> Verdict {
-    let files: Vec<String> = diff
+    let present: HashSet<&str> = diff
         .paths
         .iter()
+        .map(String::as_str)
         .filter(|path| root.join(path).is_file())
-        .cloned()
         .collect();
+    let files: Vec<String> = present.iter().map(|path| (*path).to_string()).collect();
     if !files.is_empty() {
         match run_ast_grep_files(pattern, learning, &files, root) {
             Verdict::Hit => return Verdict::Hit,
@@ -84,41 +88,30 @@ fn ast_grep_verdict(pattern: &str, learning: &Learning, diff: &Diff, root: &Path
         }
     }
 
+    // Add-only diffs have nothing to recover from a pre-image.
+    if diff.removed.is_empty() {
+        return Verdict::Miss;
+    }
+
+    let language_scope = language_scope(learning);
     let mut fallback_notices = Vec::new();
     for path in &diff.paths {
         let object = format!("HEAD:{path}");
-        let pre_image = match Command::new("git")
-            .args(["show", &object])
-            .current_dir(root)
-            .output()
-        {
-            Ok(output) if output.status.success() => output.stdout,
-            Ok(output) => {
-                let why = format!(
-                    "cannot read pre-image {object}: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-                if root.join(path).is_file() {
+        let pre_image = match git::show_bytes(root, &object) {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                let why = format!("cannot read pre-image {object}: {why}");
+                if present.contains(path.as_str()) {
                     fallback_notices.push(why);
                     continue;
                 }
                 return Verdict::Unevaluable(why);
             }
-            Err(error) => {
-                return Verdict::Unevaluable(format!(
-                    "cannot read pre-image {object}: cannot run git: {error}"
-                ));
-            }
         };
-        let language = learning
-            .scopes
-            .iter()
-            .find(|scope| scope.kind == ScopeKind::Language)
-            .map(|scope| scope.value.as_str())
-            .or_else(|| language_of(path));
+        let language = language_scope.or_else(|| language_of(path));
         let Some(language) = language else {
             let why = format!("cannot parse pre-image {object}: its language cannot be inferred");
-            if root.join(path).is_file() {
+            if present.contains(path.as_str()) {
                 fallback_notices.push(why);
                 continue;
             }
@@ -138,6 +131,14 @@ fn ast_grep_verdict(pattern: &str, learning: &Learning, diff: &Diff, root: &Path
     }
 }
 
+fn language_scope(learning: &Learning) -> Option<&str> {
+    learning
+        .scopes
+        .iter()
+        .find(|scope| scope.kind == ScopeKind::Language)
+        .map(|scope| scope.value.as_str())
+}
+
 fn run_ast_grep_files(
     pattern: &str,
     learning: &Learning,
@@ -149,12 +150,8 @@ fn run_ast_grep_files(
     // ast-grep infers the language from each file extension. A
     // `language:` scope overrides that, because a learning scoped to one
     // language means its pattern is written in that language's grammar.
-    if let Some(language) = learning
-        .scopes
-        .iter()
-        .find(|scope| scope.kind == ScopeKind::Language)
-    {
-        command.args(["--lang", &language.value]);
+    if let Some(language) = language_scope(learning) {
+        command.args(["--lang", language]);
     }
     let output = command.args(files).current_dir(root).output();
 
