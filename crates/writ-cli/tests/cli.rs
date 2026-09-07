@@ -679,12 +679,17 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    // A child that rejects flags (or otherwise exits before reading) closes
+    // its end of the pipe. Writing then returns BrokenPipe; that is not a
+    // test failure — the exit code and stderr still carry the answer.
+    {
+        let mut child_stdin = child.stdin.take().unwrap();
+        match child_stdin.write_all(stdin.as_bytes()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(error) => panic!("writing stdin: {error}"),
+        }
+    }
     Output::from(child.wait_with_output().unwrap())
 }
 
