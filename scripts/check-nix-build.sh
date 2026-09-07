@@ -23,7 +23,7 @@ if [ "$status" -ne 0 ]; then
       {
         echo "### Nix cargo hash mismatch"
         echo
-        echo 'Set `cargoHash` in `flake.nix` to:'
+        echo "Set cargoHash in flake.nix to:"
         echo
         echo '```nix'
         echo "$hash"
