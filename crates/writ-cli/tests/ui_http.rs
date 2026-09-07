@@ -486,14 +486,42 @@ async fn collection_uses_project_scope_and_mode_columns() {
     let app = start_app(&db, config());
     let body = get(&app, "/collection").await.body;
 
-    assert!(body.contains("<th>Project</th>"), "{body}");
-    assert!(body.contains("<th>Scope</th>"), "{body}");
-    assert!(body.contains("<th>Mode</th>"), "{body}");
-    assert!(!body.contains("<th>Matcher</th>"), "{body}");
+    assert!(body.contains("Project"), "{body}");
+    assert!(body.contains(r#"class="project-filter""#), "{body}");
+    assert!(!body.contains(">Scope</th>"), "{body}");
+    assert!(body.contains(">Mode</th>"), "{body}");
+    assert!(!body.contains(">Matcher</th>"), "{body}");
     assert!(!body.contains("collection-only-secret"), "{body}");
-    assert!(body.contains(">github.com/acme/writ</span>"), "{body}");
-    assert!(body.contains(">language:rust</span>"), "{body}");
-    assert!(body.contains(">glob:crates/**/*.rs</span>"), "{body}");
+    assert!(
+        body.contains(
+            r#"<th scope="col" aria-sort="ascending"><a class="sort-button" data-direction="asc""#
+        ),
+        "the default title order should be announced: {body}"
+    );
+    assert!(
+        body.contains(r#">writ</span>"#),
+        "project chips should show only the repo leaf: {body}"
+    );
+    assert!(
+        !body.contains(r#"<span class="scope-kind">project:</span>"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"title="project:github.com/acme/writ""#),
+        "full project identity stays on the title attribute: {body}"
+    );
+    assert!(
+        body.contains(r#"class="title-meta""#),
+        "non-project scopes belong under the title: {body}"
+    );
+    assert!(
+        body.contains(r#"<span class="scope-kind">language:</span>rust"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"<span class="scope-kind">glob:</span>crates/**/*.rs"#),
+        "{body}"
+    );
     assert!(
         body.contains(r#"class="mode-badge blocking">blocking</span>"#),
         "{body}"
@@ -506,6 +534,101 @@ async fn collection_uses_project_scope_and_mode_columns() {
         body.contains(r#"class="muted empty-value">—</span>"#),
         "{body}"
     );
+}
+
+#[tokio::test]
+async fn collection_uses_attached_ledger_table_chrome() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        active_learning(&mut store, "ledger row");
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?status=all&sort=title&dir=asc")
+        .await
+        .body;
+
+    assert!(
+        body.contains(r#"<section class="collection-ledger"><div class="collection-controls">"#),
+        "controls should share a ledger wrapper with the table: {body}"
+    );
+    assert!(
+        body.contains(r#"class="filter filter-chip" aria-current="true""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"class="result-count">1 learning"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            r#"<colgroup><col class="title"><col class="project"><col class="mode"><col class="hits"><col class="used"><col class="status"></colgroup>"#
+        ),
+        "{body}"
+    );
+    assert!(!body.contains(r#"col class="health""#), "{body}");
+    assert!(!body.contains(">Health</th>"), "{body}");
+    assert!(!body.contains("health-cell"), "{body}");
+    assert!(!body.contains("health-dot"), "{body}");
+    assert!(
+        body.contains(
+            r##"<form method="get" action="/collection" hx-get="/collection" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="search search-form""##
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            r##"hx-get="/collection?status=all&amp;sort=title&amp;dir=asc" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"class="sort-button" data-direction="asc""#),
+        "{body}"
+    );
+    assert!(body.contains(r#"aria-sort="ascending""#), "{body}");
+    assert!(
+        body.contains(
+            r##"hx-get="/collection?sort=title&amp;dir=desc&amp;status=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true""##
+        ),
+        "{body}"
+    );
+    assert!(body.contains(r#"class="sort-caret""#), "{body}");
+    assert!(body.contains(r#"class="table-shell""#), "{body}");
+}
+
+#[tokio::test]
+async fn collection_sort_controls_escape_query_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        active_learning(&mut store, r#"" onfocus="alert(2)"#);
+    }
+
+    let app = start_app(&db, config());
+    let body = get(
+        &app,
+        "/collection?sort=title&dir=%22%20onmouseover%3D%22alert(1)&q=%22%20onfocus%3D%22alert(2)",
+    )
+    .await
+    .body;
+
+    assert!(
+        body.contains(r#"class="sort-button" data-direction="asc""#),
+        "invalid directions should normalize to ascending: {body}"
+    );
+    assert!(
+        body.contains("q=%22+onfocus%3D%22alert%282%29"),
+        "search query should remain URL-encoded in sort links: {body}"
+    );
+    assert!(
+        !body.contains(r#"data-direction="" onmouseover="#),
+        "{body}"
+    );
+    assert!(!body.contains(r#"&q=" onfocus="#), "{body}");
 }
 
 #[tokio::test]
@@ -524,7 +647,7 @@ async fn empty_collection_has_no_record_or_new_learning_cta() {
 }
 
 #[tokio::test]
-async fn collection_hides_archived_by_default() {
+async fn collection_defaults_to_all_including_archived() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
     let active_id = {
@@ -539,7 +662,13 @@ async fn collection_hides_archived_by_default() {
     let body = get(&app, "/collection").await.body;
 
     assert!(body.contains(&active_id), "{body}");
-    assert!(!body.contains("now archived"), "{body}");
+    assert!(body.contains("now archived"), "{body}");
+    assert!(
+        body.contains(
+            r##"hx-get="/collection?status=all&amp;sort=title&amp;dir=asc" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
+        ),
+        "page load should highlight All like the github mockup: {body}"
+    );
 }
 
 #[tokio::test]
@@ -560,6 +689,166 @@ async fn collection_sorts_by_hits_descending() {
     let high_pos = body.find("high hits").unwrap();
     let low_pos = body.find("low hits").unwrap();
     assert!(high_pos < low_pos, "high hits should come first: {body}");
+}
+
+#[tokio::test]
+async fn collection_sorts_by_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut zebra = NewLearning::new("zebra title", "rule", "rationale");
+        zebra.status = Some(Status::Active);
+        zebra.scopes = vec!["project:github.com/acme/zebra".parse().unwrap()];
+        store.record(&zebra).unwrap();
+
+        let mut apple = NewLearning::new("apple title", "rule", "rationale");
+        apple.status = Some(Status::Active);
+        apple.scopes = vec!["project:github.com/acme/apple".parse().unwrap()];
+        store.record(&apple).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?sort=project&dir=asc").await.body;
+
+    assert!(
+        body.contains(r#"sort=project&amp;dir=desc"#) || body.contains("sort=project&dir=desc"),
+        "project column should be sortable: {body}"
+    );
+    let apple_pos = body.find("apple title").unwrap();
+    let zebra_pos = body.find("zebra title").unwrap();
+    assert!(
+        apple_pos < zebra_pos,
+        "project asc should order by project id: {body}"
+    );
+}
+
+#[tokio::test]
+async fn collection_filters_by_selected_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut writ = NewLearning::new("writ only", "rule", "rationale");
+        writ.status = Some(Status::Active);
+        writ.scopes = vec!["project:github.com/acme/writ".parse().unwrap()];
+        store.record(&writ).unwrap();
+
+        let mut other = NewLearning::new("other only", "rule", "rationale");
+        other.status = Some(Status::Active);
+        other.scopes = vec!["project:github.com/acme/other".parse().unwrap()];
+        store.record(&other).unwrap();
+
+        let mut none = NewLearning::new("no project", "rule", "rationale");
+        none.status = Some(Status::Active);
+        none.scopes = vec!["global".parse().unwrap()];
+        store.record(&none).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let unfiltered = get(&app, "/collection").await.body;
+    assert!(
+        unfiltered.contains(r#"class="project-filter""#),
+        "project header should expose a multi-select filter: {unfiltered}"
+    );
+    assert!(
+        unfiltered.contains(r#"name="project" value="github.com/acme/writ""#),
+        "{unfiltered}"
+    );
+    assert!(
+        unfiltered.contains(r#"name="project" value="_none""#),
+        "no-project rows need a checkbox: {unfiltered}"
+    );
+
+    let body = get(
+        &app,
+        "/collection?project=github.com/acme/writ&project=_none",
+    )
+    .await
+    .body;
+    assert!(body.contains("writ only"), "{body}");
+    assert!(body.contains("no project"), "{body}");
+    assert!(!body.contains("other only"), "{body}");
+    assert!(
+        body.contains(r#"name="project" value="github.com/acme/writ" checked"#)
+            || body.contains(r#"value="github.com/acme/writ" checked"#),
+        "selected projects stay checked: {body}"
+    );
+}
+
+#[tokio::test]
+async fn collection_filters_by_single_project_param() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut writ = NewLearning::new("writ only", "rule", "rationale");
+        writ.status = Some(Status::Active);
+        writ.scopes = vec!["project:github.com/acme/writ".parse().unwrap()];
+        store.record(&writ).unwrap();
+
+        let mut other = NewLearning::new("other only", "rule", "rationale");
+        other.status = Some(Status::Active);
+        other.scopes = vec!["project:github.com/acme/other".parse().unwrap()];
+        store.record(&other).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?project=github.com/acme/writ")
+        .await
+        .body;
+    assert!(body.contains("writ only"), "{body}");
+    assert!(!body.contains("other only"), "{body}");
+}
+
+#[tokio::test]
+async fn collection_project_filter_preserves_search_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut writ = NewLearning::new("writ alpha", "rule", "rationale");
+        writ.status = Some(Status::Active);
+        writ.scopes = vec!["project:github.com/acme/writ".parse().unwrap()];
+        store.record(&writ).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?q=alpha&project=github.com/acme/writ")
+        .await
+        .body;
+    assert!(body.contains(r#"class="project-filter__form""#), "{body}");
+    assert!(
+        body.contains(r#"type="hidden" name="q" value="alpha""#),
+        "project filter Apply must keep the active search: {body}"
+    );
+}
+
+#[tokio::test]
+async fn collection_empty_project_filter_keeps_clear_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut writ = NewLearning::new("writ only", "rule", "rationale");
+        writ.status = Some(Status::Active);
+        writ.scopes = vec!["project:github.com/acme/writ".parse().unwrap()];
+        store.record(&writ).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?project=github.com/acme/missing")
+        .await
+        .body;
+    assert!(body.contains("No learnings match"), "{body}");
+    assert!(
+        body.contains(r#"class="project-filter-empty""#),
+        "empty filter results must keep a clearable project form: {body}"
+    );
+    assert!(
+        body.contains(r#"name="project" value="github.com/acme/writ""#),
+        "{body}"
+    );
 }
 
 fn active_with_exemplar(store: &mut Store, title: &str) -> String {
@@ -733,6 +1022,10 @@ async fn inbox_empty_state_shows_curation_copy() {
 
     assert!(body.contains("Inbox is empty"), "{body}");
     assert!(body.contains("Every proposal is curated"), "{body}");
+    assert!(
+        body.contains(r#"class="table-shell ledger-empty empty""#),
+        "empty inbox should use the shared ledger empty panel: {body}"
+    );
 }
 
 #[tokio::test]
@@ -744,6 +1037,115 @@ async fn health_empty_state_shows_clear_copy() {
     let body = get(&app, "/health").await.body;
 
     assert!(body.contains("Health is clear"), "{body}");
+    assert!(
+        body.contains(r#"class="table-shell ledger-empty empty""#),
+        "empty health should use the shared ledger empty panel: {body}"
+    );
+}
+
+#[tokio::test]
+async fn inbox_opens_learning_detail_from_proposal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("open me", "rule only", "why only");
+        learning.status = Some(Status::Proposed);
+        store.record(&learning).unwrap().id
+    };
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/inbox").await.body;
+
+    assert!(
+        body.contains(&format!(
+            r#"class="proposal-open" href="/learnings/{id}" aria-label="Open open me""#
+        )),
+        "inbox proposals should open the learning detail: {body}"
+    );
+    assert!(
+        body.contains(r#"class="proposal-title""#),
+        "title stays visible while the card opens detail: {body}"
+    );
+}
+
+#[tokio::test]
+async fn inbox_uses_collection_style_chrome() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("inbox chrome", "rule", "rationale");
+        learning.scopes = vec![
+            "project:github.com/acme/writ".parse().unwrap(),
+            "language:rust".parse().unwrap(),
+        ];
+        store.record(&learning).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/inbox").await.body;
+
+    assert!(
+        body.contains(r#"class="inbox-ledger""#),
+        "inbox should sit in a ledger section: {body}"
+    );
+    assert!(
+        body.contains(r#"class="table-shell proposal-list""#),
+        "{body}"
+    );
+    assert!(body.contains(r#"class="proposal-open""#), "{body}");
+    assert!(body.contains(r#"class="proposal-title""#), "{body}");
+    assert!(
+        body.contains(r#"<span class="scope-kind">language:</span>rust"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#">writ</span>"#),
+        "project chips should show only the repo leaf: {body}"
+    );
+    assert!(
+        !body.contains(r#"<span class="scope-kind">project:</span>"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"class="btn btn--primary primary""#),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn health_uses_collection_style_chrome() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("health chrome", "rule", "rationale");
+        learning.status = Some(Status::Active);
+        learning.created_at = Some("2000-01-01 00:00:00".into());
+        learning.scopes = vec!["language:elixir".parse().unwrap()];
+        store.record(&learning).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/health").await.body;
+
+    assert!(
+        body.contains(r#"class="health-ledger""#),
+        "health should sit in a ledger section: {body}"
+    );
+    assert!(
+        body.contains(
+            r#"<colgroup><col class="title"><col class="bucket"><col class="used"><col class="hits"><col class="actions"></colgroup>"#
+        ),
+        "{body}"
+    );
+    assert!(body.contains(r#"class="title-link""#), "{body}");
+    assert!(
+        body.contains(r#"<span class="scope-kind">language:</span>elixir"#),
+        "{body}"
+    );
+    assert!(body.contains(r#"class="btn danger""#), "{body}");
 }
 
 #[tokio::test]

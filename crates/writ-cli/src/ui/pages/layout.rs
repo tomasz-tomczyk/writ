@@ -2,7 +2,7 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header::HeaderValue;
 use axum::response::{Html, IntoResponse, Response};
-use writ_core::{Error, ListFilter, Status, Store};
+use writ_core::{Error, ListFilter, Scope, ScopeKind, Status, Store};
 
 use crate::ui::AppState;
 use crate::ui::UI_PROTOCOL_VERSION;
@@ -33,27 +33,41 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
 </head>
 <body>
   <header class="app-header">
-    <nav class="app-header__inner" aria-label="Primary">
+    <div class="app-header__inner">
       <a href="/" class="brand" aria-label="writ home">
-        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M4.5 2.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-11Zm1.5.5v10h4v-10h-4Z"/>
+            <path d="M2 4.5a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-.5.5h-1a.5.5 0 0 1-.5-.5v-7Z"/>
+            <path d="M12 4.5a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-.5.5h-1a.5.5 0 0 1-.5-.5v-7Z"/>
+          </svg>
+        </span>
         <span>writ</span>
       </a>
-      <div class="nav-links">
-        <a href="/inbox" class="nav-link"{inbox_current}>Inbox{badge}</a>
-        <a href="/collection" class="nav-link"{collection_current}>Collection</a>
-        <a href="/health" class="nav-link"{health_current}>Health</a>
-      </div>
-    </nav>
+      <nav aria-label="Primary">
+        <ul class="underline-nav">
+          <li class="underline-nav__item">
+            <a href="/inbox" class="nav-link underline-nav__link"{inbox_current}>Inbox{badge}</a>
+          </li>
+          <li class="underline-nav__item">
+            <a href="/collection" class="nav-link underline-nav__link"{collection_current}>Collection</a>
+          </li>
+          <li class="underline-nav__item">
+            <a href="/health" class="nav-link underline-nav__link"{health_current}>Health</a>
+          </li>
+        </ul>
+      </nav>
+    </div>
   </header>
   <main class="page">
     <div class="page-header">
-      <h1>{title}</h1>
-      <p>{lede}</p>
+      <h1 class="page-header__title">{title}</h1>
+      <p class="page-header__lede">{lede}</p>
     </div>
     {body}
   </main>
   <footer class="store">
-    <span class="label">Store</span>
+    <span class="store-label">Store</span>
     <code>{store_path}</code>
   </footer>
 </body>
@@ -116,7 +130,7 @@ pub fn inbox_badge(state: &AppState) -> Result<String, Error> {
         String::new()
     };
     Ok(format!(
-        r#"<span class="badge" id="inbox-badge">{text}</span>"#
+        r#"<span class="badge counter" id="inbox-badge">{text}</span>"#
     ))
 }
 
@@ -132,7 +146,7 @@ pub fn inbox_badge_oob(state: &AppState) -> Result<String, Error> {
         String::new()
     };
     Ok(format!(
-        r#"<span class="badge" id="inbox-badge" hx-swap-oob="true">{text}</span>"#
+        r#"<span class="badge counter" id="inbox-badge" hx-swap-oob="true">{text}</span>"#
     ))
 }
 
@@ -183,4 +197,48 @@ where
         message: "store lock was poisoned".to_string(),
     })?;
     f(&mut store)
+}
+
+/// Primer scope/project chip used across Collection, Inbox, and Health.
+pub fn scope_chip(scope: &Scope, class: &str) -> String {
+    if scope.kind == ScopeKind::Global {
+        return format!(r#"<span class="chip {class}" title="global">global</span>"#);
+    }
+
+    if scope.kind == ScopeKind::Project {
+        let name = project_repo_name(&scope.value);
+        let title = escape(&scope.to_string());
+        return format!(
+            r#"<span class="chip {class}" title="{title}">{name}</span>"#,
+            name = escape(name)
+        );
+    }
+
+    let kind = match scope.kind {
+        ScopeKind::Language => "language:",
+        ScopeKind::Glob => "glob:",
+        ScopeKind::Project | ScopeKind::Global => unreachable!("handled above"),
+    };
+    let title = escape(&scope.to_string());
+    format!(
+        r#"<span class="chip {class}" title="{title}"><span class="scope-kind">{kind}</span>{}</span>"#,
+        escape(&scope.value)
+    )
+}
+
+/// Show only the repository leaf for project scopes (`github.com/acme/writ` → `writ`).
+pub fn project_repo_name(value: &str) -> &str {
+    value
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(value)
+}
+
+/// Empty ledger panel shared by Collection / Inbox / Health.
+pub fn ledger_empty(title: &str, body: &str) -> String {
+    format!(
+        r#"<div class="table-shell ledger-empty empty"><strong>{}</strong><span>{}</span></div>"#,
+        escape(title),
+        escape(body)
+    )
 }

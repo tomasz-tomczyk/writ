@@ -1,5 +1,5 @@
 use axum::Router;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -71,17 +71,81 @@ async fn collection(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<CollectionQuery>,
+    RawQuery(raw): RawQuery,
 ) -> Response {
+    let projects = projects_from_raw(raw.as_deref());
     match collection::render(
         &state,
         query.q.as_deref(),
         query.sort.as_deref(),
         query.dir.as_deref(),
         query.status.as_deref(),
+        &projects,
     ) {
         Ok(body) if layout::is_htmx(&headers) => layout::fragment(body.as_str()),
         Ok(body) => layout::render(&state, "Collection", body.as_str()),
         Err(error) => layout::error_response(error),
+    }
+}
+
+/// Repeated `project=` keys. `serde_urlencoded` rejects duplicates, so
+/// Collection reads them from the raw query string instead.
+fn projects_from_raw(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    raw.split('&')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            if key != "project" {
+                return None;
+            }
+            let decoded = urldecode(value);
+            if decoded.is_empty() {
+                None
+            } else {
+                Some(decoded)
+            }
+        })
+        .collect()
+}
+
+fn urldecode(text: &str) -> String {
+    let mut out = Vec::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = hex_val(bytes[i + 1]);
+                let lo = hex_val(bytes[i + 2]);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
