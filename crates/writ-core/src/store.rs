@@ -1,6 +1,8 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{Connection, Row, Transaction, params};
+use rusqlite::{Connection, Row, Transaction, functions::FunctionFlags, params};
 
 use crate::audit::{
     AuditScope, Budget, Candidate, FindingsInput, Ingested, Outcome, Outcomes, Selected, rule_block,
@@ -13,6 +15,29 @@ use crate::model::{
     Exemplar, ExemplarKind, Finding, Learning, LearningUpdate, ListFilter, MatcherKind,
     NewExemplar, NewLearning, Recorded, Scope, ScopeKind, SourceKind, Status,
 };
+
+// Paths the current `candidates()` call is evaluating against.
+//
+// SQLite has no built-in glob dialect with `**`, so a scalar function
+// registered on the connection reads the current diff paths from this
+// thread-local instead of closing over them. The guard resets it when
+// `candidates()` returns, so a later call never inherits stale paths.
+thread_local! {
+    static CANDIDATE_PATHS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+fn set_candidate_paths(paths: &[String]) -> CandidatePathsGuard {
+    CANDIDATE_PATHS.with(|cell| *cell.borrow_mut() = Some(paths.to_vec()));
+    CandidatePathsGuard
+}
+
+struct CandidatePathsGuard;
+
+impl Drop for CandidatePathsGuard {
+    fn drop(&mut self) {
+        CANDIDATE_PATHS.with(|cell| *cell.borrow_mut() = None);
+    }
+}
 
 /// An open writ database.
 ///
@@ -52,8 +77,30 @@ impl Store {
         // the `updated_at` triggers rely on explicit, so a later change
         // cannot turn recursion on without touching this line.
         conn.pragma_update(None, "recursive_triggers", false)?;
+        Self::register_functions(&conn)?;
         migrate::migrate(&mut conn)?;
         Ok(Self { conn })
+    }
+
+    /// Scalar functions the selection SQL relies on.
+    ///
+    /// `writ_glob_any(pattern)` returns 1 when any path in the current
+    /// diff matches `pattern` using the crate's `glob_match` dialect. It
+    /// is evaluated inside the correlated scope filter, so a `glob:`
+    /// scope can drop non-matching learnings before they leave SQLite.
+    fn register_functions(conn: &Connection) -> Result<()> {
+        conn.create_scalar_function("writ_glob_any", 1, FunctionFlags::SQLITE_UTF8, |ctx| {
+            let pattern: String = ctx.get(0)?;
+            let matched = CANDIDATE_PATHS.with(|cell| {
+                cell.borrow().as_ref().is_some_and(|paths| {
+                    paths
+                        .iter()
+                        .any(|path| crate::glob::glob_match(&pattern, path))
+                })
+            });
+            Ok(if matched { 1i32 } else { 0 })
+        })?;
+        Ok(())
     }
 
     /// The schema version this database records.
@@ -303,33 +350,74 @@ impl Store {
     /// Active learnings this diff could be about. Spec section 7.1 step 2.
     ///
     /// The `global`, `project:` and `language:` tests are SQL. `glob:` is
-    /// matched in Rust afterwards, because SQLite has no glob dialect with
-    /// `**` in it. A learning is kept when any one of its scopes matches.
+    /// also evaluated in SQL through a scalar function that understands
+    /// the crate's `**` dialect. [`scope_hits`] remains the authoritative
+    /// second pass: a rule is only kept when every scope kind it carries
+    /// matches the diff.
     ///
     /// A matcher is not evaluated here. Running `ast-grep` is I/O, so the
     /// caller does that and drops what missed. Invariant 1.
     pub fn candidates(&self, scope: &AuditScope) -> Result<Vec<Candidate>> {
+        // Make the current diff paths visible to the `writ_glob_any` scalar
+        // function for the duration of this call.
+        let _guard = set_candidate_paths(&scope.diff.paths);
+
+        let (ids, learnings) = self.filtered_active_learnings(scope)?;
+        let languages = scope.diff.languages();
+
+        let scopes_by_id = self.scopes_of_many(&ids)?;
+        let mut survivors: Vec<Learning> = Vec::new();
+        for mut learning in learnings {
+            learning.scopes = scopes_by_id.get(&learning.id).cloned().unwrap_or_default();
+            if scope_hits(&learning, scope, &languages) {
+                survivors.push(learning);
+            }
+        }
+
+        let outcomes_by_id =
+            self.outcomes_of_many(&survivors.iter().map(|l| l.id.as_str()).collect::<Vec<_>>())?;
+        let mut candidates = Vec::with_capacity(survivors.len());
+        for learning in survivors {
+            let outcomes = outcomes_by_id
+                .get(&learning.id)
+                .copied()
+                .unwrap_or_default();
+            candidates.push(Candidate { learning, outcomes });
+        }
+        Ok(candidates)
+    }
+
+    /// Active learnings whose project/language/glob scopes *could* match.
+    ///
+    /// This is the SQL filter that runs before [`scope_hits`]. It may only
+    /// over-select on the kinds SQLite can evaluate natively; `glob:` scopes
+    /// are evaluated through [`writ_glob_any`], so a non-matching glob rule
+    /// is dropped here rather than in Rust.
+    fn filtered_active_learnings(
+        &self,
+        scope: &AuditScope,
+    ) -> Result<(Vec<String>, Vec<Learning>)> {
         // Every kind the learning carries must match, and the rows inside
-        // one kind are alternatives. This SQL can only over-select: it
-        // drops a learning whose `project` or `language` kind cannot
-        // match, and lets `glob` through because SQLite has no dialect
-        // with `**` in it. [`scope_hits`] is the authoritative test.
+        // one kind are alternatives. `glob:` scopes are evaluated in SQL
+        // via `writ_glob_any`, which understands `**`; `scope_hits` is the
+        // authoritative second pass that enforces AND-across-kinds.
         let mut sql = String::from(
             "SELECT id, created_at, updated_at, status, title, rule, rationale, blocking,
                     matcher_kind, matcher, source_kind, source_adapter, source_ref,
                     author, activated_at, reinforced, times_selected, last_selected_at,
                     times_applied, last_applied_at, last_verified
              FROM learnings
-             WHERE status = 'active'
-               AND EXISTS (SELECT 1 FROM learning_scopes s
-                            WHERE s.learning_id = learnings.id)
-               AND NOT EXISTS (
-                     SELECT 1 FROM learning_scopes s
-                      WHERE s.learning_id = learnings.id
-                      GROUP BY s.kind
-                     HAVING MAX(CASE
-                              WHEN s.kind IN ('global', 'glob') THEN 1
-                              WHEN s.kind = 'project' AND s.value = ? THEN 1",
+               WHERE status = 'active'
+                 AND EXISTS (SELECT 1 FROM learning_scopes s
+                              WHERE s.learning_id = learnings.id)
+                 AND NOT EXISTS (
+                       SELECT 1 FROM learning_scopes s
+                        WHERE s.learning_id = learnings.id
+                        GROUP BY s.kind
+                       HAVING MAX(CASE
+                                WHEN s.kind = 'global' THEN 1
+                                WHEN s.kind = 'glob' AND writ_glob_any(s.value) = 1 THEN 1
+                                WHEN s.kind = 'project' AND s.value = ? THEN 1",
         );
         let mut values: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(scope.identity.value().to_string())];
@@ -352,17 +440,14 @@ impl Store {
         let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|value| value.as_ref()).collect();
         let rows = stmt.query_map(refs.as_slice(), read_learning)?;
 
-        let mut candidates = Vec::new();
+        let mut learnings: Vec<Learning> = Vec::new();
+        let mut ids: Vec<String> = Vec::new();
         for row in rows {
-            let mut learning = row?;
-            learning.scopes = self.scopes_of(&learning.id)?;
-            if !scope_hits(&learning, scope, &languages) {
-                continue;
-            }
-            let outcomes = self.outcomes_of(&learning.id)?;
-            candidates.push(Candidate { learning, outcomes });
+            let learning = row?;
+            ids.push(learning.id.clone());
+            learnings.push(learning);
         }
-        Ok(candidates)
+        Ok((ids, learnings))
     }
 
     /// Take rules off the ranked list until a cap stops it. Section 7.1
@@ -595,18 +680,31 @@ impl Store {
         Ok(())
     }
 
-    /// How past findings settled for one learning. Spec section 7.5.
-    fn outcomes_of(&self, id: &str) -> Result<Outcomes> {
-        let mut outcomes = Outcomes::default();
-        let mut stmt = self.conn.prepare(
-            "SELECT outcome, COUNT(*) FROM findings
-              WHERE learning_id = ?1 GROUP BY outcome",
-        )?;
-        let rows = stmt.query_map([id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    /// How past findings settled for many learnings at once.
+    fn outcomes_of_many(&self, ids: &[&str]) -> Result<HashMap<String, Outcomes>> {
+        let mut outcomes_by_id: HashMap<String, Outcomes> = HashMap::new();
+        if ids.is_empty() {
+            return Ok(outcomes_by_id);
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT learning_id, outcome, COUNT(*) FROM findings
+              WHERE learning_id IN ({placeholders})
+              GROUP BY learning_id, outcome"
+        );
+        let refs: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         for row in rows {
-            let (outcome, count) = row?;
+            let (learning_id, outcome, count) = row?;
+            let outcomes = outcomes_by_id.entry(learning_id).or_default();
             match outcome.as_str() {
                 "fixed" => outcomes.fixed = count,
                 "ignored" => outcomes.ignored = count,
@@ -615,7 +713,7 @@ impl Store {
                 _ => {}
             }
         }
-        Ok(outcomes)
+        Ok(outcomes_by_id)
     }
 
     /// The exemplars attached to one learning, oldest first.
@@ -655,6 +753,38 @@ impl Store {
             });
         }
         Ok(scopes)
+    }
+
+    /// All scopes for a set of learning ids, grouped by id.
+    fn scopes_of_many(&self, ids: &[String]) -> Result<HashMap<String, Vec<Scope>>> {
+        let mut scopes_by_id: HashMap<String, Vec<Scope>> = HashMap::new();
+        if ids.is_empty() {
+            return Ok(scopes_by_id);
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT learning_id, kind, value FROM learning_scopes
+             WHERE learning_id IN ({placeholders})
+             ORDER BY learning_id, kind, value"
+        );
+        let refs: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (learning_id, kind, value) = row?;
+            scopes_by_id.entry(learning_id).or_default().push(Scope {
+                kind: scope_kind(&kind)?,
+                value,
+            });
+        }
+        Ok(scopes_by_id)
     }
 }
 
@@ -890,12 +1020,45 @@ fn parse_outcome(outcome: &str) -> Result<Outcome> {
 
 #[cfg(test)]
 mod tests {
+    /// A learning with a scope, because a scope is required and most of
+    /// these tests are about something else. The tests that are about the
+    /// requirement build a `NewLearning` directly.
+    fn scoped(title: &str, rule: &str, rationale: &str) -> NewLearning {
+        let mut learning = NewLearning::new(title, rule, rationale);
+        learning.scopes = vec![Scope::global()];
+        learning
+    }
+
     use super::*;
     use crate::audit::{FindingsInput, IncomingFinding, Outcome};
     use crate::diff::Diff;
     use crate::id::new_id;
     use crate::migrate::SCHEMA_VERSION;
     use crate::repo::RepoIdentity;
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_trace_event(event: TraceEvent<'_>) {
+        if matches!(event, TraceEvent::Stmt(..)) {
+            QUERY_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn with_query_count<F, T>(store: &mut Store, f: F) -> (T, usize)
+    where
+        F: FnOnce(&mut Store) -> T,
+    {
+        QUERY_COUNT.store(0, Ordering::SeqCst);
+        store
+            .conn
+            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count_trace_event));
+        let result = f(store);
+        let count = QUERY_COUNT.load(Ordering::SeqCst);
+        store.conn.trace_v2(TraceEventCodes::empty(), None);
+        (result, count)
+    }
 
     const DIFF: &str = "diff --git a/api/lib/a.ex b/api/lib/a.ex\n\
         --- a/api/lib/a.ex\n\
@@ -914,13 +1077,13 @@ mod tests {
     /// A global, active learning. The Health filters imply `active`, so a
     /// proposed row would drop out of every one of those tests.
     fn active_row(store: &mut Store, title: &str) -> String {
-        let mut learning = NewLearning::new(title, "r", "why");
+        let mut learning = scoped(title, "r", "why");
         learning.status = Some(Status::Active);
         record(store, &learning)
     }
 
     fn active(store: &mut Store, title: &str, scopes: &[&str]) -> String {
-        let mut learning = NewLearning::new(title, "r", "why");
+        let mut learning = scoped(title, "r", "why");
         learning.scopes = scopes.iter().map(|s| s.parse().unwrap()).collect();
         learning.status = Some(Status::Active);
         store.record(&learning).unwrap().id
@@ -1329,7 +1492,7 @@ mod tests {
     #[test]
     fn update_learning_replaces_fields_scopes_and_exemplars() {
         let mut store = Store::open_in_memory().unwrap();
-        let mut original = NewLearning::new("old title", "old rule", "old rationale");
+        let mut original = scoped("old title", "old rule", "old rationale");
         original.status = Some(Status::Active);
         original.source_kind = Some(SourceKind::Session);
         original.source_adapter = Some("claude-code".into());
@@ -1397,7 +1560,7 @@ mod tests {
     #[test]
     fn update_learning_does_not_set_updated_at_in_sql() {
         let mut store = Store::open_in_memory().unwrap();
-        let id = record(&mut store, &NewLearning::new("t", "r", "why"));
+        let id = record(&mut store, &scoped("t", "r", "why"));
         store
             .conn
             .execute(
@@ -1418,7 +1581,7 @@ mod tests {
     #[test]
     fn update_learning_rejects_invalid_editable_fields() {
         let mut store = Store::open_in_memory().unwrap();
-        let id = record(&mut store, &NewLearning::new("t", "r", "why"));
+        let id = record(&mut store, &scoped("t", "r", "why"));
 
         for field in ["title", "rule", "rationale"] {
             let mut update = learning_update();
@@ -1461,10 +1624,7 @@ mod tests {
     #[test]
     fn recording_writes_the_row_and_a_global_scope() {
         let mut store = Store::open_in_memory().unwrap();
-        let id = record(
-            &mut store,
-            &NewLearning::new("prefer sd", "use sd", "sed is terse"),
-        );
+        let id = record(&mut store, &scoped("prefer sd", "use sd", "sed is terse"));
 
         let listed = store.list(&ListFilter::default()).unwrap();
         assert_eq!(listed.len(), 1);
@@ -1479,7 +1639,7 @@ mod tests {
     #[test]
     fn recording_active_stamps_activated_at() {
         let mut store = Store::open_in_memory().unwrap();
-        let mut learning = NewLearning::new("t", "r", "why");
+        let mut learning = scoped("t", "r", "why");
         learning.status = Some(Status::Active);
         let id = record(&mut store, &learning);
 
@@ -1493,7 +1653,7 @@ mod tests {
     fn activating_twice_does_not_move_activated_at() {
         // activated_at is the clock recurrence is measured against. Spec 6.
         let mut store = Store::open_in_memory().unwrap();
-        let mut learning = NewLearning::new("t", "r", "why");
+        let mut learning = scoped("t", "r", "why");
         learning.status = Some(Status::Active);
         learning.activated_at = Some(BACKDATED.to_string());
         let id = record(&mut store, &learning);
@@ -1507,7 +1667,7 @@ mod tests {
     #[test]
     fn activating_a_proposed_learning_stamps_activated_at_once() {
         let mut store = Store::open_in_memory().unwrap();
-        let id = record(&mut store, &NewLearning::new("t", "r", "why"));
+        let id = record(&mut store, &scoped("t", "r", "why"));
         assert_eq!(
             store.list(&ListFilter::default()).unwrap()[0].activated_at,
             None
@@ -1540,7 +1700,7 @@ mod tests {
         // The one exception to invariant 7. This is an INSERT, where the
         // trigger does not run at all.
         let mut store = Store::open_in_memory().unwrap();
-        let mut learning = NewLearning::new("t", "r", "why");
+        let mut learning = scoped("t", "r", "why");
         learning.created_at = Some(BACKDATED.to_string());
         learning.updated_at = Some(BACKDATED.to_string());
         record(&mut store, &learning);
@@ -1554,7 +1714,7 @@ mod tests {
     fn an_exemplar_survives_the_round_trip_byte_for_byte() {
         let mut store = Store::open_in_memory().unwrap();
         let snippet = "fn main() {\n    let x = 1;\n}\n";
-        let mut learning = NewLearning::new("t", "r", "why");
+        let mut learning = scoped("t", "r", "why");
         learning.exemplars = vec![NewExemplar {
             kind: ExemplarKind::Good,
             language: Some("rust".into()),
@@ -1572,8 +1732,8 @@ mod tests {
     #[test]
     fn a_bad_learning_writes_nothing_from_the_batch() {
         let mut store = Store::open_in_memory().unwrap();
-        let good = NewLearning::new("t", "r", "why");
-        let bad = NewLearning::new("t", "r", "");
+        let good = scoped("t", "r", "why");
+        let bad = scoped("t", "r", "");
         let error = store.record_many(&[good, bad]).unwrap_err();
         assert!(matches!(error, Error::Validation { .. }), "{error}");
         assert!(store.list(&ListFilter::default()).unwrap().is_empty());
@@ -1582,7 +1742,7 @@ mod tests {
     #[test]
     fn reinforcing_bumps_the_counter_and_appends_the_exemplar() {
         let mut store = Store::open_in_memory().unwrap();
-        let id = record(&mut store, &NewLearning::new("t", "r", "why"));
+        let id = record(&mut store, &scoped("t", "r", "why"));
         store
             .conn
             .execute(
@@ -1626,8 +1786,8 @@ mod tests {
     #[test]
     fn listing_filters_by_status() {
         let mut store = Store::open_in_memory().unwrap();
-        record(&mut store, &NewLearning::new("proposed one", "r", "why"));
-        let mut active = NewLearning::new("active one", "r", "why");
+        record(&mut store, &scoped("proposed one", "r", "why"));
+        let mut active = scoped("active one", "r", "why");
         active.status = Some(Status::Active);
         record(&mut store, &active);
 
@@ -1643,10 +1803,10 @@ mod tests {
     #[test]
     fn listing_filters_by_scope() {
         let mut store = Store::open_in_memory().unwrap();
-        let mut rust = NewLearning::new("rust one", "r", "why");
+        let mut rust = scoped("rust one", "r", "why");
         rust.scopes = vec!["language:rust".parse().unwrap()];
         record(&mut store, &rust);
-        record(&mut store, &NewLearning::new("global one", "r", "why"));
+        record(&mut store, &scoped("global one", "r", "why"));
 
         let filter = ListFilter {
             scope: Some("language:rust".parse().unwrap()),
@@ -1664,13 +1824,10 @@ mod tests {
     #[test]
     fn listing_searches_title_rule_and_rationale() {
         let mut store = Store::open_in_memory().unwrap();
+        record(&mut store, &scoped("prefer sd", "use sd", "sed is terse"));
         record(
             &mut store,
-            &NewLearning::new("prefer sd", "use sd", "sed is terse"),
-        );
-        record(
-            &mut store,
-            &NewLearning::new("prefer rg", "use ripgrep", "grep is slow"),
+            &scoped("prefer rg", "use ripgrep", "grep is slow"),
         );
 
         let search = |query: &str| {
@@ -1693,7 +1850,7 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         record(
             &mut store,
-            &NewLearning::new("non empty", "keep OR and NEAR", "star and quote"),
+            &scoped("non empty", "keep OR and NEAR", "star and quote"),
         );
         let search = |query: &str| {
             store
@@ -1858,7 +2015,7 @@ mod tests {
     #[test]
     fn the_health_filters_imply_active_unless_a_status_is_given() {
         let mut store = Store::open_in_memory().unwrap();
-        let id = record(&mut store, &NewLearning::new("proposed", "r", "why"));
+        let id = record(&mut store, &scoped("proposed", "r", "why"));
         store
             .conn
             .execute(
@@ -1899,11 +2056,11 @@ mod tests {
     #[test]
     fn filters_combine() {
         let mut store = Store::open_in_memory().unwrap();
-        let mut one = NewLearning::new("prefer sd", "use sd", "why");
+        let mut one = scoped("prefer sd", "use sd", "why");
         one.status = Some(Status::Active);
         one.scopes = vec!["language:rust".parse().unwrap()];
         record(&mut store, &one);
-        let mut two = NewLearning::new("prefer sd", "use sd", "why");
+        let mut two = scoped("prefer sd", "use sd", "why");
         two.scopes = vec!["language:rust".parse().unwrap()];
         record(&mut store, &two);
 
@@ -1957,23 +2114,137 @@ mod tests {
     #[test]
     fn selection_takes_active_learnings_only() {
         let mut store = Store::open_in_memory().unwrap();
-        store
-            .record(&NewLearning::new("proposed", "r", "why"))
-            .unwrap();
+        store.record(&scoped("proposed", "r", "why")).unwrap();
         let archived = active(&mut store, "archived", &["global"]);
         store.set_status(&archived, Status::Archived).unwrap();
         assert!(selected_titles(&store, &scope_for(DIFF)).is_empty());
     }
 
-    /// The glob rows all pass the SQL, so the Rust pass has to drop the
-    /// ones that missed. Without it a `web/**` rule fires on an `api/`
-    /// diff and nothing says so.
+    /// `candidates()` must not issue more SQL as the collection grows.
+    /// Before the fix it ran one filter query and then `scopes_of` plus
+    /// `outcomes_of` per surviving row. This test counts every statement
+    /// SQLite compiles during the call and bounds it independently of N.
+    #[test]
+    fn candidates_does_not_scale_query_count_with_collection_size() {
+        let mut small_store = Store::open_in_memory().unwrap();
+        for index in 0..50 {
+            active(&mut small_store, &format!("rule {index}"), &["global"]);
+        }
+        let scope = scope_for(DIFF);
+        let (_, small_count) =
+            with_query_count(&mut small_store, |store| store.candidates(&scope).unwrap());
+
+        let mut large_store = Store::open_in_memory().unwrap();
+        for index in 0..100 {
+            active(&mut large_store, &format!("rule {index}"), &["global"]);
+        }
+        let (_, large_count) =
+            with_query_count(&mut large_store, |store| store.candidates(&scope).unwrap());
+
+        assert_eq!(
+            small_count, large_count,
+            "doubling the collection must not change the number of SQL statements (small={small_count}, large={large_count})"
+        );
+        assert!(
+            large_count <= 10,
+            "candidates should use a constant number of statements, got {large_count}"
+        );
+    }
+
+    /// The glob rows used to pass the SQL filter unchecked; now the SQL
+    /// filter evaluates them too. `scope_hits` remains the second pass.
     #[test]
     fn a_glob_scope_is_matched_against_the_changed_paths() {
         let mut store = Store::open_in_memory().unwrap();
         active(&mut store, "api", &["glob:api/**"]);
         active(&mut store, "web", &["glob:web/**"]);
         assert_eq!(selected_titles(&store, &scope_for(DIFF)), ["api"]);
+    }
+
+    /// A `glob:` scope must narrow the SQL read, not only the Rust pass.
+    /// Without this, 5,000 `web/**` rules would be fetched and then dropped
+    /// by `scope_hits` on every `api/` diff.
+    #[test]
+    fn glob_scope_narrows_the_sql_filter() {
+        let mut store = Store::open_in_memory().unwrap();
+        let web_learnings: Vec<NewLearning> = (0..5000)
+            .map(|index| {
+                let mut learning = scoped(&format!("web rule {index}"), "r", "why");
+                learning.scopes = vec!["glob:web/**".parse().unwrap()];
+                learning.status = Some(Status::Active);
+                learning
+            })
+            .collect();
+        store.record_many(&web_learnings).unwrap();
+
+        let mut api = scoped("api rule", "r", "why");
+        api.scopes = vec!["glob:api/**".parse().unwrap()];
+        api.status = Some(Status::Active);
+        store.record(&api).unwrap();
+
+        let scope = scope_for(DIFF);
+        let mut titles: Vec<String> = store
+            .candidates(&scope)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.learning.title)
+            .collect();
+        titles.sort();
+        assert_eq!(titles, vec!["api rule".to_string()]);
+
+        let _guard = set_candidate_paths(&scope.diff.paths);
+        let (ids, _) = store.filtered_active_learnings(&scope).unwrap();
+        assert_eq!(
+            ids.len(),
+            1,
+            "the SQL filter must not fetch the 5,000 web-only rules, got {}",
+            ids.len()
+        );
+    }
+
+    /// A pattern with no slash matches the basename, evaluated in SQL.
+    #[test]
+    fn basename_glob_matches_file_name_in_sql() {
+        let mut store = Store::open_in_memory().unwrap();
+        active(&mut store, "elixir files", &["glob:*.ex"]);
+        active(&mut store, "rust files", &["glob:*.rs"]);
+
+        let mut titles: Vec<String> = store
+            .candidates(&scope_for(DIFF))
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.learning.title)
+            .collect();
+        titles.sort();
+        assert_eq!(titles, vec!["elixir files".to_string()]);
+    }
+
+    /// `**` spans directories and matches at the root.
+    #[test]
+    fn double_star_glob_matches_any_depth_in_sql() {
+        let mut store = Store::open_in_memory().unwrap();
+        active(&mut store, "any ex", &["glob:**/*.ex"]);
+        active(&mut store, "deep api", &["glob:api/lib/**"]);
+
+        let mut titles: Vec<String> = store
+            .candidates(&scope_for(DIFF))
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.learning.title)
+            .collect();
+        titles.sort();
+        assert_eq!(titles, vec!["any ex".to_string(), "deep api".to_string()]);
+    }
+
+    /// Two globs of the same kind are alternatives in SQL as well as Rust.
+    #[test]
+    fn glob_or_within_kind_still_matches_in_sql() {
+        let mut store = Store::open_in_memory().unwrap();
+        active(&mut store, "either tree", &["glob:api/**", "glob:web/**"]);
+        assert_eq!(
+            selected_titles(&store, &scope_for(DIFF)),
+            vec!["either tree".to_string()]
+        );
     }
 
     /// Section 7.1 step 2. Every kind the learning carries must match, so
@@ -2171,7 +2442,7 @@ mod tests {
     #[test]
     fn an_advisory_finding_is_not_a_blocking_one() {
         let mut store = Store::open_in_memory().unwrap();
-        let mut learning = NewLearning::new("advisory", "r", "why");
+        let mut learning = scoped("advisory", "r", "why");
         learning.blocking = false;
         learning.status = Some(Status::Active);
         let id = store.record(&learning).unwrap().id;

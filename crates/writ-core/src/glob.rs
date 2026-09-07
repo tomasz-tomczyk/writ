@@ -1,14 +1,15 @@
-//! The `glob:` scope, matched in Rust after the query. Spec section 7.1
-//! step 2.
+//! The `glob:` scope. Spec section 7.1 step 2.
 //!
 //! Section 7.1 gives `glob:` the job `project:` cannot do: separating
 //! `api/` from `web/` inside one monorepo. That needs `**`, so a plain
 //! substring test is not enough.
 //!
-//! The dialect is the common one. `?` is one character except `/`, `*` is
-//! any run of characters except `/`, and `**` as a whole segment is any
-//! run of segments including none. A pattern with no `/` matches the
-//! basename, which is what makes `glob:*.rs` mean what a reader expects.
+//! The dialect is used both in SQL, through the `writ_glob_any` scalar
+//! function, and in the Rust `scope_hits` second pass. `?` is one
+//! character except `/`, `*` is any run of characters except `/`, and
+//! `**` as a whole segment is any run of segments including none. A
+//! pattern with no `/` matches the basename, which is what makes
+//! `glob:*.rs` mean what a reader expects.
 
 /// Whether `path` matches `pattern`.
 pub fn glob_match(pattern: &str, path: &str) -> bool {
