@@ -9,10 +9,11 @@
 //! audit still succeeds. An optional capability degrades the result. It
 //! never fails it.
 
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 
-use writ_core::{Diff, Learning, MatcherKind, ScopeKind};
+use writ_core::{Diff, Learning, MatcherKind, ScopeKind, language_of};
 
 /// What one matcher said about one diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +22,10 @@ pub enum Verdict {
     Hit,
     /// The shape is not in the diff. Drop the learning.
     Miss,
+    /// The post-image missed and a pre-image was unavailable. Drop the
+    /// learning as before, but report that evaluation fell back to the
+    /// post-image. P6.
+    MissWithNotice(String),
     /// The matcher could not be run or could not be read. Keep the
     /// learning on scope alone, and say why. P6.
     Unevaluable(String),
@@ -29,7 +34,7 @@ pub enum Verdict {
 impl Verdict {
     /// Whether the learning stays in the running.
     pub fn keeps(&self) -> bool {
-        !matches!(self, Self::Miss)
+        !matches!(self, Self::Miss | Self::MissWithNotice(_))
     }
 }
 
@@ -47,15 +52,12 @@ pub fn evaluate(learning: &Learning, diff: &Diff, root: &Path) -> Verdict {
     }
 }
 
-/// A regex runs over the **added** lines, not the whole diff.
-///
-/// The whole diff carries the removed lines and the file headers, so a
-/// pattern would hit the very code the change deleted and select a rule
-/// about a shape that is no longer there.
+/// A regex runs over added and removed content, not the whole diff, so
+/// file headers cannot themselves produce a hit.
 fn regex_verdict(pattern: &str, diff: &Diff) -> Verdict {
     match regex::Regex::new(pattern) {
         Ok(regex) => {
-            if regex.is_match(&diff.added) {
+            if regex.is_match(&diff.added) || regex.is_match(&diff.removed) {
                 Verdict::Hit
             } else {
                 Verdict::Miss
@@ -74,12 +76,74 @@ fn ast_grep_verdict(pattern: &str, learning: &Learning, diff: &Diff, root: &Path
         .filter(|path| root.join(path).is_file())
         .cloned()
         .collect();
-    if files.is_empty() {
-        return Verdict::Unevaluable(
-            "no changed file is present in the working tree to parse".to_string(),
-        );
+    if !files.is_empty() {
+        match run_ast_grep_files(pattern, learning, &files, root) {
+            Verdict::Hit => return Verdict::Hit,
+            Verdict::Unevaluable(why) => return Verdict::Unevaluable(why),
+            Verdict::Miss | Verdict::MissWithNotice(_) => {}
+        }
     }
 
+    let mut fallback_notices = Vec::new();
+    for path in &diff.paths {
+        let object = format!("HEAD:{path}");
+        let pre_image = match Command::new("git")
+            .args(["show", &object])
+            .current_dir(root)
+            .output()
+        {
+            Ok(output) if output.status.success() => output.stdout,
+            Ok(output) => {
+                let why = format!(
+                    "cannot read pre-image {object}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+                if root.join(path).is_file() {
+                    fallback_notices.push(why);
+                    continue;
+                }
+                return Verdict::Unevaluable(why);
+            }
+            Err(error) => {
+                return Verdict::Unevaluable(format!(
+                    "cannot read pre-image {object}: cannot run git: {error}"
+                ));
+            }
+        };
+        let language = learning
+            .scopes
+            .iter()
+            .find(|scope| scope.kind == ScopeKind::Language)
+            .map(|scope| scope.value.as_str())
+            .or_else(|| language_of(path));
+        let Some(language) = language else {
+            let why = format!("cannot parse pre-image {object}: its language cannot be inferred");
+            if root.join(path).is_file() {
+                fallback_notices.push(why);
+                continue;
+            }
+            return Verdict::Unevaluable(why);
+        };
+        match run_ast_grep_stdin(pattern, language, &pre_image, root) {
+            Verdict::Hit => return Verdict::Hit,
+            Verdict::Unevaluable(why) => return Verdict::Unevaluable(why),
+            Verdict::Miss | Verdict::MissWithNotice(_) => {}
+        }
+    }
+
+    if fallback_notices.is_empty() {
+        Verdict::Miss
+    } else {
+        Verdict::MissWithNotice(fallback_notices.join("; "))
+    }
+}
+
+fn run_ast_grep_files(
+    pattern: &str,
+    learning: &Learning,
+    files: &[String],
+    root: &Path,
+) -> Verdict {
     let mut command = Command::new("ast-grep");
     command.args(["run", "--pattern", pattern, "--json"]);
     // ast-grep infers the language from each file extension. A
@@ -92,7 +156,7 @@ fn ast_grep_verdict(pattern: &str, learning: &Learning, diff: &Diff, root: &Path
     {
         command.args(["--lang", &language.value]);
     }
-    let output = command.args(&files).current_dir(root).output();
+    let output = command.args(files).current_dir(root).output();
 
     let output = match output {
         Ok(output) => output,
@@ -102,6 +166,49 @@ fn ast_grep_verdict(pattern: &str, learning: &Learning, diff: &Diff, root: &Path
             return Verdict::Unevaluable(format!("cannot run ast-grep: {error}"));
         }
     };
+    read_ast_grep_output(output)
+}
+
+fn run_ast_grep_stdin(pattern: &str, language: &str, input: &[u8], root: &Path) -> Verdict {
+    let mut child = match Command::new("ast-grep")
+        .args([
+            "run",
+            "--pattern",
+            pattern,
+            "--lang",
+            language,
+            "--json",
+            "--stdin",
+        ])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return Verdict::Unevaluable(format!("cannot run ast-grep: {error}")),
+    };
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.wait_with_output();
+        return Verdict::Unevaluable("cannot open ast-grep stdin for the pre-image".to_string());
+    };
+    let write_result = stdin.write_all(input);
+    drop(stdin);
+    if let Err(error) = write_result
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        let _ = child.wait_with_output();
+        return Verdict::Unevaluable(format!("cannot send pre-image to ast-grep: {error}"));
+    }
+    match child.wait_with_output() {
+        Ok(output) => read_ast_grep_output(output),
+        Err(error) => Verdict::Unevaluable(format!("cannot read ast-grep output: {error}")),
+    }
+}
+
+fn read_ast_grep_output(output: Output) -> Verdict {
     // A pattern that does not parse is not an error to ast-grep. It prints
     // an empty result and warns, which would otherwise read as a clean
     // miss and silently drop the rule.

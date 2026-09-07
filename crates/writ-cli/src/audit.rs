@@ -246,13 +246,19 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
                 .counters
                 .push(CounterMetric::MatcherResult(match &verdict {
                     Verdict::Hit => MatcherResultMetric::Hit,
-                    Verdict::Miss => MatcherResultMetric::Miss,
+                    Verdict::Miss | Verdict::MissWithNotice(_) => MatcherResultMetric::Miss,
                     Verdict::Unevaluable(_) => MatcherResultMetric::Unevaluable,
                 }));
         }
         if let Verdict::Unevaluable(why) = &verdict {
             notices.push(format!(
                 "writ: keeping {} on scope alone: {why}",
+                candidate.learning.id
+            ));
+        }
+        if let Verdict::MissWithNotice(why) = &verdict {
+            notices.push(format!(
+                "writ: matcher {} fell back to the post-image only: {why}",
                 candidate.learning.id
             ));
         }

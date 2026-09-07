@@ -68,10 +68,9 @@ pub struct Diff {
     /// Every path the diff touches, in the order git names them.
     pub paths: Vec<String>,
     /// The added lines only, with their `+` removed.
-    ///
-    /// A `regex` matcher runs against this rather than the whole diff, so
-    /// a pattern cannot hit the very line the change removed.
     pub added: String,
+    /// The removed lines only, with their `-` removed.
+    pub removed: String,
 }
 
 impl Diff {
@@ -79,6 +78,7 @@ impl Diff {
     pub fn parse(text: &str) -> Self {
         let mut paths: Vec<String> = Vec::new();
         let mut added = String::new();
+        let mut removed = String::new();
 
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix("+++ ") {
@@ -98,6 +98,9 @@ impl Diff {
             } else if let Some(rest) = line.strip_prefix('+') {
                 added.push_str(rest);
                 added.push('\n');
+            } else if let Some(rest) = line.strip_prefix('-') {
+                removed.push_str(rest);
+                removed.push('\n');
             }
         }
 
@@ -105,6 +108,7 @@ impl Diff {
             text: text.to_string(),
             paths,
             added,
+            removed,
         }
     }
 
@@ -207,6 +211,14 @@ mod tests {
     fn the_added_text_holds_the_added_lines_only() {
         let diff = Diff::parse(SAMPLE);
         assert_eq!(diff.added, "let y = 2;\ndefmodule App do\n");
+    }
+
+    /// The `---` header is not a removed line, or every diff would carry
+    /// its own old file names into the regex matcher.
+    #[test]
+    fn the_removed_text_holds_the_removed_lines_only() {
+        let diff = Diff::parse(SAMPLE);
+        assert_eq!(diff.removed, "let x = 1;\n");
     }
 
     #[test]
