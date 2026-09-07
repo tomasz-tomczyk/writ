@@ -81,7 +81,6 @@ A matcher lets an audit find the code a rule is about. Add one whenever
 the rule describes code shape; omit it only for process or style rules
 that have no structural anchor.
 
-- Default on for structural rules. Process or style rules may omit it.
 - Prefer `ast_grep` when the scope includes `language:`.
 - Use `regex` only when `ast_grep` cannot express it.
 - Matchers see additions and removals (`regex` on both line sets;
