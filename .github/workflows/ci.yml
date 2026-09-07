@@ -9,6 +9,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -17,6 +20,7 @@ jobs:
   check:
     name: fmt, clippy, test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -33,17 +37,18 @@ jobs:
         run: mise exec -- cargo fmt --all --check
 
       - name: Clippy
-        run: mise exec -- cargo clippy --workspace --all-targets -- -D warnings
+        run: mise exec -- cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: No HTTP client is linked into writ
         run: mise run no-network
 
       - name: Test
-        run: mise exec -- cargo test --workspace
+        run: mise exec -- cargo test --workspace --locked
 
   docs:
     name: the documented flags are real flags
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v3
@@ -52,7 +57,7 @@ jobs:
           cache: true
       - uses: Swatinem/rust-cache@v2
       - name: Build the binary the documentation is checked against
-        run: mise exec -- cargo build --bin writ
+        run: mise exec -- cargo build --bin writ --locked
       # Spec section 11, from crit #873. A flag in the README or a
       # SKILL.md that the binary rejects is a bug. Invariant 8.
       - name: README and every SKILL.md against writ --help
@@ -61,6 +66,7 @@ jobs:
   install:
     name: cargo install resolves the writ binary
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v3
@@ -71,3 +77,39 @@ jobs:
         run: mise exec -- cargo install --path crates/writ-cli --locked
       - name: The binary is named writ, not writ-cli
         run: writ --version
+
+  lint:
+    name: deny, machete, typos, shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - name: Supply-chain, unused deps, typos, shell scripts
+        run: mise run lint
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate LCOV
+        run: mise run coverage
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: target/llvm-cov/lcov.info
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}

@@ -27,8 +27,9 @@ Spec section 2, reduced to the parts that decide a question.
    one write command, and the schema never names a source.
 2. **P2 — Nothing reaches the audit unapproved.** A write defaults to
    `proposed`. Activation is explicit.
-3. **P3 — Audit cost is bounded by the diff, not by the collection.** A
-   thousand learnings must produce the same prompt as fifty.
+3. **P3 — Prompt size is bounded by the cap. Selection cost is not.** A
+   thousand learnings must produce the same prompt as fifty. They will
+   not produce it as fast: selection is linear in the collection.
 4. **P4 — Nothing is destroyed.** Pruning archives. A pruned rule is
    still evidence.
 5. **P5 — The terminal is for findings. The UI is for the collection.**
@@ -122,7 +123,23 @@ The toolchain is managed by mise. Always go through it.
 mise exec -- cargo test --workspace
 mise run check      # fmt, clippy -D warnings, test
 mise run docs       # every documented flag against `writ --help`
+mise run lint       # cargo-deny, machete, typos, shellcheck
+mise run coverage   # llvm-cov LCOV for Codecov
 mise run build
+```
+
+## Worktrees
+
+Feature work and parallel agent sessions use [Worktrunk](https://worktrunk.dev)
+(`wt`), not ad-hoc `git worktree add`. A worktree is still the same project as
+the main checkout (invariant 4).
+
+```
+wt switch --create <name>   # create branch + worktree and switch into it
+wt switch <name>            # switch to an existing worktree
+wt list                     # status of all worktrees
+wt merge                    # merge this branch into the default target
+wt remove                   # remove the worktree; delete the branch if merged
 ```
 
 ## Layout
@@ -146,8 +163,15 @@ These are decisions, not preferences. Breaking one is a spec violation.
    text. Only `findings` carry a location, and only for one audit.
 4. **Repo identity comes from the normalized remote, never the path.** A
    worktree is the same project as its main checkout.
-5. **Audit cost is bounded by the diff, not the collection.** Selection
-   caps at `max_rules` and `max_chars`.
+5. **Bound the prompt, and do not claim to bound the cost.** Selection
+   caps at `max_rules` and `max_chars`, so a 20-fold larger collection
+   sends the same 40 rules. The initial select still *reads* every active
+   row whose scopes could match, and a `glob:` scope is still filtered in
+   Rust rather than SQL, so narrowing a rule does not narrow the read.
+   Scopes and outcomes are now loaded in two batched queries instead of
+   ~2 queries per row, but the collection scan and glob over-read remain
+   linear until a later change. If you improve that, say so. Do not write
+   a test that implies it is already true.
 6. **Fail honestly.** Every error names its real cause and exits with
    its own code. Never hang on stdin. See spec P7.
 7. **Never set `updated_at` by hand in a write.** A database trigger

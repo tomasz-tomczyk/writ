@@ -1,36 +1,41 @@
 [tools]
 # components are explicit so CI installs the same toolchain as a laptop.
 # Without them, `mise exec -- cargo fmt` fails on a clean machine.
-rust = { version = "1.98.1", components = "rustfmt,clippy" }
+rust = { version = "1.98.1", components = "rustfmt,clippy,llvm-tools-preview" }
 # ast-grep is declared because the matcher tests shell out to it. Without
 # it the suite passes on a laptop that happens to have it and fails on a
 # clean machine, which is how CI caught this.
 ast-grep = "0.45.3"
+"cargo:cargo-llvm-cov" = "0.9.1"
+"cargo:cargo-deny" = "0.20.2"
+"cargo:cargo-machete" = "0.9.2"
+"cargo:typos-cli" = "1.50.1"
+shellcheck = "0.11.0"
 
 [tasks.test]
 description = "Run the full test suite"
-run = "cargo test --workspace"
+run = "cargo test --workspace --locked"
 
 [tasks.check]
 description = "Format, lint, and test"
 run = [
   "cargo fmt --all --check",
-  "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
   "mise run no-network",
-  "cargo test --workspace",
+  "cargo test --workspace --locked",
 ]
 
 [tasks.docs]
 description = "Check every flag in the README and the skills against writ --help"
 run = [
-  "cargo build --bin writ",
+  "cargo build --bin writ --locked",
   "./scripts/check-doc-flags.sh",
 ]
 
 [tasks.no-network]
 description = "Assert the writ binary has no HTTP client dependency"
 run = '''
-if cargo tree -p writ-cli --edges normal | grep -E '(^| )((reqwest|ureq|isahc|curl|surf) v)'; then
+if cargo tree -p writ-cli --edges normal --locked | grep -E '(^| )((reqwest|ureq|isahc|curl|surf) v)'; then
   echo "an HTTP client is linked into writ; telemetry must remain local-only" >&2
   exit 1
 fi
@@ -42,4 +47,17 @@ fi
 
 [tasks.build]
 description = "Build the writ binary"
-run = "cargo build --release"
+run = "cargo build --release --locked"
+
+[tasks.coverage]
+description = "Instrumented test run; write LCOV for Codecov"
+run = "cargo llvm-cov --workspace --locked --lcov --output-path target/llvm-cov/lcov.info"
+
+[tasks.lint]
+description = "Supply-chain, unused deps, typos, and shell scripts"
+run = [
+  "cargo deny check",
+  "cargo machete",
+  "typos",
+  "shellcheck scripts/*.sh",
+]
