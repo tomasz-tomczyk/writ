@@ -7,21 +7,14 @@ use crate::ui::pages::layout::{escape, with_store};
 const SWAP: &str = r##" hx-target="#inbox-list" hx-swap="outerHTML""##;
 
 /// Render the Inbox page body.
+///
+/// Merge-into is deferred: the UI offers Approve, Reject, and Edit only.
 pub fn render(state: &AppState) -> Result<String, Error> {
     with_store(state, |store| {
         let proposed = store.list(&ListFilter {
             status: Some(Status::Proposed),
             ..Default::default()
         })?;
-
-        // Merge needs a target the author names. Nothing guesses one:
-        // spec section 7.3 removed the near-match check, and this is the
-        // same principle as `--reinforce ID`.
-        let mut targets = store.list(&ListFilter {
-            status: Some(Status::Active),
-            ..Default::default()
-        })?;
-        targets.sort_by(|left, right| left.title.cmp(&right.title));
 
         let mut html = String::from(r#"<div class="inbox" id="inbox-list">"#);
 
@@ -71,26 +64,6 @@ pub fn render(state: &AppState) -> Result<String, Error> {
                     ));
                 }
                 html.push_str("</div>");
-            }
-
-            if !targets.is_empty() {
-                let action = format!("/inbox/{}/merge", escape(&learning.id));
-                html.push_str(&format!(
-                    "<form method=\"post\" action=\"{action}\" hx-post=\"{action}\"{SWAP} class=\"merge\">"
-                ));
-                html.push_str(
-                    "<label>Merge into <select name=\"target_id\" required><option value=\"\">Choose a learning…</option>",
-                );
-                for target in &targets {
-                    html.push_str(&format!(
-                        "<option value=\"{}\">{}</option>",
-                        escape(&target.id),
-                        escape(&target.title)
-                    ));
-                }
-                html.push_str("</select></label>");
-                html.push_str("<button type=\"submit\">Merge</button>");
-                html.push_str("</form>");
             }
 
             html.push_str("<div class=\"actions\">");
