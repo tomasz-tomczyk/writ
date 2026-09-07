@@ -6,7 +6,9 @@ use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use tower::ServiceExt;
 use writ_cli::ui::{AppState, router};
-use writ_core::{Config, ExemplarKind, NewExemplar, NewLearning, Selected, Status, Store};
+use writ_core::{
+    Config, ExemplarKind, NewExemplar, NewLearning, Selected, Status, Store, TelemetryStore,
+};
 
 fn start_app(db: &Path, config: Config) -> Router {
     let store = Store::open(db).unwrap();
@@ -326,6 +328,13 @@ async fn main_htmx_detail_collection_contracts_are_preserved() {
     };
     let app = start_app(&db, config());
 
+    let detail = get(&app, &format!("/learnings/{learning_id}")).await;
+    assert!(
+        detail.body.contains(
+            r#"id="action-feedback" role="status" aria-live="polite" aria-atomic="true""#
+        )
+    );
+
     let collection = htmx(
         &app,
         Method::GET,
@@ -352,6 +361,13 @@ async fn main_htmx_detail_collection_contracts_are_preserved() {
     assert!(is_fragment(&saved.body), "{}", saved.body);
     assert!(saved.body.contains(r#"id="detail-body""#));
     assert!(saved.body.contains("swapped rule"));
+    assert!(
+        saved.body.contains(&format!(
+            r##"action="/findings/{finding_id}/reject" hx-post="/findings/{finding_id}/reject" hx-target="#finding-{finding_id}" hx-swap="outerHTML""##
+        )),
+        "{}",
+        saved.body
+    );
 
     let rejected = htmx(
         &app,
@@ -362,8 +378,18 @@ async fn main_htmx_detail_collection_contracts_are_preserved() {
     .await;
     assert_eq!(rejected.status, 200);
     assert!(is_fragment(&rejected.body), "{}", rejected.body);
-    assert!(rejected.body.contains(r#"id="detail-body""#));
+    assert!(!rejected.body.contains(r#"id="detail-body""#));
+    assert!(!rejected.body.contains(r#"name="title""#));
+    assert!(
+        rejected
+            .body
+            .contains(&format!(r#"id="finding-{finding_id}""#)),
+        "{}",
+        rejected.body
+    );
     assert!(rejected.body.contains("rejected"));
+    assert!(rejected.body.contains(r#"hx-swap-oob="innerHTML""#));
+    assert!(rejected.body.contains("Marked as not a violation"));
 }
 
 #[tokio::test]
@@ -918,6 +944,51 @@ async fn reject_finding_from_detail_sets_rejected() {
 }
 
 #[tokio::test]
+async fn rejected_finding_cannot_be_rejected_again_or_double_count_telemetry() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let telemetry_db = dir.path().join("telemetry.db");
+    let finding_id = {
+        let mut store = Store::open(&db).unwrap();
+        let learning_id = active_with_exemplar(&mut store, "reject once");
+        finding_with_path(&mut store, &learning_id, Some("a.rs"), Some(3))
+    };
+    TelemetryStore::open(&telemetry_db)
+        .unwrap()
+        .enable()
+        .unwrap();
+    let mut config = config();
+    config.telemetry.enabled = true;
+    let app = start_app(&db, config);
+
+    let first = post(&app, &format!("/findings/{finding_id}/reject")).await;
+    let second = post(&app, &format!("/findings/{finding_id}/reject")).await;
+    assert_eq!(first.status, 303);
+    assert_eq!(second.status, 303);
+
+    let detail = get(&app, first.headers["location"].to_str().unwrap()).await;
+    assert!(
+        !detail
+            .body
+            .contains(&format!(r#"action="/findings/{finding_id}/reject""#)),
+        "{}",
+        detail.body
+    );
+
+    let rows = TelemetryStore::open(&telemetry_db)
+        .unwrap()
+        .counters()
+        .unwrap();
+    assert!(rows.iter().any(|row| {
+        row.metric == "finding_outcome" && row.label == "rejected" && row.count == 1
+    }));
+    assert!(
+        rows.iter()
+            .any(|row| row.metric == "surface" && row.label == "ui" && row.count == 1)
+    );
+}
+
+#[tokio::test]
 async fn open_editor_runs_configured_command() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
@@ -954,6 +1025,83 @@ async fn open_editor_runs_configured_command() {
         marker.exists(),
         "editor command should create marker file at {}",
         marker.display()
+    );
+}
+
+#[tokio::test]
+async fn htmx_open_editor_does_not_replace_unsaved_detail_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let config = {
+        let mut config = config();
+        config.ui.editor_cmd = "true".into();
+        config
+    };
+    let (learning_id, finding_id) = {
+        let mut store = Store::open(&db).unwrap();
+        let learning_id = active_with_exemplar(&mut store, "preserve draft");
+        let finding_id = finding_with_path(&mut store, &learning_id, Some("a.rs"), Some(12));
+        (learning_id, finding_id)
+    };
+    let app = start_app(&db, config);
+
+    let detail = get(&app, &format!("/learnings/{learning_id}")).await;
+    assert!(
+        detail.body.contains(&format!(
+            r#"action="/findings/{finding_id}/open" hx-post="/findings/{finding_id}/open" hx-swap="none""#
+        )),
+        "{}",
+        detail.body
+    );
+
+    let opened = htmx(
+        &app,
+        Method::POST,
+        &format!("/findings/{finding_id}/open"),
+        None,
+    )
+    .await;
+    assert_eq!(opened.status, 200, "{}", opened.body);
+    assert!(!opened.body.contains(r#"id="detail-body""#));
+    assert!(!opened.body.contains(r#"name="title""#));
+    assert!(opened.body.contains(r#"hx-swap-oob="innerHTML""#));
+    assert!(opened.body.contains("Sent a.rs:12 to the editor"));
+}
+
+#[tokio::test]
+async fn open_editor_requires_both_path_and_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let (learning_id, finding_id) = {
+        let mut store = Store::open(&db).unwrap();
+        let learning_id = active_with_exemplar(&mut store, "incomplete location");
+        let finding_id = finding_with_path(&mut store, &learning_id, Some("a.rs"), None);
+        (learning_id, finding_id)
+    };
+    let app = start_app(&db, config());
+
+    let detail = get(&app, &format!("/learnings/{learning_id}")).await;
+    assert!(
+        !detail
+            .body
+            .contains(&format!(r#"action="/findings/{finding_id}/open""#)),
+        "{}",
+        detail.body
+    );
+
+    let response = post(&app, &format!("/findings/{finding_id}/open")).await;
+    assert_eq!(response.status, 400);
+    assert!(
+        response.body.contains(r#"role="alert""#),
+        "{}",
+        response.body
+    );
+    assert!(
+        response
+            .body
+            .contains("Cannot open this finding: both path and line are required"),
+        "{}",
+        response.body
     );
 }
 

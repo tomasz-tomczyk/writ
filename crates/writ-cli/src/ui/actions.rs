@@ -2,7 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use writ_core::{
-    CounterMetric, Error, FindingOutcomeMetric, HealthActionMetric, Status, SurfaceMetric,
+    CounterMetric, Error, FindingOutcomeMetric, HealthActionMetric, Outcome, Status, SurfaceMetric,
     TelemetryBatch,
 };
 
@@ -30,13 +30,19 @@ fn inbox_reply(state: &AppState, headers: &HeaderMap) -> Response {
     layout::fragment(&format!("{body}{badge}"))
 }
 
-/// Answer a Detail action, the same way.
-fn detail_reply(state: &AppState, headers: &HeaderMap, learning_id: &str) -> Response {
+/// Answer a finding rejection without replacing the surrounding Detail form.
+fn finding_reply(
+    state: &AppState,
+    headers: &HeaderMap,
+    finding_id: &str,
+    learning_id: &str,
+    message: &str,
+) -> Response {
     if !layout::is_htmx(headers) {
         return redirect(&format!("/learnings/{learning_id}"));
     }
-    match detail::render(state, learning_id) {
-        Ok(body) => layout::fragment(body.as_str()),
+    match detail::render_finding(state, finding_id) {
+        Ok(body) => layout::fragment(&format!("{body}{}", layout::action_feedback_oob(message))),
         Err(error) => error_response(error),
     }
 }
@@ -82,16 +88,24 @@ pub async fn reject_finding(
     let result = with_store(&state, |store| {
         let finding = store.finding(&id)?;
         let learning_id = finding.learning_id;
-        store.reject_finding(&id)?;
-        Ok(learning_id)
+        let changed = finding.outcome != Outcome::Rejected;
+        if changed {
+            store.reject_finding(&id)?;
+        }
+        Ok((learning_id, changed))
     });
     match result {
-        Ok(learning_id) => {
-            observe_ui(
-                &state,
-                CounterMetric::FindingOutcome(FindingOutcomeMetric::Rejected),
-            );
-            detail_reply(&state, &headers, &learning_id)
+        Ok((learning_id, changed)) => {
+            let message = if changed {
+                observe_ui(
+                    &state,
+                    CounterMetric::FindingOutcome(FindingOutcomeMetric::Rejected),
+                );
+                "Marked as not a violation."
+            } else {
+                "Already marked as not a violation."
+            };
+            finding_reply(&state, &headers, &id, &learning_id, message)
         }
         Err(error) => error_response(error),
     }
@@ -164,7 +178,9 @@ pub async fn open_editor(
         let finding = store.finding(&id)?;
         let learning_id = finding.learning_id;
         let (Some(path), Some(line)) = (finding.path, finding.line) else {
-            return Ok(learning_id);
+            return Err(Error::Validation {
+                message: "Cannot open this finding: both path and line are required".into(),
+            });
         };
         let command = state
             .config
@@ -173,10 +189,18 @@ pub async fn open_editor(
             .replace("{path}", &path)
             .replace("{line}", &line.to_string());
         spawn_editor(&command)?;
-        Ok(learning_id)
+        Ok((learning_id, path, line))
     });
     match result {
-        Ok(learning_id) => detail_reply(&state, &headers, &learning_id),
+        Ok((learning_id, _, _)) if !layout::is_htmx(&headers) => {
+            redirect(&format!("/learnings/{learning_id}"))
+        }
+        Ok((_, path, line)) => layout::fragment(&layout::action_feedback_oob(&format!(
+            "Sent {path}:{line} to the editor."
+        ))),
+        Err(Error::Validation { message }) => {
+            layout::action_error(StatusCode::BAD_REQUEST, &message)
+        }
         Err(error) => error_response(error),
     }
 }

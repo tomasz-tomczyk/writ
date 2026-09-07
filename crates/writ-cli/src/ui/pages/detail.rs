@@ -2,7 +2,9 @@ use axum::Form;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use writ_core::{Error, ExemplarKind, LearningUpdate, NewExemplar, Scope, Status};
+use writ_core::{
+    Error, ExemplarKind, Finding, LearningUpdate, NewExemplar, Outcome, Scope, Status,
+};
 
 use crate::ui::AppState;
 use crate::ui::pages::health;
@@ -152,36 +154,7 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
             html.push_str(r#"<table class="findings">"#);
             html.push_str("<thead><tr><th>Path</th><th>Line</th><th>Detail</th><th>Outcome</th><th></th></tr></thead><tbody>");
             for finding in findings {
-                html.push_str("<tr>");
-                html.push_str(&format!(
-                    "<td>{}</td>",
-                    escape(finding.path.as_deref().unwrap_or("—"))
-                ));
-                html.push_str(&format!(
-                    "<td>{}</td>",
-                    finding.line.map_or_else(|| "—".into(), |l| l.to_string())
-                ));
-                html.push_str(&format!(
-                    "<td>{}</td>",
-                    escape(finding.detail.as_deref().unwrap_or(""))
-                ));
-                html.push_str(&format!(
-                    "<td><span class=\"outcome {}\">{}</span></td>",
-                    finding.outcome.as_str(),
-                    escape(finding.outcome.as_str())
-                ));
-                html.push_str("<td class=\"actions\">");
-                let reject = format!("/findings/{}/reject", escape(&finding.id));
-                html.push_str(&format!(
-                    "<form method=\"post\" action=\"{reject}\" hx-post=\"{reject}\"{SWAP}><button type=\"submit\">Reject</button></form>"
-                ));
-                if finding.path.is_some() {
-                    let open = format!("/findings/{}/open", escape(&finding.id));
-                    html.push_str(&format!(
-                        "<form method=\"post\" action=\"{open}\" hx-post=\"{open}\"{SWAP}><button type=\"submit\">Open</button></form>"
-                    ));
-                }
-                html.push_str("</td></tr>");
+                html.push_str(&render_finding_row(&finding));
             }
             html.push_str("</tbody></table></div>");
         }
@@ -189,6 +162,53 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
         html.push_str("</div>");
         Ok(html)
     })
+}
+
+/// Render the one finding row an htmx rejection replaces.
+pub(crate) fn render_finding(state: &AppState, id: &str) -> Result<String, Error> {
+    with_store(state, |store| {
+        let finding = store.finding(id)?;
+        Ok(render_finding_row(&finding))
+    })
+}
+
+fn render_finding_row(finding: &Finding) -> String {
+    let id = escape(&finding.id);
+    let mut html = format!(r#"<tr id="finding-{id}">"#);
+    html.push_str(&format!(
+        "<td>{}</td>",
+        escape(finding.path.as_deref().unwrap_or("—"))
+    ));
+    html.push_str(&format!(
+        "<td>{}</td>",
+        finding
+            .line
+            .map_or_else(|| "—".into(), |line| line.to_string())
+    ));
+    html.push_str(&format!(
+        "<td>{}</td>",
+        escape(finding.detail.as_deref().unwrap_or(""))
+    ));
+    html.push_str(&format!(
+        "<td><span class=\"outcome {}\">{}</span></td>",
+        finding.outcome.as_str(),
+        escape(finding.outcome.as_str())
+    ));
+    html.push_str("<td class=\"actions\">");
+    if finding.outcome != Outcome::Rejected {
+        let reject = format!("/findings/{id}/reject");
+        html.push_str(&format!(
+            r##"<form method="post" action="{reject}" hx-post="{reject}" hx-target="#finding-{id}" hx-swap="outerHTML" hx-confirm="Mark this finding as not a violation? This affects the learning's ranking."><button type="submit">Mark rejected</button></form>"##
+        ));
+    }
+    if finding.path.is_some() && finding.line.is_some() {
+        let open = format!("/findings/{id}/open");
+        html.push_str(&format!(
+            r#"<form method="post" action="{open}" hx-post="{open}" hx-swap="none"><button type="submit">Open</button></form>"#
+        ));
+    }
+    html.push_str("</td></tr>");
+    html
 }
 
 #[derive(Debug, serde::Deserialize)]
