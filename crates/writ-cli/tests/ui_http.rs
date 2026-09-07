@@ -459,6 +459,71 @@ async fn collection_search_filters_by_title() {
 }
 
 #[tokio::test]
+async fn collection_uses_project_scope_and_mode_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+
+        let mut blocking = NewLearning::new("project rule", "rule", "rationale");
+        blocking.status = Some(Status::Active);
+        blocking.scopes = vec![
+            "project:github.com/acme/writ".parse().unwrap(),
+            "language:rust".parse().unwrap(),
+            "glob:crates/**/*.rs".parse().unwrap(),
+        ];
+        blocking.matcher_kind = Some(writ_core::MatcherKind::Regex);
+        blocking.matcher = Some("collection-only-secret".into());
+        store.record(&blocking).unwrap();
+
+        let mut advisory = NewLearning::new("global rule", "rule", "rationale");
+        advisory.status = Some(Status::Active);
+        advisory.blocking = false;
+        advisory.scopes = vec!["global".parse().unwrap()];
+        store.record(&advisory).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection").await.body;
+
+    assert!(body.contains("<th>Project</th>"), "{body}");
+    assert!(body.contains("<th>Scope</th>"), "{body}");
+    assert!(body.contains("<th>Mode</th>"), "{body}");
+    assert!(!body.contains("<th>Matcher</th>"), "{body}");
+    assert!(!body.contains("collection-only-secret"), "{body}");
+    assert!(body.contains(">github.com/acme/writ</span>"), "{body}");
+    assert!(body.contains(">language:rust</span>"), "{body}");
+    assert!(body.contains(">glob:crates/**/*.rs</span>"), "{body}");
+    assert!(
+        body.contains(r#"class="mode-badge blocking">blocking</span>"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"class="mode-badge advisory">advisory</span>"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"class="muted empty-value">—</span>"#),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn empty_collection_has_no_record_or_new_learning_cta() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection").await.body;
+
+    assert!(body.contains("No learnings match"), "{body}");
+    assert!(!body.contains("Record"), "{body}");
+    assert!(!body.contains("record your"), "{body}");
+    assert!(!body.contains("New learning"), "{body}");
+    assert!(!body.contains("new learning"), "{body}");
+}
+
+#[tokio::test]
 async fn collection_hides_archived_by_default() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");

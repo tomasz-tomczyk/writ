@@ -24,8 +24,28 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
         let bad_snippet = bad.map(|e| e.snippet.as_str()).unwrap_or("");
 
         let mut html = String::from(r#"<div id="detail-body">"#);
+        html.push_str("<div class=\"detail-meta\">");
         html.push_str(&format!(
-            r#"<form method="post" action="/learnings/{id}" hx-post="/learnings/{id}"{SWAP} class="detail">"#,
+            "<span class=\"status-badge {}\">{}</span>",
+            learning.status.as_str(),
+            escape(learning.status.as_str())
+        ));
+        html.push_str(&format!(
+            "<span class=\"mode-badge {}\">{}</span>",
+            if learning.blocking {
+                "blocking"
+            } else {
+                "advisory"
+            },
+            if learning.blocking {
+                "blocking"
+            } else {
+                "advisory"
+            }
+        ));
+        html.push_str("</div>");
+        html.push_str(&format!(
+            r#"<form method="post" action="/learnings/{id}" hx-post="/learnings/{id}"{SWAP} class="detail shell">"#,
             id = escape(id)
         ));
         html.push_str("<div class=\"field\">");
@@ -53,9 +73,9 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
         html.push_str("</div>");
 
         let checked = if learning.blocking { " checked" } else { "" };
-        html.push_str("<div class=\"field inline\">");
+        html.push_str("<div class=\"field inline mode-field\">");
         html.push_str(&format!(
-            "<label><input type=\"checkbox\" name=\"blocking\" value=\"1\"{}> Blocking</label>",
+            "<label><input type=\"checkbox\" name=\"blocking\" value=\"1\"{}> <span><strong>Blocking</strong><small>Stops handoff when a reported violation is not fixed.</small></span></label>",
             checked
         ));
         html.push_str("</div>");
@@ -114,20 +134,21 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
         html.push_str("</div>");
 
         html.push_str("<div class=\"actions\">");
-        html.push_str("<button type=\"submit\" name=\"action\" value=\"save\">Save</button>");
+        html.push_str("<button type=\"submit\" name=\"action\" value=\"save\" class=\"primary\">Save</button>");
         html.push_str("<button type=\"submit\" name=\"action\" value=\"save_activate\">Save &amp; activate</button>");
         html.push_str("</div>");
         html.push_str("</form>");
 
         let archive = format!("/learnings/{}/archive", escape(id));
         html.push_str(&format!(
-            "<form method=\"post\" action=\"{archive}\" hx-post=\"{archive}\"{SWAP} class=\"danger-form\">"
+            "<form method=\"post\" action=\"{archive}\" hx-post=\"{archive}\"{SWAP} class=\"danger-form shell\"><div><strong>Archive learning</strong><span>Remove it from selection while preserving its history.</span></div>"
         ));
         html.push_str("<button type=\"submit\" class=\"danger\">Archive</button>");
         html.push_str("</form>");
 
         if !findings.is_empty() {
-            html.push_str("<h2>Findings</h2>");
+            html.push_str("<div class=\"section-heading\"><h2>Findings</h2><p>Violations reported for this learning.</p></div>");
+            html.push_str("<div class=\"table-shell\">");
             html.push_str(r#"<table class="findings">"#);
             html.push_str("<thead><tr><th>Path</th><th>Line</th><th>Detail</th><th>Outcome</th><th></th></tr></thead><tbody>");
             for finding in findings {
@@ -162,7 +183,7 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
                 }
                 html.push_str("</td></tr>");
             }
-            html.push_str("</tbody></table>");
+            html.push_str("</tbody></table></div>");
         }
 
         html.push_str("</div>");

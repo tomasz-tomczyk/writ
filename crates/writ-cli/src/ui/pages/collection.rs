@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use writ_core::{Error, ListFilter, Status};
+use writ_core::{Error, ListFilter, Scope, ScopeKind, Status};
 
 use crate::ui::AppState;
 use crate::ui::pages::layout::{escape, with_store};
@@ -71,15 +71,18 @@ pub fn render(
         html.push_str("</div>");
 
         if rows.is_empty() {
-            html.push_str(r#"<div class="shell empty">No learnings match.</div></div>"#);
+            html.push_str(
+                r#"<div class="shell empty"><strong>No learnings match</strong><span>Try a different search or status filter.</span></div></div>"#,
+            );
             return Ok(html);
         }
 
-        html.push_str(r#"<table class="collection">"#);
+        html.push_str(r#"<div class="table-shell"><table class="collection">"#);
         html.push_str("<thead><tr>");
         html.push_str(&sort_link("Title", "title", sort, sort_dir, q));
+        html.push_str("<th>Project</th>");
         html.push_str("<th>Scope</th>");
-        html.push_str("<th>Matcher</th>");
+        html.push_str("<th>Mode</th>");
         html.push_str(&sort_link("Hits", "hit", sort, sort_dir, q));
         html.push_str(&sort_link("Last used", "last_used", sort, sort_dir, q));
         html.push_str(&sort_link("Status", "status", sort, sort_dir, q));
@@ -94,24 +97,19 @@ pub fn render(
 
             html.push_str("<tr>");
             html.push_str(&format!(
-                "<td><a href=\"/learnings/{}\">{}</a></td>",
+                "<td class=\"title-cell\"><a class=\"title-link\" href=\"/learnings/{}\">{}</a></td>",
                 escape(&row.id),
                 escape(&row.title)
             ));
-            html.push_str("<td>");
-            for scope in &row.scopes {
-                html.push_str(&format!(
-                    "<span class=\"chip\">{}</span>",
-                    escape(&scope.to_string())
-                ));
-            }
-            html.push_str("</td>");
+            html.push_str(&scope_cell(&row.scopes, ScopeKind::Project));
+            html.push_str(&scope_cell_excluding(&row.scopes, ScopeKind::Project));
             html.push_str(&format!(
-                "<td>{}</td>",
-                matcher_badge(row.matcher_kind, row.matcher.as_deref())
+                "<td><span class=\"mode-badge {}\">{}</span></td>",
+                if row.blocking { "blocking" } else { "advisory" },
+                if row.blocking { "blocking" } else { "advisory" }
             ));
-            html.push_str(&format!("<td>{}</td>", row.times_applied));
-            html.push_str(&format!("<td>{}</td>", escape(last_used)));
+            html.push_str(&format!("<td class=\"numeric\">{}</td>", row.times_applied));
+            html.push_str(&format!("<td class=\"date\">{}</td>", escape(last_used)));
             html.push_str(&format!(
                 "<td><span class=\"status-badge {}\">{}</span></td>",
                 row.status.as_str(),
@@ -124,7 +122,7 @@ pub fn render(
             ));
             html.push_str("</tr>");
         }
-        html.push_str("</tbody></table></div>");
+        html.push_str("</tbody></table></div></div>");
         Ok(html)
     })
 }
@@ -187,15 +185,41 @@ fn sort_link(label: &str, field: &str, sort: Option<&str>, dir: &str, q: Option<
     )
 }
 
-fn matcher_badge(kind: Option<writ_core::MatcherKind>, pattern: Option<&str>) -> String {
-    match (kind, pattern) {
-        (Some(k), Some(p)) => format!(
-            "<span class=\"badge matcher\">{}: {}</span>",
-            escape(k.as_str()),
-            escape(p)
-        ),
-        _ => "<span class=\"muted\">—</span>".into(),
+fn scope_cell(scopes: &[Scope], kind: ScopeKind) -> String {
+    let matching: Vec<&Scope> = scopes.iter().filter(|scope| scope.kind == kind).collect();
+    let mut html = String::from("<td><div class=\"cell-chips\">");
+    if matching.is_empty() {
+        html.push_str(r#"<span class="muted empty-value">—</span>"#);
+    } else {
+        for scope in matching {
+            html.push_str(&format!(
+                "<span class=\"chip project\">{}</span>",
+                escape(&scope.value)
+            ));
+        }
     }
+    html.push_str("</div></td>");
+    html
+}
+
+fn scope_cell_excluding(scopes: &[Scope], excluded: ScopeKind) -> String {
+    let matching: Vec<&Scope> = scopes
+        .iter()
+        .filter(|scope| scope.kind != excluded)
+        .collect();
+    let mut html = String::from("<td><div class=\"cell-chips\">");
+    if matching.is_empty() {
+        html.push_str(r#"<span class="muted empty-value">—</span>"#);
+    } else {
+        for scope in matching {
+            html.push_str(&format!(
+                "<span class=\"chip scope\">{}</span>",
+                escape(&scope.to_string())
+            ));
+        }
+    }
+    html.push_str("</div></td>");
+    html
 }
 
 fn health_class(unused: bool, never_applied: bool) -> &'static str {
