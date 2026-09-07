@@ -84,11 +84,11 @@ that have no structural anchor.
 - Default on for structural rules. Process or style rules may omit it.
 - Prefer `ast_grep` when the scope includes `language:`.
 - Use `regex` only when `ast_grep` cannot express it.
-- For "do not remove X" rules, match a durable token that stays in the
-  file, not the thing being removed. Matchers currently cannot see
-  removals, so matching the disappearing token silently misses the
-  violation. Example: for "Do not bulk-delete Elixir `@spec`", match the
-  `def` or `defp` that should keep its spec, not `@spec` alone.
+- Matchers see additions and removals (`regex` on both line sets;
+  `ast_grep` on the post-change file and its pre-image). For "do not
+  remove X" rules, match X itself — e.g. Elixir `@spec` for "Do not
+  bulk-delete typespecs". A broader durable cue (`def` / `defp`) is
+  fine when you want the rule in play on nearby edits too.
 
 ## After writing
 
