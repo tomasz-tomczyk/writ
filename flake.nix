@@ -1,9 +1,14 @@
 {
   description = "A local-first ledger of the steering you give coding agents";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    # Pin the Rust toolchain so the Nix build tracks Cargo.toml's rust-version
+    # independently of whatever rustc nixpkgs-unstable currently ships.
+    rust-overlay.url = "github:oxalica/rust-overlay";
+  };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, rust-overlay }:
     let
       version = "0.1.0";
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
@@ -11,8 +16,17 @@
     in rec {
       packages = forAllSystems (system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
-          writ = pkgs.rustPlatform.buildRustPackage {
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          # Keep this >= workspace.package.rust-version in Cargo.toml.
+          rustToolchain = pkgs.rust-bin.stable."1.98.0".default;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          };
+          writ = rustPlatform.buildRustPackage {
             pname = "writ";
             inherit version;
             src = self;
@@ -42,15 +56,18 @@
 
       devShells = forAllSystems (system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          rustToolchain = pkgs.rust-bin.stable."1.98.0".default;
         in {
           default = pkgs.mkShell {
-            packages = with pkgs; [
-              cargo
-              rustc
-              rustfmt
-              clippy
-              git
+            packages = [
+              rustToolchain
+              rustToolchain.rustfmt
+              rustToolchain.clippy
+              pkgs.git
             ];
           };
         });
