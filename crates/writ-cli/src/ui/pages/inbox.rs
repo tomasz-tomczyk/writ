@@ -31,6 +31,11 @@ pub fn render(state: &AppState) -> Result<String, Error> {
         html.push_str(r#"<div class="table-shell proposal-list">"#);
         for learning in proposed {
             let exemplars = store.exemplars_of(&learning.id)?;
+            let mode = if learning.blocking {
+                "blocking"
+            } else {
+                "advisory"
+            };
 
             html.push_str("<article class=\"proposal\">");
             html.push_str(&format!(
@@ -47,16 +52,7 @@ pub fn render(state: &AppState) -> Result<String, Error> {
             html.push_str(r#"<span class="status-badge proposed">proposed</span>"#);
             html.push_str(&format!(
                 "<span class=\"mode-badge {}\">{}</span>",
-                if learning.blocking {
-                    "blocking"
-                } else {
-                    "advisory"
-                },
-                if learning.blocking {
-                    "blocking"
-                } else {
-                    "advisory"
-                }
+                mode, mode
             ));
             for scope in learning
                 .scopes
@@ -66,14 +62,17 @@ pub fn render(state: &AppState) -> Result<String, Error> {
                 html.push_str(&scope_chip(scope, "scope"));
             }
             html.push_str("</div></div>");
-            let projects: Vec<_> = learning
+            let has_projects = learning
                 .scopes
                 .iter()
-                .filter(|scope| scope.kind == ScopeKind::Project)
-                .collect();
-            if !projects.is_empty() {
+                .any(|scope| scope.kind == ScopeKind::Project);
+            if has_projects {
                 html.push_str(r#"<div class="proposal-project cell-chips">"#);
-                for scope in projects {
+                for scope in learning
+                    .scopes
+                    .iter()
+                    .filter(|scope| scope.kind == ScopeKind::Project)
+                {
                     html.push_str(&scope_chip(scope, "project"));
                 }
                 html.push_str("</div>");

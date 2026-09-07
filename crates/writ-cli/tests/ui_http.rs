@@ -776,6 +776,81 @@ async fn collection_filters_by_selected_projects() {
     );
 }
 
+#[tokio::test]
+async fn collection_filters_by_single_project_param() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut writ = NewLearning::new("writ only", "rule", "rationale");
+        writ.status = Some(Status::Active);
+        writ.scopes = vec!["project:github.com/acme/writ".parse().unwrap()];
+        store.record(&writ).unwrap();
+
+        let mut other = NewLearning::new("other only", "rule", "rationale");
+        other.status = Some(Status::Active);
+        other.scopes = vec!["project:github.com/acme/other".parse().unwrap()];
+        store.record(&other).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?project=github.com/acme/writ")
+        .await
+        .body;
+    assert!(body.contains("writ only"), "{body}");
+    assert!(!body.contains("other only"), "{body}");
+}
+
+#[tokio::test]
+async fn collection_project_filter_preserves_search_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut writ = NewLearning::new("writ alpha", "rule", "rationale");
+        writ.status = Some(Status::Active);
+        writ.scopes = vec!["project:github.com/acme/writ".parse().unwrap()];
+        store.record(&writ).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?q=alpha&project=github.com/acme/writ")
+        .await
+        .body;
+    assert!(body.contains(r#"class="project-filter__form""#), "{body}");
+    assert!(
+        body.contains(r#"type="hidden" name="q" value="alpha""#),
+        "project filter Apply must keep the active search: {body}"
+    );
+}
+
+#[tokio::test]
+async fn collection_empty_project_filter_keeps_clear_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut writ = NewLearning::new("writ only", "rule", "rationale");
+        writ.status = Some(Status::Active);
+        writ.scopes = vec!["project:github.com/acme/writ".parse().unwrap()];
+        store.record(&writ).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/collection?project=github.com/acme/missing")
+        .await
+        .body;
+    assert!(body.contains("No learnings match"), "{body}");
+    assert!(
+        body.contains(r#"class="project-filter-empty""#),
+        "empty filter results must keep a clearable project form: {body}"
+    );
+    assert!(
+        body.contains(r#"name="project" value="github.com/acme/writ""#),
+        "{body}"
+    );
+}
+
 fn active_with_exemplar(store: &mut Store, title: &str) -> String {
     let mut learning = NewLearning::new(title, "rule", "rationale");
     learning.status = Some(Status::Active);

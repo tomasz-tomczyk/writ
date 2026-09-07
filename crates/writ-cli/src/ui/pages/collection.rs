@@ -123,14 +123,14 @@ pub fn render(
 
         for row in rows {
             let last_used = row.last_selected_at.as_deref().unwrap_or("—");
+            let mode = if row.blocking { "blocking" } else { "advisory" };
 
             html.push_str("<tr>");
             html.push_str(&title_cell(&row.id, &row.title, &row.scopes));
             html.push_str(&project_cell(&row.scopes));
             html.push_str(&format!(
                 "<td><span class=\"mode-badge {}\">{}</span></td>",
-                if row.blocking { "blocking" } else { "advisory" },
-                if row.blocking { "blocking" } else { "advisory" }
+                mode, mode
             ));
             html.push_str(&format!("<td class=\"numeric\">{}</td>", row.times_applied));
             html.push_str(&format!("<td class=\"date\">{}</td>", escape(last_used)));
@@ -165,17 +165,16 @@ fn project_options(rows: &[Learning]) -> (Vec<String>, bool) {
 }
 
 fn row_matches_projects(row: &Learning, selected: &BTreeSet<&str>) -> bool {
-    let projects: Vec<&str> = row
-        .scopes
-        .iter()
-        .filter(|scope| scope.kind == ScopeKind::Project)
-        .map(|scope| scope.value.as_str())
-        .collect();
-    if projects.is_empty() {
-        selected.contains(PROJECT_NONE)
-    } else {
-        projects.iter().any(|value| selected.contains(value))
+    let mut has_project = false;
+    for scope in &row.scopes {
+        if scope.kind == ScopeKind::Project {
+            has_project = true;
+            if selected.contains(scope.value.as_str()) {
+                return true;
+            }
+        }
     }
+    !has_project && selected.contains(PROJECT_NONE)
 }
 
 fn cmp_projects(left: &[Scope], right: &[Scope]) -> std::cmp::Ordering {
@@ -272,11 +271,7 @@ fn sort_link(label: &str, field: &str, params: &Params<'_>) -> String {
     )
 }
 
-fn project_heading(
-    params: &Params<'_>,
-    available: &[String],
-    has_no_project: bool,
-) -> String {
+fn project_heading(params: &Params<'_>, available: &[String], has_no_project: bool) -> String {
     let active = params.sort == Some("project");
     let next_dir = if active && params.dir == "asc" {
         "desc"
@@ -325,24 +320,22 @@ fn project_heading(
     html.push_str(&format!(
         r#"<details class="project-filter"><summary class="{summary_class}" aria-label="Filter by project">Filter</summary>"#
     ));
-    html.push_str(&project_filter_form(
-        params,
-        available,
-        has_no_project,
-    ));
+    html.push_str(&project_filter_form(params, available, has_no_project));
     html.push_str("</details></div></th>");
     html
 }
 
-fn project_filter_form(
-    params: &Params<'_>,
-    available: &[String],
-    has_no_project: bool,
-) -> String {
+fn project_filter_form(params: &Params<'_>, available: &[String], has_no_project: bool) -> String {
     let selected: BTreeSet<&str> = params.projects.iter().map(String::as_str).collect();
     let mut html = format!(
         r#"<form method="get" action="/collection" hx-get="/collection"{SWAP} class="project-filter__form">"#
     );
+    if let Some(query) = params.q.filter(|query| !query.is_empty()) {
+        html.push_str(&format!(
+            r#"<input type="hidden" name="q" value="{}">"#,
+            escape(query)
+        ));
+    }
     html.push_str(&hidden_state_fields(params, false));
     for project in available {
         let checked = if selected.contains(project.as_str()) {
@@ -435,13 +428,13 @@ fn title_cell(id: &str, title: &str, scopes: &[Scope]) -> String {
         escape(id),
         escape(title)
     );
-    let meta: Vec<&Scope> = scopes
-        .iter()
-        .filter(|scope| scope.kind != ScopeKind::Project)
-        .collect();
-    if !meta.is_empty() {
+    let has_meta = scopes.iter().any(|scope| scope.kind != ScopeKind::Project);
+    if has_meta {
         html.push_str(r#"<div class="title-meta">"#);
-        for scope in meta {
+        for scope in scopes
+            .iter()
+            .filter(|scope| scope.kind != ScopeKind::Project)
+        {
             html.push_str(&scope_chip(scope, "scope"));
         }
         html.push_str("</div>");
@@ -451,17 +444,17 @@ fn title_cell(id: &str, title: &str, scopes: &[Scope]) -> String {
 }
 
 fn project_cell(scopes: &[Scope]) -> String {
-    let matching: Vec<&Scope> = scopes
-        .iter()
-        .filter(|scope| scope.kind == ScopeKind::Project)
-        .collect();
+    let has_projects = scopes.iter().any(|scope| scope.kind == ScopeKind::Project);
     let mut html = String::from("<td><div class=\"cell-chips\">");
-    if matching.is_empty() {
-        html.push_str(r#"<span class="muted empty-value">—</span>"#);
-    } else {
-        for scope in matching {
+    if has_projects {
+        for scope in scopes
+            .iter()
+            .filter(|scope| scope.kind == ScopeKind::Project)
+        {
             html.push_str(&scope_chip(scope, "project"));
         }
+    } else {
+        html.push_str(r#"<span class="muted empty-value">—</span>"#);
     }
     html.push_str("</div></td>");
     html
