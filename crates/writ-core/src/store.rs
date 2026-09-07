@@ -149,6 +149,19 @@ impl Store {
     /// [`LearningUpdate`], so this write cannot change them. `updated_at` is
     /// deliberately omitted from the UPDATE and left to the trigger.
     pub fn update_learning(&mut self, id: &str, update: &LearningUpdate) -> Result<()> {
+        self.update_learning_and_set_status(id, update, None)
+    }
+
+    /// Replace editable fields and optionally change status atomically.
+    ///
+    /// Detail's Save & activate path uses this operation so a failure while
+    /// activating rolls back the field, scope, and exemplar changes too.
+    pub fn update_learning_and_set_status(
+        &mut self,
+        id: &str,
+        update: &LearningUpdate,
+        status: Option<Status>,
+    ) -> Result<()> {
         update.validate()?;
         let tx = self.conn.transaction()?;
         let exists: bool = tx.query_row(
@@ -181,7 +194,7 @@ impl Store {
         )?;
 
         tx.execute("DELETE FROM learning_scopes WHERE learning_id = ?1", [id])?;
-        for scope in update.effective_scopes() {
+        for scope in &update.scopes {
             tx.execute(
                 "INSERT INTO learning_scopes (learning_id, kind, value)
                  VALUES (?1, ?2, ?3)",
@@ -189,9 +202,10 @@ impl Store {
             )?;
         }
 
-        tx.execute("DELETE FROM exemplars WHERE learning_id = ?1", [id])?;
-        for exemplar in &update.exemplars {
-            insert_exemplar(&tx, id, exemplar, None)?;
+        replace_exemplars(&tx, id, &update.exemplars)?;
+
+        if let Some(status) = status {
+            set_status(&tx, id, status)?;
         }
 
         tx.commit()?;
@@ -909,6 +923,55 @@ fn insert_exemplar(
     Ok(())
 }
 
+/// Replace the ordered exemplar set while retaining child identity wherever a
+/// row still occupies the same position.
+///
+/// Detail only exposes the first good/bad pair. Keeping existing rows in place
+/// means an edit to that pair does not rewrite hidden children or move their
+/// `updated_at` timestamps. CLI/MCP replacement semantics remain the same.
+fn replace_exemplars(
+    tx: &Transaction<'_>,
+    learning_id: &str,
+    exemplars: &[NewExemplar],
+) -> Result<()> {
+    let existing_ids = {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM exemplars
+              WHERE learning_id = ?1
+              ORDER BY id",
+        )?;
+        let rows = stmt.query_map([learning_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    for (existing_id, exemplar) in existing_ids.iter().zip(exemplars) {
+        tx.execute(
+            "UPDATE exemplars
+                SET kind = ?1,
+                    language = ?2,
+                    snippet = ?3,
+                    note = ?4
+              WHERE id = ?5
+                AND (kind <> ?1 OR language IS NOT ?2 OR snippet <> ?3 OR note IS NOT ?4)",
+            params![
+                exemplar.kind.as_str(),
+                &exemplar.language,
+                &exemplar.snippet,
+                &exemplar.note,
+                existing_id,
+            ],
+        )?;
+    }
+
+    for existing_id in existing_ids.iter().skip(exemplars.len()) {
+        tx.execute("DELETE FROM exemplars WHERE id = ?1", [existing_id])?;
+    }
+    for exemplar in exemplars.iter().skip(existing_ids.len()) {
+        insert_exemplar(tx, learning_id, exemplar, None)?;
+    }
+    Ok(())
+}
+
 /// `updated_at` is never named here. The trigger owns it. Invariant 7.
 fn set_status(tx: &Transaction<'_>, id: &str, status: Status) -> Result<()> {
     tx.execute(
@@ -1600,6 +1663,12 @@ mod tests {
         update.matcher = None;
         let error = store.update_learning(&id, &update).unwrap_err();
         assert!(matches!(error, Error::Validation { .. }), "{error}");
+
+        let mut update = learning_update();
+        update.scopes.clear();
+        let error = store.update_learning(&id, &update).unwrap_err();
+        assert!(matches!(error, Error::Validation { .. }), "{error}");
+        assert!(error.to_string().contains("scope"), "{error}");
     }
 
     #[test]
@@ -1609,6 +1678,39 @@ mod tests {
             .update_learning("nope", &learning_update())
             .unwrap_err();
         assert!(matches!(error, Error::NotFound { .. }), "{error}");
+    }
+
+    #[test]
+    fn update_and_status_change_roll_back_together() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = record(
+            &mut store,
+            &scoped("old title", "old rule", "old rationale"),
+        );
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER force_activation_failure
+                 BEFORE UPDATE OF status ON learnings
+                 WHEN new.status = 'active'
+                 BEGIN
+                   SELECT RAISE(FAIL, 'forced activation failure');
+                 END;",
+            )
+            .unwrap();
+
+        let error = store
+            .update_learning_and_set_status(&id, &learning_update(), Some(Status::Active))
+            .unwrap_err();
+        assert!(matches!(error, Error::Sqlite(_)), "{error}");
+
+        let learning = store.get(&id).unwrap();
+        assert_eq!(learning.title, "old title");
+        assert_eq!(learning.rule, "old rule");
+        assert_eq!(learning.rationale, "old rationale");
+        assert_eq!(learning.status, Status::Proposed);
+        assert_eq!(learning.scopes, vec![Scope::global()]);
+        assert!(store.exemplars_of(&id).unwrap().is_empty());
     }
 
     #[test]
