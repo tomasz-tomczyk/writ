@@ -4,3 +4,6 @@ docs/
 .worktrees/
 .superpowers/
 /writ
+
+# Draft notes from /release-notes (do not commit)
+v*-release-notes.md
