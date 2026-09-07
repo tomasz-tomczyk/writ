@@ -6,11 +6,9 @@ disable-model-invocation: true
 
 # Deep codebase audit
 
-The name is deliberately `deep-audit`. Never call this skill `writ-audit`: `writ audit` is a product command that selects learning-ledger rules for a diff. This skill audits the repository developers work on.
-
 ## Prepare
 
-Read `AGENTS.md` and the complete local design spec. Stop if the spec is absent. Read `mise.toml`, the workspace manifests, CI and release workflows, README, plugin documentation, and the repository tree. Record the current revision and dirty state. An audit is read-only unless the user later chooses fixes.
+Read `AGENTS.md`. Read `mise.toml`, the workspace manifests, CI and release workflows, README, plugin documentation, and the repository tree. Record the current revision and dirty state. An audit is read-only unless the user later chooses fixes.
 
 Map ownership before dispatching discovery:
 
@@ -19,15 +17,15 @@ Map ownership before dispatching discovery:
 - `plugins/`: Claude Code, Codex, Cursor, and OpenCode distribution artifacts.
 - `scripts/`, `mise.toml`, `.github/`, Cargo and Nix files: quality and release machinery.
 
-Tell every reviewer that automated formatting, Clippy warnings, ordinary test failures, typos, dependency policy, and documented-flag checks already have mechanical gates. The audit should focus on semantic defects, broken contracts, missing tests, data integrity, security/privacy boundaries, and worthwhile structural improvements.
+Tell every reviewer that automated formatting, Clippy warnings, ordinary test failures, typos, dependency policy, and documented-flag checks already have mechanical gates. Focus on semantic defects, broken contracts, missing tests, data integrity, security/privacy boundaries, and worthwhile structural improvements.
 
 ## Discovery
 
-When the host supports independent agents, dispatch fresh reviewers in parallel. Otherwise perform the same passes locally and keep their findings separate until validation.
+Dispatch fresh reviewers in parallel (one agent per domain below). Give each the ownership map, `AGENTS.md` invariants, and only the relevant source. Keep findings separate until validation.
 
 ### Rust and architecture
 
-Read every Rust source and test. Focus on ownership boundaries, error propagation, state transitions, path/identity behavior, unnecessary public surface, duplicated logic with at least three meaningful callers, and behavior that exists without a regression test. Do not flag small-collection linear work merely for being linear; the spec explicitly bounds prompt size, not all selection cost.
+Read every Rust source and test. Focus on ownership boundaries, error propagation, state transitions, path/identity behavior, unnecessary public surface, duplicated logic with at least three meaningful callers, and behavior that exists without a regression test. Do not flag small-collection linear work merely for being linear; prompt size is capped, selection cost is not.
 
 ### SQLite and data integrity
 
@@ -55,7 +53,7 @@ Give each group to a fresh skeptical validator with no discovery conclusions bey
 
 1. Is this real at writ's local-first scale and execution model?
 2. Can the claimed path actually execute?
-3. Does the spec require the current behavior?
+3. Does `AGENTS.md` require the current behavior?
 4. Is the cited line and history accurate?
 5. Does an existing test or caller refute the claim?
 6. Is the proposed fix the smallest correct one and worth its churn?
@@ -68,7 +66,7 @@ Return:
 
 - audited revision and surfaces;
 - count of raw and validated findings;
-- validated findings ordered by data-loss/security/spec risk;
+- validated findings ordered by data-loss/security/invariant risk;
 - PR-sized groups with theme, files, dependencies, and estimated effort;
 - rejected findings and why;
 - missing or failed verification commands.

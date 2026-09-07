@@ -5,7 +5,7 @@ description: "Generate draft release notes for the next writ version from commit
 
 # Generate writ release notes
 
-Work in the writ repository and read `AGENTS.md` plus the local design spec for product terminology. Release notes describe what users receive; they do not reinterpret the design.
+Work in the writ repository and read `AGENTS.md`. Release notes describe what users receive; they do not reinterpret the documented behavior.
 
 ## Gather the release window
 
@@ -43,7 +43,7 @@ Write `vX.Y.Z-release-notes.md` at the repository root. Use this structure:
 
 Keep each change entry faithful to its merged PR or commit. Preserve exact commit subjects when presenting the changelog list; add PR link and author attribution without rewriting history. Put community contributions first in a group and thank external PR authors. When a maintainer PR was driven by an external issue, credit the issue reporter only after verifying the link and identity.
 
-Group by user outcome, not file or commit prefix. Do not create a one-item section unless it is a genuine release headline. Do not guess social handles or maintain a crit-meta contributor database; writ has no such repository-local system.
+Group by user outcome, not file or commit prefix. Do not create a one-item section unless it is a genuine release headline. Do not guess social handles or maintain a external contributor database.
 
 ## Verify
 

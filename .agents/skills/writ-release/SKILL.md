@@ -10,7 +10,7 @@ This mutates repository and external release state. Keep explicit user approval 
 
 ## Preflight
 
-Read `AGENTS.md`, require the local design spec, and inspect `mise.toml`, root and crate manifests, `Cargo.lock`, `flake.nix`, plugin manifests, `.github/workflows/release.yml`, and the latest repository state.
+Read `AGENTS.md`, and inspect `mise.toml`, root and crate manifests, `Cargo.lock`, `flake.nix`, plugin manifests, `.github/workflows/release.yml`, and the latest repository state.
 
 Require:
 

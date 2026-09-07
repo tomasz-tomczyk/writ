@@ -6,8 +6,6 @@ disable-model-invocation: true
 
 # Intent check
 
-This is a developer workflow for repository history. It is not the product's learning audit.
-
 ## Modes
 
 - PR mode compares one branch or PR with `origin/main` and its stated intent.
@@ -17,7 +15,7 @@ Infer the mode from the caller. A feature branch implies PR mode; a pre-release 
 
 ## Gather evidence
 
-Read `AGENTS.md` and require the local design spec. Fetch remote refs when available, but do not rewrite the branch.
+Read `AGENTS.md`. Fetch remote refs when available, but do not rewrite the branch.
 
 For PR mode, gather:
 

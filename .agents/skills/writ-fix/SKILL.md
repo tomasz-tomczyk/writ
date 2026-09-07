@@ -14,8 +14,7 @@ Run routine local steps autonomously. Stop for unclear requirements, a design co
 
 Fetch the issue title, body, labels, assignees, and comments with `gh`. Summarize the requested behavior, acceptance criteria, likely area, and open ambiguity.
 
-Read `AGENTS.md` completely. Require `docs/superpowers/specs/2026-09-06-writ-design.md` and read the relevant sections before changing behavior. If the requested behavior contradicts the approved design, stop and explain the conflict; do not silently amend the spec or implement around it.
-
+Read `AGENTS.md` completely. 
 ## Create the worktree
 
 Choose `fix/<issue>-<slug>` for a bug, `feat/<issue>-<slug>` for a feature, or `refactor/<issue>-<slug>` for cleanup. From the canonical repository:

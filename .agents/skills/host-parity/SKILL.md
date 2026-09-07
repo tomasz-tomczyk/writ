@@ -12,7 +12,7 @@ Audit the integration artifacts shipped in `plugins/`. This is semantic parity, 
 
 Read these before comparing:
 
-- `AGENTS.md` and the local design spec, especially host and gate sections;
+- `AGENTS.md` especially host and gate sections of `AGENTS.md`;
 - `plugins/README.md`;
 - every host-specific README, instruction snippet, manifest, hook file, MCP file, and shipped skill under `plugins/`;
 - `crates/writ-cli/src/install.rs`, `crates/writ-cli/src/hook.rs`, MCP command definitions, and their tests when the relevant behavior changed.
@@ -49,7 +49,7 @@ Trace each capability end to end:
 5. Hook entry gates on any selected learning; ingest gates only on unresolved blocking findings. Every prompt names an actual findings return path.
 6. Retry signals and empty-diff/non-git pass-through behavior match the host.
 7. CLI flags, MCP schemas, examples, READMEs, tests, and plugin versions agree.
-8. No artifact contains stale absolute checkout paths or references to crit's repositories, Go, Elixir, Linear, Sentry, or dual-repo workflows.
+8. No artifact contains stale absolute checkout paths or references to unrelated products, Linear, Sentry, or dual-repo workflows.
 
 Classify differences as `IN SYNC`, `INTENTIONAL HOST DIFFERENCE`, or `DRIFT`. For drift, state which artifact is authoritative and the minimal files to change. Do not edit in audit-only use.
 

@@ -6,13 +6,11 @@ disable-model-invocation: true
 
 # Ship writ repository work
 
-This ships changes to the writ codebase. It does not replace or invoke the product's learning-ledger audit except when a test explicitly exercises that CLI behavior.
-
 Run unattended through routine reversible steps. Pause for a material choice, destructive cleanup, unresolved conflict, PR approval, or failed gate.
 
 ## Assess
 
-Read `AGENTS.md` and require the local design spec. Fetch `origin/main` without pulling, then report:
+Read `AGENTS.md`. Fetch `origin/main` without pulling, then report:
 
 ```bash
 git branch --show-current
@@ -45,7 +43,7 @@ Resolve simple conflicts by understanding both sides. For a conflict with two pl
 
 ## Review and fix
 
-Invoke `writ-review`. It includes the independent `intent-check`, design invariants, Rust/SQLite/CLI/MCP/hooks review, security/privacy, tests, and docs. Do not substitute the product command `writ audit` for this developer review.
+Invoke `writ-review`. It includes the independent `intent-check`, `AGENTS.md` invariants, Rust/SQLite/CLI/MCP/hooks review, security/privacy, tests, and docs. Do not substitute the product command `writ audit` for this developer review.
 
 Fix every blocker, commit the fixes, and repeat affected review phases until the verdict is `SHIP IT`. If the caller already completed `writ-review` against the same final diff, verify the reviewed commit still matches HEAD before reusing it.
 

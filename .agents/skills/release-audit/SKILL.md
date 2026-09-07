@@ -10,7 +10,7 @@ Run this before tagging. It reviews the exact release window; after a tag moves,
 
 ## Establish the release window
 
-Read `AGENTS.md`, require and read the local design spec, then inspect `mise.toml`, `.github/workflows/release.yml`, Cargo manifests, `flake.nix`, the README, and plugin documentation.
+Read `AGENTS.md`, then inspect `mise.toml`, `.github/workflows/release.yml`, Cargo manifests, `flake.nix`, the README, and plugin documentation.
 
 Fetch remote refs. Resolve the latest stable release from GitHub or reachable tags, and use the up-to-date `origin/main` as the upper bound. Do not rely on a stale local `main` or mutate the current checkout merely to audit it.
 
@@ -26,13 +26,18 @@ Report:
 
 ## Release gates
 
-### 1. Intent and clobber audit
+### 1. Intent and clobber audit (subagents)
 
-Run `intent-check` in release-window mode. Check both later commits that undo earlier commits in the same window and unadvertised removal of behavior that existed at the prior tag. A confirmed clobber is a release blocker and should be restored in its own PR so history remains honest.
+Dispatch these as **fresh subagents** (parallel when possible), not as inline checks in the orchestrator:
 
-### 2. Parallel domain review
+1. An agent that runs the `intent-check` skill in release-window mode and returns its CONFIRMED / REFUTED / AMBIGUOUS table.
+2. A separate clobber agent with the release-range commit log and full diff. It looks for later commits that undo earlier commits in the same window, and for unadvertised removal of behavior that existed at the prior tag.
 
-When independent agents are available, dispatch fresh Rust, SQLite, CLI, and MCP/hooks reviewers in parallel. Give each the release range, changed files, commit log, design invariants, and only the relevant source. If delegation is unavailable, perform the same passes locally.
+A confirmed clobber is a release blocker and should be restored in its own PR so history remains honest.
+
+### 2. Parallel domain review (subagents)
+
+Dispatch fresh Rust, SQLite, CLI, and MCP/hooks reviewers in parallel. Give each the release range, changed files, commit log, `AGENTS.md` invariants, and only the relevant source.
 
 Review accumulated changes for:
 
@@ -46,9 +51,9 @@ Review accumulated changes for:
 
 Every finding needs a verified current file and line plus a concrete release impact. Avoid speculative refactors and performance claims outside writ's actual scale.
 
-### 3. Validate findings
+### 3. Validate findings (subagents)
 
-Give each domain's findings to a fresh skeptical validator. It must verify the claim against code, tests, spec, and actual execution model, then return `REAL`, `PARTIAL`, or `FALSE POSITIVE` with evidence. Carry only real and supported part of partial findings forward; list dropped findings briefly.
+Give each domain's findings to a fresh skeptical validator agent (one per domain, in parallel). It must verify the claim against code, tests, `AGENTS.md`, and the actual execution model, then return `REAL`, `PARTIAL`, or `FALSE POSITIVE` with evidence. Carry only real and supported part of partial findings forward; list dropped findings briefly.
 
 ### 4. Execute repository gates
 
