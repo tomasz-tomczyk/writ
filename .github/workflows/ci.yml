@@ -17,13 +17,13 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # One runner so fmt → clippy → test → docs → lint reuse the same target/
-  # and toolchain. Parallel jobs each cold-compile; rust-cache only helps
-  # the *next* run, not siblings in this one.
-  check:
-    name: check
+  # Warm the shared Cargo cache and produce the writ binary once.
+  # Downstream jobs restore the cache (or the binary artifact) instead of
+  # cold-compiling on every runner.
+  compile:
+    name: compile
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -35,6 +35,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
 
       - name: Format
         run: mise exec -- cargo fmt --all --check
@@ -45,27 +47,91 @@ jobs:
       - name: No HTTP client is linked into writ
         run: mise run no-network
 
+      - name: Compile tests (no run)
+        run: mise exec -- cargo test --workspace --locked --no-run
+
+      - name: Build writ
+        run: mise exec -- cargo build --bin writ --locked
+
+      - name: Upload writ binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: writ-bin
+          path: target/debug/writ
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    name: test
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+          save-if: false
       - name: Test
         run: mise exec -- cargo test --workspace --locked
 
-      - name: Build the binary the documentation is checked against
-        run: mise exec -- cargo build --bin writ --locked
-
-      # Spec section 11, from crit #873. A flag in the README or a
-      # SKILL.md that the binary rejects is a bug. Invariant 8.
+  docs:
+    name: docs
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download writ binary
+        uses: actions/download-artifact@v4
+        with:
+          name: writ-bin
+          path: artifact
       - name: README and every SKILL.md against writ --help
-        run: ./scripts/check-doc-flags.sh
+        env:
+          WRIT: ${{ github.workspace }}/artifact/writ
+        run: |
+          chmod +x "$WRIT"
+          ./scripts/check-doc-flags.sh
 
+  install:
+    name: install
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+          save-if: false
       - name: cargo install resolves the writ binary
         run: |
           mise exec -- cargo install --path crates/writ-cli --locked --force
           writ --version
 
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
       - name: Supply-chain, unused deps, typos, shell scripts
         run: mise run lint
 
-  # Separate job: llvm-cov rebuilds with instrumentation; do not share
-  # the check job's target/ artifacts.
+  # Instrumented rebuild — cannot reuse the compile job's target/.
   coverage:
     name: coverage
     runs-on: ubuntu-latest
@@ -81,7 +147,6 @@ jobs:
           cache: true
       - uses: Swatinem/rust-cache@v2
         with:
-          # Keep instrumented artifacts out of the check cache key.
           prefix-key: coverage
       - name: Generate LCOV
         run: mise run coverage
@@ -91,3 +156,19 @@ jobs:
           files: target/llvm-cov/lcov.info
           fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  # Single required check for branch protection.
+  ci:
+    name: ci
+    if: always()
+    needs: [compile, test, docs, install, lint, coverage]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: All required jobs passed
+        run: |
+          results='${{ join(needs.*.result, ',') }}'
+          echo "needs: $results"
+          echo "$results" | grep -qv 'failure' || exit 1
+          echo "$results" | grep -qv 'cancelled' || exit 1
+          echo "$results" | grep -q 'success'
