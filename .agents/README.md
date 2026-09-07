@@ -1,14 +1,14 @@
-# writ developer workflow fitness
+# writ developer workflow skills
 
 These are repository-developer workflows for working **on writ**. They review,
 ship, fix, audit, and release this Rust repository. They are not writ product
 features, do not replace the `writ audit` learning-ledger command, and do not
 belong under `plugins/`, which contains integrations shipped to writ users.
 
-The canonical skill bodies live under `.cursor/skills/`. Claude Code, OpenCode,
-and `.agents/skills/` reuse those exact files through relative symlinks,
-preventing host copies from drifting. `.cursor/commands/`, `.claude/commands/`,
-and `.opencode/commands/` contain only thin slash-command wrappers.
+Canonical skill bodies live only under `.agents/skills/`. Cursor loads that
+path natively and exposes each skill as a slash command (for example
+`/writ-ship`). Do not maintain parallel `.cursor/skills`, `.cursor/commands`,
+`.claude/*`, or `.opencode/*` copies of these workflows.
 
 ## Imported and adapted
 
