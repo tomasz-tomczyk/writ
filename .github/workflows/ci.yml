@@ -17,10 +17,13 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # One runner so fmt → clippy → test → docs → lint reuse the same target/
+  # and toolchain. Parallel jobs each cold-compile; rust-cache only helps
+  # the *next* run, not siblings in this one.
   check:
-    name: fmt, clippy, test
+    name: check
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
 
@@ -45,52 +48,24 @@ jobs:
       - name: Test
         run: mise exec -- cargo test --workspace --locked
 
-  docs:
-    name: the documented flags are real flags
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v5
-      - uses: jdx/mise-action@v3
-        with:
-          install: true
-          cache: true
-      - uses: Swatinem/rust-cache@v2
       - name: Build the binary the documentation is checked against
         run: mise exec -- cargo build --bin writ --locked
+
       # Spec section 11, from crit #873. A flag in the README or a
       # SKILL.md that the binary rejects is a bug. Invariant 8.
       - name: README and every SKILL.md against writ --help
         run: ./scripts/check-doc-flags.sh
 
-  install:
-    name: cargo install resolves the writ binary
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v5
-      - uses: jdx/mise-action@v3
-        with:
-          install: true
-          cache: true
-      - name: Install from source
-        run: mise exec -- cargo install --path crates/writ-cli --locked
-      - name: The binary is named writ, not writ-cli
-        run: writ --version
+      - name: cargo install resolves the writ binary
+        run: |
+          mise exec -- cargo install --path crates/writ-cli --locked --force
+          writ --version
 
-  lint:
-    name: deny, machete, typos, shellcheck
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v5
-      - uses: jdx/mise-action@v3
-        with:
-          install: true
-          cache: true
       - name: Supply-chain, unused deps, typos, shell scripts
         run: mise run lint
 
+  # Separate job: llvm-cov rebuilds with instrumentation; do not share
+  # the check job's target/ artifacts.
   coverage:
     name: coverage
     runs-on: ubuntu-latest
@@ -105,6 +80,9 @@ jobs:
           install: true
           cache: true
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep instrumented artifacts out of the check cache key.
+          prefix-key: coverage
       - name: Generate LCOV
         run: mise run coverage
       - name: Upload to Codecov
