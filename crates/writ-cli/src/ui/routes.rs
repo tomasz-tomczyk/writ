@@ -19,7 +19,6 @@ pub fn router(state: AppState) -> Router {
         .route("/inbox", get(inbox))
         .route("/inbox/{id}/approve", post(actions::approve))
         .route("/inbox/{id}/reject", post(actions::reject_proposal))
-        .route("/inbox/{id}/merge", post(actions::merge))
         .route("/collection", get(collection))
         .route("/health", get(health))
         .route("/health/{id}/archive", post(actions::health_archive))

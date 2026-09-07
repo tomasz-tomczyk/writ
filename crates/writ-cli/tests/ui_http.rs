@@ -248,6 +248,7 @@ async fn inbox_lists_proposed_without_near_matches() {
     assert!(!body.contains("Near matches"), "{body}");
     assert!(!body.contains("near-match"), "{body}");
     assert!(!body.contains("bm25"), "{body}");
+    assert!(!body.contains("Merge into"), "{body}");
     assert!(
         body.contains("/learnings/"),
         "edit link should be present: {body}"
@@ -314,30 +315,16 @@ async fn main_htmx_inbox_and_health_contracts_are_preserved() {
 }
 
 #[tokio::test]
-async fn main_htmx_detail_collection_and_merge_contracts_are_preserved() {
+async fn main_htmx_detail_collection_contracts_are_preserved() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
-    let (target_id, proposed_id, learning_id, finding_id) = {
+    let (learning_id, finding_id) = {
         let mut store = Store::open(&db).unwrap();
-        let target_id = active_learning(&mut store, "target rule");
-        let proposed_id =
-            proposed_with_exemplars(&mut store, "proposal to merge", "merged snippet");
         let learning_id = active_with_exemplar(&mut store, "editable over htmx");
         let finding_id = finding_with_path(&mut store, &learning_id, Some("a.rs"), Some(3));
-        (target_id, proposed_id, learning_id, finding_id)
+        (learning_id, finding_id)
     };
     let app = start_app(&db, config());
-
-    let merged = htmx(
-        &app,
-        Method::POST,
-        &format!("/inbox/{proposed_id}/merge"),
-        Some(&[("target_id", target_id.as_str())]),
-    )
-    .await;
-    assert_eq!(merged.status, 200);
-    assert!(is_fragment(&merged.body), "{}", merged.body);
-    assert!(merged.body.contains(r#"id="inbox-list""#));
 
     let collection = htmx(
         &app,
@@ -415,37 +402,6 @@ async fn reject_archives_proposal() {
 
     let store = Store::open(&db).unwrap();
     assert_eq!(store.get(&id).unwrap().status, Status::Archived);
-}
-
-#[tokio::test]
-async fn merge_reinforces_target_and_archives_proposal() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("learnings.db");
-    let (target_id, proposed_id) = {
-        let mut store = Store::open(&db).unwrap();
-        let target = active_learning(&mut store, "target rule");
-        let proposed = proposed_with_exemplars(&mut store, "similar target rule", "merged snippet");
-        (target, proposed)
-    };
-
-    let app = start_app(&db, config());
-    let response = post_form(
-        &app,
-        &format!("/inbox/{proposed_id}/merge"),
-        &[("target_id", &target_id)],
-    )
-    .await;
-    assert_eq!(response.status, 303);
-
-    let store = Store::open(&db).unwrap();
-    assert_eq!(store.get(&proposed_id).unwrap().status, Status::Archived);
-    let target_exemplars = store.exemplars_of(&target_id).unwrap();
-    assert!(
-        target_exemplars
-            .iter()
-            .any(|e| e.snippet == "merged snippet"),
-        "target should receive the proposed exemplars"
-    );
 }
 
 fn bump_applied(store: &mut Store, learning_id: &str, count: usize) {
