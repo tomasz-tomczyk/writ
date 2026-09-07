@@ -165,13 +165,17 @@ These are decisions, not preferences. Breaking one is a spec violation.
    worktree is the same project as its main checkout.
 5. **Bound the prompt, and do not claim to bound the cost.** Selection
    caps at `max_rules` and `max_chars`, so a 20-fold larger collection
-   sends the same 40 rules. The initial select still *reads* every active
-   row whose scopes could match, and a `glob:` scope is still filtered in
-   Rust rather than SQL, so narrowing a rule does not narrow the read.
-   Scopes and outcomes are now loaded in two batched queries instead of
-   ~2 queries per row, but the collection scan and glob over-read remain
-   linear until a later change. If you improve that, say so. Do not write
-   a test that implies it is already true.
+   sends the same 40 rules. `glob:` scopes are now evaluated in SQL via
+   the `writ_glob_any` scalar function, which uses the exact crate glob
+   dialect (including `**`). That means narrowing a rule with `glob:`
+   narrows the set of learnings the SQL filter returns and the batched
+   scope/outcome queries load. The initial select still evaluates every
+   active learning's scopes, so a diff that matches a large subtree or a
+   collection with many `global` rules can still read many rows.
+   Selection cost is therefore not bounded by the diff alone; it is
+   bounded by how many active learnings survive the filter. If you
+   improve that, say so. Do not write a test that implies it is already
+   true.
 6. **Fail honestly.** Every error names its real cause and exits with
    its own code. Never hang on stdin. See spec P7.
 7. **Never set `updated_at` by hand in a write.** A database trigger
