@@ -100,9 +100,9 @@ impl Store {
         conn.create_scalar_function("writ_glob_any", 1, FunctionFlags::SQLITE_UTF8, |ctx| {
             let pattern: String = ctx.get(0)?;
             let matched = CANDIDATE_PATHS.with(|cell| {
-                cell.borrow().as_ref().is_some_and(|paths| {
-                    paths.iter().any(|path| glob_match(&pattern, path))
-                })
+                cell.borrow()
+                    .as_ref()
+                    .is_some_and(|paths| paths.iter().any(|path| glob_match(&pattern, path)))
             });
             Ok(i32::from(matched))
         })?;
