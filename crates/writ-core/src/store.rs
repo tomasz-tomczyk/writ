@@ -9,6 +9,7 @@ use crate::audit::{
 };
 use crate::error::{Error, Result};
 use crate::fts;
+use crate::glob::glob_match;
 use crate::id::new_id;
 use crate::migrate;
 use crate::model::{
@@ -37,6 +38,13 @@ impl Drop for CandidatePathsGuard {
     fn drop(&mut self) {
         CANDIDATE_PATHS.with(|cell| *cell.borrow_mut() = None);
     }
+}
+
+/// Comma-separated `?` placeholders for an `IN (...)` clause.
+fn placeholders(count: usize) -> String {
+    std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// An open writ database.
@@ -92,13 +100,11 @@ impl Store {
         conn.create_scalar_function("writ_glob_any", 1, FunctionFlags::SQLITE_UTF8, |ctx| {
             let pattern: String = ctx.get(0)?;
             let matched = CANDIDATE_PATHS.with(|cell| {
-                cell.borrow().as_ref().is_some_and(|paths| {
-                    paths
-                        .iter()
-                        .any(|path| crate::glob::glob_match(&pattern, path))
-                })
+                cell.borrow()
+                    .as_ref()
+                    .is_some_and(|paths| paths.iter().any(|path| glob_match(&pattern, path)))
             });
-            Ok(if matched { 1i32 } else { 0 })
+            Ok(i32::from(matched))
         })?;
         Ok(())
     }
@@ -362,28 +368,27 @@ impl Store {
         // function for the duration of this call.
         let _guard = set_candidate_paths(&scope.diff.paths);
 
-        let (ids, learnings) = self.filtered_active_learnings(scope)?;
+        let mut learnings = self.filtered_active_learnings(scope)?;
         let languages = scope.diff.languages();
-
-        let scopes_by_id = self.scopes_of_many(&ids)?;
-        let mut survivors: Vec<Learning> = Vec::new();
-        for mut learning in learnings {
-            learning.scopes = scopes_by_id.get(&learning.id).cloned().unwrap_or_default();
-            if scope_hits(&learning, scope, &languages) {
-                survivors.push(learning);
-            }
+        let mut scopes_by_id =
+            self.scopes_of_many(&learnings.iter().map(|l| l.id.as_str()).collect::<Vec<_>>())?;
+        for learning in &mut learnings {
+            learning.scopes = scopes_by_id.remove(&learning.id).unwrap_or_default();
         }
+        learnings.retain(|learning| scope_hits(learning, scope, &languages));
 
         let outcomes_by_id =
-            self.outcomes_of_many(&survivors.iter().map(|l| l.id.as_str()).collect::<Vec<_>>())?;
-        let mut candidates = Vec::with_capacity(survivors.len());
-        for learning in survivors {
-            let outcomes = outcomes_by_id
-                .get(&learning.id)
-                .copied()
-                .unwrap_or_default();
-            candidates.push(Candidate { learning, outcomes });
-        }
+            self.outcomes_of_many(&learnings.iter().map(|l| l.id.as_str()).collect::<Vec<_>>())?;
+        let candidates = learnings
+            .into_iter()
+            .map(|learning| {
+                let outcomes = outcomes_by_id
+                    .get(&learning.id)
+                    .copied()
+                    .unwrap_or_default();
+                Candidate { learning, outcomes }
+            })
+            .collect();
         Ok(candidates)
     }
 
@@ -393,10 +398,7 @@ impl Store {
     /// over-select on the kinds SQLite can evaluate natively; `glob:` scopes
     /// are evaluated through [`writ_glob_any`], so a non-matching glob rule
     /// is dropped here rather than in Rust.
-    fn filtered_active_learnings(
-        &self,
-        scope: &AuditScope,
-    ) -> Result<(Vec<String>, Vec<Learning>)> {
+    fn filtered_active_learnings(&self, scope: &AuditScope) -> Result<Vec<Learning>> {
         // Every kind the learning carries must match, and the rows inside
         // one kind are alternatives. `glob:` scopes are evaluated in SQL
         // via `writ_glob_any`, which understands `**`; `scope_hits` is the
@@ -439,15 +441,8 @@ impl Store {
         let mut stmt = self.conn.prepare(&sql)?;
         let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|value| value.as_ref()).collect();
         let rows = stmt.query_map(refs.as_slice(), read_learning)?;
-
-        let mut learnings: Vec<Learning> = Vec::new();
-        let mut ids: Vec<String> = Vec::new();
-        for row in rows {
-            let learning = row?;
-            ids.push(learning.id.clone());
-            learnings.push(learning);
-        }
-        Ok((ids, learnings))
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Take rules off the ranked list until a cap stops it. Section 7.1
@@ -686,11 +681,11 @@ impl Store {
         if ids.is_empty() {
             return Ok(outcomes_by_id);
         }
-        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
         let sql = format!(
             "SELECT learning_id, outcome, COUNT(*) FROM findings
-              WHERE learning_id IN ({placeholders})
-              GROUP BY learning_id, outcome"
+              WHERE learning_id IN ({})
+              GROUP BY learning_id, outcome",
+            placeholders(ids.len())
         );
         let refs: Vec<&dyn rusqlite::ToSql> =
             ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
@@ -756,16 +751,16 @@ impl Store {
     }
 
     /// All scopes for a set of learning ids, grouped by id.
-    fn scopes_of_many(&self, ids: &[String]) -> Result<HashMap<String, Vec<Scope>>> {
+    fn scopes_of_many(&self, ids: &[&str]) -> Result<HashMap<String, Vec<Scope>>> {
         let mut scopes_by_id: HashMap<String, Vec<Scope>> = HashMap::new();
         if ids.is_empty() {
             return Ok(scopes_by_id);
         }
-        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
         let sql = format!(
             "SELECT learning_id, kind, value FROM learning_scopes
-             WHERE learning_id IN ({placeholders})
-             ORDER BY learning_id, kind, value"
+             WHERE learning_id IN ({})
+             ORDER BY learning_id, kind, value",
+            placeholders(ids.len())
         );
         let refs: Vec<&dyn rusqlite::ToSql> =
             ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
@@ -811,21 +806,16 @@ fn scope_hits(learning: &Learning, scope: &AuditScope, languages: &[String]) -> 
         return true;
     }
     for kind in [ScopeKind::Project, ScopeKind::Language, ScopeKind::Glob] {
-        let mut rows = learning
-            .scopes
-            .iter()
-            .filter(|one| one.kind == kind)
-            .peekable();
-        if rows.peek().is_none() {
+        let mut rows = learning.scopes.iter().filter(|one| one.kind == kind);
+        if rows.clone().next().is_none() {
             continue;
         }
-        let matched = rows.any(|one| match kind {
+        if !rows.any(|one| match kind {
             ScopeKind::Project => one.value == scope.identity.value(),
-            ScopeKind::Language => languages.iter().any(|language| language == &one.value),
+            ScopeKind::Language => languages.contains(&one.value),
             ScopeKind::Glob => scope.diff.matches_glob(&one.value),
             ScopeKind::Global => true,
-        });
-        if !matched {
+        }) {
             return false;
         }
     }
@@ -1020,15 +1010,6 @@ fn parse_outcome(outcome: &str) -> Result<Outcome> {
 
 #[cfg(test)]
 mod tests {
-    /// A learning with a scope, because a scope is required and most of
-    /// these tests are about something else. The tests that are about the
-    /// requirement build a `NewLearning` directly.
-    fn scoped(title: &str, rule: &str, rationale: &str) -> NewLearning {
-        let mut learning = NewLearning::new(title, rule, rationale);
-        learning.scopes = vec![Scope::global()];
-        learning
-    }
-
     use super::*;
     use crate::audit::{FindingsInput, IncomingFinding, Outcome};
     use crate::diff::Diff;
@@ -1037,6 +1018,15 @@ mod tests {
     use crate::repo::RepoIdentity;
     use rusqlite::trace::{TraceEvent, TraceEventCodes};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A learning with a scope, because a scope is required and most of
+    /// these tests are about something else. The tests that are about the
+    /// requirement build a `NewLearning` directly.
+    fn scoped(title: &str, rule: &str, rationale: &str) -> NewLearning {
+        let mut learning = NewLearning::new(title, rule, rationale);
+        learning.scopes = vec![Scope::global()];
+        learning
+    }
 
     static QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -2193,12 +2183,12 @@ mod tests {
         assert_eq!(titles, vec!["api rule".to_string()]);
 
         let _guard = set_candidate_paths(&scope.diff.paths);
-        let (ids, _) = store.filtered_active_learnings(&scope).unwrap();
+        let learnings = store.filtered_active_learnings(&scope).unwrap();
         assert_eq!(
-            ids.len(),
+            learnings.len(),
             1,
             "the SQL filter must not fetch the 5,000 web-only rules, got {}",
-            ids.len()
+            learnings.len()
         );
     }
 
