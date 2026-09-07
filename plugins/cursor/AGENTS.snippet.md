@@ -11,7 +11,10 @@ apply again.** A convention, a rejected pattern, a "never do X", an
 "always do Y next time". Call `writ_record` with a short title, the
 rule as an instruction, and the reason the rule exists. Name the failure
 the rule prevents: a rationale that says "it is cleaner" does not
-survive its first argument. Say the id back to the user afterwards.
+survive its first argument. For structural rules, also pass `matcher`
+and `matcher_kind`: prefer `ast_grep` when the scope includes a
+language, and use `regex` only as an escape hatch. Say the id back to
+the user afterwards.
 
 Do not record an instruction about only the task in hand. A learning
 must still be true next week. When the user says the lesson is already
