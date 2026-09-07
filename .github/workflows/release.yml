@@ -5,45 +5,75 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Default every job to read-only; only the GitHub release job needs to write.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: test
+  # Release tags must point at main, where branch protection already required the
+  # full PR suite. Repeating that suite on a tag adds a cold compile without
+  # testing a new commit, so keep this gate to release provenance and metadata.
+  validate:
+    name: validate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install the pinned toolchain
         uses: jdx/mise-action@v4
         with:
           install: true
+          install_args: rust
           cache: true
 
-      - name: Test
-        run: mise exec -- cargo test --workspace --locked
+      - name: Verify release provenance and version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # Tag checkouts do not necessarily have origin/main; fetch it explicitly.
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::tag $TAG does not point at a commit on main"
+            exit 1
+          fi
+
+          VERSION=$(mise exec -- cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "writ-cli") | .version')
+          if [[ "$TAG" != "v$VERSION" ]]; then
+            echo "::error::tag $TAG does not match workspace version $VERSION"
+            exit 1
+          fi
 
   nix:
     name: nix
-    needs: test
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # nix-installer-action does not use OIDC; this gate only reads the checkout.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
 
       - uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Check Nix package build
+      - name: Build and smoke-test the Nix package
         run: ./scripts/check-nix-build.sh
 
   build:
     name: build ${{ matrix.artifact }}
-    needs: test
+    needs: validate
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -55,7 +85,7 @@ jobs:
             artifact: writ-darwin-arm64
             binary: writ
             strip: true
-          - runner: macos-13
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             artifact: writ-darwin-amd64
             binary: writ
@@ -82,7 +112,18 @@ jobs:
         uses: jdx/mise-action@v4
         with:
           install: true
+          install_args: rust
           cache: true
+
+      - name: Install Rust target
+        run: mise exec -- rustup target add ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # rust-cache already keys on OS and Rust; these keep matrix targets
+          # isolated while allowing an exact hit when a tag run is retried.
+          shared-key: release-build-${{ matrix.runner }}-${{ matrix.target }}
 
       - name: Build writ
         run: mise exec -- cargo build --release --locked --bin writ --target ${{ matrix.target }}
@@ -110,6 +151,8 @@ jobs:
     needs: [build, nix]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - name: Download binaries
         uses: actions/download-artifact@v8
@@ -221,17 +264,15 @@ jobs:
         uses: jdx/mise-action@v4
         with:
           install: true
+          install_args: rust
           cache: true
 
-      - name: Verify tag matches package version
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          VERSION=$(mise exec -- cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "writ-cli") | .version')
-          if [[ "$TAG" != "v$VERSION" ]]; then
-            echo "tag $TAG does not match workspace version $VERSION" >&2
-            exit 1
-          fi
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Stable across crates.io publish retries; rust-cache adds the OS,
+          # toolchain, and Cargo manifest/lockfile hashes to this shared key.
+          shared-key: release-workspace
 
       - name: Publish writ-core
         run: mise exec -- cargo publish --locked -p writ-core
