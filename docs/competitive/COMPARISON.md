@@ -16,3 +16,23 @@ Objective, per-tool notes live in `vs-<slug>.md`. Competitor cells are left as
 | Multi-agent host neutrality | MCP server plus `writ install` for Claude Code, Codex, Cursor, and OpenCode; host-specific gate protocols emitted by `--hook`. writ never calls a model itself. | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | Open source | Yes; source available under the project license. | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | Pricing posture | Free, self-hosted local tool; no paid tiers or accounts planned for the core tool. | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+
+## Suggested matrix values from per-tool research
+
+The following are proposed values for the `mem0` column, pending synthesis.
+They should be reconciled with the full matrix format before the matrix is
+marked final.
+
+| Dimension | Suggested value for mem0 |
+|---|---|
+| Local-first / data leaves machine | Library and OpenMemory MCP can run locally; self-hosted keeps data on own infrastructure; managed cloud stores data with mem0. Not local-only by design. |
+| Durable rules with rationale | Stores LLM-extracted facts/preferences, not human-authored rules with required rationale. |
+| Human approve before active | No explicit `proposed → active` approval gate; memories enter retrieval once added. |
+| Scope model | Multi-tenant scoping by `user_id`, `run_id`, `agent_id`, `org_id`; not rule-level applicability scopes like project/language/glob. |
+| Diff-time selection / audit | Retrieval by semantic + BM25 + entity similarity to the current query; not a diff-time rule selection or review prompt. |
+| Prune / archive | ADD-only extraction with memory-decay soft re-ranking; documented archival equivalent to `writ archive` not confirmed. |
+| UI for collection | Dashboard for browsing and managing memories; local dashboard for OpenMemory MCP. |
+| Terminal findings | Not a terminal findings tool; it is a retrieval layer feeding the agent context. |
+| Multi-agent host neutrality | Broad SDK/framework integrations plus MCP server for Claude Code, Cursor, Codex, Windsurf, OpenCode. |
+| Open source | Yes; Apache 2.0 open-source library/server plus optional managed cloud. |
+| Pricing posture | Freemium managed cloud (free Hobby → $249+/mo Pro/Enterprise) plus free self-hosted open source. |
