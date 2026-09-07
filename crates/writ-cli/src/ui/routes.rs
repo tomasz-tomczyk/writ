@@ -8,7 +8,7 @@ use rust_embed::RustEmbed;
 
 use crate::ui::AppState;
 use crate::ui::actions;
-use crate::ui::pages::{collection, detail, health, inbox, layout};
+use crate::ui::pages::{collection, detail, layout};
 
 #[derive(RustEmbed)]
 #[folder = "assets/"]
@@ -88,29 +88,29 @@ async fn root(State(state): State<AppState>) -> Response {
         Err(error) => return layout::error_response(error),
     };
     let target = if proposed > 0 {
-        "/inbox"
+        "/collection?view=review"
     } else {
         "/collection"
     };
     with_protocol_header(
         Response::builder()
             .status(StatusCode::FOUND)
-            .header(header::LOCATION, HeaderValue::from_static(target))
+            .header(
+                header::LOCATION,
+                HeaderValue::try_from(target).expect("redirect target is ascii"),
+            )
             .body(axum::body::Body::empty())
             .unwrap(),
     )
 }
 
-async fn inbox(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    match inbox::render(&state) {
-        Ok(body) if layout::is_htmx(&headers) => layout::fragment(body.as_str()),
-        Ok(body) => layout::render(&state, "Inbox", body.as_str()),
-        Err(error) => layout::error_response(error),
-    }
+async fn inbox() -> Response {
+    redirect("/collection?view=review")
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct CollectionQuery {
+    view: Option<String>,
     q: Option<String>,
     sort: Option<String>,
     dir: Option<String>,
@@ -126,6 +126,7 @@ async fn collection(
     let projects = projects_from_raw(raw.as_deref());
     match collection::render(
         &state,
+        query.view.as_deref(),
         query.q.as_deref(),
         query.sort.as_deref(),
         query.dir.as_deref(),
@@ -199,12 +200,18 @@ fn hex_val(byte: u8) -> Option<u8> {
     }
 }
 
-async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    match health::render(&state) {
-        Ok(body) if layout::is_htmx(&headers) => layout::fragment(body.as_str()),
-        Ok(body) => layout::render(&state, "Health", body.as_str()),
-        Err(error) => layout::error_response(error),
-    }
+async fn health() -> Response {
+    redirect("/collection?view=needs-attention")
+}
+
+fn redirect(target: &'static str) -> Response {
+    with_protocol_header(
+        Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::LOCATION, HeaderValue::from_static(target))
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
 }
 
 async fn assets(Path(path): Path<String>) -> Response {

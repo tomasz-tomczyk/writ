@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
 
-use writ_core::{Error, Learning, ListFilter, Scope, ScopeKind};
+use writ_core::{Error, Learning, ListFilter, Scope, ScopeKind, Status};
 
 use crate::ui::AppState;
-use crate::ui::pages::layout::{escape, project_repo_name, scope_chip, with_store};
+use crate::ui::pages::layout::{count_proposed, escape, project_repo_name, scope_chip, with_store};
+use crate::ui::pages::{health, inbox};
 
 /// Sentinel for learnings that carry no `project:` scope.
 const PROJECT_NONE: &str = "_none";
@@ -13,24 +14,120 @@ const PROJECT_NONE: &str = "_none";
 const SWAP: &str = r##" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true""##;
 
 struct Params<'a> {
+    view: View,
     q: Option<&'a str>,
     sort: Option<&'a str>,
     dir: &'a str,
-    status: Option<&'a str>,
     projects: &'a [String],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum View {
+    Active,
+    Review,
+    NeedsAttention,
+    Archive,
+    All,
+}
+
+impl View {
+    fn from_query(view: Option<&str>, legacy_status: Option<&str>) -> Self {
+        match view.or(legacy_status) {
+            Some("review" | "proposed") => Self::Review,
+            Some("needs-attention") => Self::NeedsAttention,
+            Some("archive" | "archived") => Self::Archive,
+            Some("all") => Self::All,
+            _ => Self::Active,
+        }
+    }
+
+    fn param(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Review => "review",
+            Self::NeedsAttention => "needs-attention",
+            Self::Archive => "archive",
+            Self::All => "all",
+        }
+    }
+
+    fn status(self) -> Option<Status> {
+        match self {
+            Self::Active => Some(Status::Active),
+            Self::Archive => Some(Status::Archived),
+            Self::All => None,
+            Self::Review | Self::NeedsAttention => unreachable!("rendered as dedicated views"),
+        }
+    }
 }
 
 pub fn render(
     state: &AppState,
+    view_filter: Option<&str>,
     q: Option<&str>,
     sort: Option<&str>,
     dir: Option<&str>,
-    status_filter: Option<&str>,
+    legacy_status: Option<&str>,
+    project_filter: &[String],
+) -> Result<String, Error> {
+    render_with_notice(
+        state,
+        view_filter,
+        q,
+        sort,
+        dir,
+        legacy_status,
+        project_filter,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_with_notice(
+    state: &AppState,
+    view_filter: Option<&str>,
+    q: Option<&str>,
+    sort: Option<&str>,
+    dir: Option<&str>,
+    legacy_status: Option<&str>,
+    project_filter: &[String],
+    notice: Option<&str>,
+) -> Result<String, Error> {
+    let view = View::from_query(view_filter, legacy_status);
+    let proposed_count = count_proposed(state)?;
+    let attention_count = health::count(state)?;
+    let content = match view {
+        View::Review => inbox::render(state)?,
+        View::NeedsAttention => health::render(state)?,
+        View::Active | View::Archive | View::All => {
+            render_table(state, view, q, sort, dir, project_filter)?
+        }
+    };
+
+    let mut html = String::from(r#"<div id="collection-body">"#);
+    html.push_str(&mode_chips(view, proposed_count, attention_count));
+    if let Some(notice) = notice {
+        html.push_str(&format!(
+            r#"<p class="flash" role="status" aria-live="polite">{}</p>"#,
+            escape(notice)
+        ));
+    }
+    html.push_str(&content);
+    html.push_str("</div>");
+    Ok(html)
+}
+
+fn render_table(
+    state: &AppState,
+    view: View,
+    q: Option<&str>,
+    sort: Option<&str>,
+    dir: Option<&str>,
     project_filter: &[String],
 ) -> Result<String, Error> {
     with_store(state, |store| {
         let filter = ListFilter {
-            status: status_filter.and_then(|s| if s == "all" { None } else { s.parse().ok() }),
+            status: view.status(),
             search: q.filter(|s| !s.is_empty()).map(String::from),
             ..Default::default()
         };
@@ -63,19 +160,17 @@ pub fn render(
         });
 
         let params = Params {
+            view,
             q,
             sort: Some(sort_field),
             dir: sort_dir,
-            status: status_filter,
             projects: project_filter,
         };
 
         let result_count = rows.len();
-        let mut html = String::from(
-            r#"<div id="collection-body"><section class="collection-ledger"><div class="collection-controls">"#,
-        );
+        let mut html =
+            String::from(r#"<section class="collection-ledger"><div class="collection-controls">"#);
         html.push_str(&search_form(&params));
-        html.push_str(&status_chips(&params));
         html.push_str(&format!(
             r#"<span class="result-count">{} {}</span></div>"#,
             result_count,
@@ -89,7 +184,7 @@ pub fn render(
         if rows.is_empty() {
             html.push_str(&crate::ui::pages::layout::ledger_empty(
                 "No learnings match",
-                "Try a different search, status, or project filter.",
+                "Try a different search, mode, or project filter.",
             ));
             if !available_projects.is_empty() || has_no_project {
                 html.push_str(r#"<div class="project-filter-empty">"#);
@@ -100,7 +195,7 @@ pub fn render(
                 ));
                 html.push_str("</div>");
             }
-            html.push_str("</section></div>");
+            html.push_str("</section>");
             return Ok(html);
         }
 
@@ -116,8 +211,8 @@ pub fn render(
             has_no_project,
         ));
         html.push_str(r#"<th scope="col">Mode</th>"#);
-        html.push_str(&sort_link("Hits", "hit", &params));
-        html.push_str(&sort_link("Last used", "last_used", &params));
+        html.push_str(&sort_link("Findings", "hit", &params));
+        html.push_str(&sort_link("Last selected", "last_used", &params));
         html.push_str(&sort_link("Status", "status", &params));
         html.push_str("</tr></thead><tbody>");
 
@@ -126,7 +221,7 @@ pub fn render(
             let mode = if row.blocking { "blocking" } else { "advisory" };
 
             html.push_str("<tr>");
-            html.push_str(&title_cell(&row.id, &row.title, &row.scopes));
+            html.push_str(&title_cell(&row.id, &row.title, &row.scopes, view.param()));
             html.push_str(&project_cell(&row.scopes));
             html.push_str(&format!(
                 "<td><span class=\"mode-badge {}\">{}</span></td>",
@@ -141,7 +236,7 @@ pub fn render(
             ));
             html.push_str("</tr>");
         }
-        html.push_str("</tbody></table></div></section></div>");
+        html.push_str("</tbody></table></div></section>");
         Ok(html)
     })
 }
@@ -202,39 +297,43 @@ fn search_form(params: &Params<'_>) -> String {
     let value = params.q.map_or(String::new(), escape);
     let mut html = format!(
         r#"<form method="get" action="/collection" hx-get="/collection"{SWAP} class="search search-form" role="search">
-             <input class="form-control search-input" type="search" name="q" value="{value}" placeholder="Search learnings, rationales, scopes…" aria-label="Search learnings">"#
+             <input class="form-control search-input" type="search" name="q" value="{value}" placeholder="Search title, rule, and rationale…" aria-label="Search learnings">"#
     );
     html.push_str(&hidden_state_fields(params, true));
     html.push_str(r#"<button class="btn search-button" type="submit">Search</button></form>"#);
     html
 }
 
-fn status_chips(params: &Params<'_>) -> String {
+fn mode_chips(selected: View, proposed_count: usize, attention_count: usize) -> String {
     let mut html = String::from(
-        r#"<div class="filters filter-chips" role="group" aria-label="Filter by status">"#,
+        r#"<nav class="collection-modes filters filter-chips" aria-label="Collection modes">"#,
     );
-    let selected = params.status.unwrap_or("all");
-    for (label, param) in [
-        ("Active", "active"),
-        ("Proposed", "proposed"),
-        ("Archived", "archived"),
-        ("All", "all"),
+    for (label, view, count) in [
+        ("Active", View::Active, None),
+        ("Review", View::Review, Some(proposed_count)),
+        (
+            "Needs attention",
+            View::NeedsAttention,
+            Some(attention_count),
+        ),
+        ("Archive", View::Archive, None),
+        ("All", View::All, None),
     ] {
-        let current_attr = if selected == param {
-            r#" aria-current="true""#
+        let current_attr = if selected == view {
+            r#" aria-current="page""#
         } else {
             ""
         };
-        let mut href = format!("/collection?status={param}");
-        append_q(&mut href, params.q);
-        append_sort(&mut href, params.sort, params.dir);
-        append_projects(&mut href, params.projects);
+        let href = format!("/collection?view={}", view.param());
         let href = escape(&href);
+        let count = count.map_or_else(String::new, |count| {
+            format!(r#" <span class="mode-count">{count}</span>"#)
+        });
         html.push_str(&format!(
-            "<a href=\"{href}\" hx-get=\"{href}\"{SWAP} class=\"filter filter-chip\"{current_attr}>{label}</a>"
+            "<a href=\"{href}\" hx-get=\"{href}\"{SWAP} class=\"filter filter-chip collection-mode\"{current_attr}>{label}{count}</a>"
         ));
     }
-    html.push_str("</div>");
+    html.push_str("</nav>");
     html
 }
 
@@ -247,7 +346,7 @@ fn sort_link(label: &str, field: &str, params: &Params<'_>) -> String {
     };
     let mut href = format!("/collection?sort={field}&dir={next_dir}");
     append_q(&mut href, params.q);
-    append_status(&mut href, params.status);
+    append_view(&mut href, params.view);
     append_projects(&mut href, params.projects);
     let href = escape(&href);
     let direction = if active {
@@ -280,7 +379,7 @@ fn project_heading(params: &Params<'_>, available: &[String], has_no_project: bo
     };
     let mut href = format!("/collection?sort=project&dir={next_dir}");
     append_q(&mut href, params.q);
-    append_status(&mut href, params.status);
+    append_view(&mut href, params.view);
     append_projects(&mut href, params.projects);
     let href = escape(&href);
     let direction = if active {
@@ -377,12 +476,10 @@ fn hidden_state_fields(params: &Params<'_>, include_projects: bool) -> String {
         r#"<input type="hidden" name="dir" value="{}">"#,
         escape(params.dir)
     ));
-    if let Some(status) = params.status {
-        html.push_str(&format!(
-            r#"<input type="hidden" name="status" value="{}">"#,
-            escape(status)
-        ));
-    }
+    html.push_str(&format!(
+        r#"<input type="hidden" name="view" value="{}">"#,
+        params.view.param()
+    ));
     if include_projects {
         for project in params.projects {
             html.push_str(&format!(
@@ -404,16 +501,8 @@ fn append_q(href: &mut String, q: Option<&str>) {
     }
 }
 
-fn append_status(href: &mut String, status: Option<&str>) {
-    if let Some(status) = status {
-        href.push_str(&format!("&status={}", urlencode(status)));
-    }
-}
-
-fn append_sort(href: &mut String, sort: Option<&str>, dir: &str) {
-    if let Some(sort) = sort {
-        href.push_str(&format!("&sort={}&dir={}", urlencode(sort), urlencode(dir)));
-    }
+fn append_view(href: &mut String, view: View) {
+    href.push_str(&format!("&view={}", view.param()));
 }
 
 fn append_projects(href: &mut String, projects: &[String]) {
@@ -422,10 +511,11 @@ fn append_projects(href: &mut String, projects: &[String]) {
     }
 }
 
-fn title_cell(id: &str, title: &str, scopes: &[Scope]) -> String {
+fn title_cell(id: &str, title: &str, scopes: &[Scope], origin: &str) -> String {
     let mut html = format!(
-        "<td class=\"title-cell\"><a class=\"title-link\" href=\"/learnings/{}\">{}</a>",
+        "<td class=\"title-cell\"><a class=\"title-link\" href=\"/learnings/{}?from={}\">{}</a>",
         escape(id),
+        escape(origin),
         escape(title)
     );
     let has_meta = scopes.iter().any(|scope| scope.kind != ScopeKind::Project);

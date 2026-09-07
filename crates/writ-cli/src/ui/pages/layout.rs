@@ -9,14 +9,11 @@ use crate::ui::UI_PROTOCOL_VERSION;
 
 /// Render a full HTML page inside the shared layout.
 pub fn render(state: &AppState, title: &str, body: &str) -> Response {
-    let badge = match inbox_badge(state) {
+    let badge = match review_badge(state) {
         Ok(badge) => badge,
         Err(error) => return error_response(error),
     };
     let store_path = escape(&state.db.display().to_string());
-    let inbox_current = current_page(title, "Inbox");
-    let collection_current = current_page(title, "Collection");
-    let health_current = current_page(title, "Health");
     let lede = page_lede(title);
 
     let html = format!(
@@ -44,19 +41,10 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
         </span>
         <span>writ</span>
       </a>
-      <nav aria-label="Primary">
-        <ul class="underline-nav">
-          <li class="underline-nav__item">
-            <a href="/inbox" class="nav-link underline-nav__link"{inbox_current}>Inbox{badge}</a>
-          </li>
-          <li class="underline-nav__item">
-            <a href="/collection" class="nav-link underline-nav__link"{collection_current}>Collection</a>
-          </li>
-          <li class="underline-nav__item">
-            <a href="/health" class="nav-link underline-nav__link"{health_current}>Health</a>
-          </li>
-        </ul>
+      <nav aria-label="Collection" class="collection-nav">
+        <a href="/collection" class="nav-link collection-nav__home" aria-current="page">Collection</a>
       </nav>
+      <a href="/collection?view=review" class="btn review-button">Review proposals{badge}</a>
     </div>
   </header>
   <main class="page">
@@ -75,9 +63,6 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
 </html>"#,
         theme_color = "#ffffff",
         title = title,
-        inbox_current = inbox_current,
-        collection_current = collection_current,
-        health_current = health_current,
         badge = badge,
         lede = lede,
         body = body,
@@ -87,20 +72,9 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
     with_version(Html(html).into_response())
 }
 
-fn current_page(title: &str, page: &str) -> &'static str {
-    if title == page {
-        r#" aria-current="page""#
-    } else {
-        ""
-    }
-}
-
 fn page_lede(title: &str) -> &'static str {
     match title {
-        "Inbox" => "Review proposed learnings before they enter an audit.",
-        "Collection" => "Browse the rules your agents have learned and where they apply.",
-        "Health" => "Find active learnings that may need maintenance.",
-        "Detail" => "Edit this learning, its scope, and its supporting evidence.",
+        "Collection" => "Browse, review, and maintain the rules your agents have learned.",
         _ => "",
     }
 }
@@ -140,7 +114,7 @@ pub fn is_htmx(headers: &HeaderMap) -> bool {
 ///
 /// The element is always present, so an out-of-band swap has a target
 /// even when the count reaches zero. Empty content hides it in CSS.
-pub fn inbox_badge(state: &AppState) -> Result<String, Error> {
+pub fn review_badge(state: &AppState) -> Result<String, Error> {
     let count = count_proposed(state)?;
     let text = if count > 0 {
         count.to_string()
@@ -148,7 +122,7 @@ pub fn inbox_badge(state: &AppState) -> Result<String, Error> {
         String::new()
     };
     Ok(format!(
-        r#"<span class="badge counter" id="inbox-badge">{text}</span>"#
+        r#"<span class="badge counter" id="review-badge">{text}</span>"#
     ))
 }
 
@@ -156,7 +130,7 @@ pub fn inbox_badge(state: &AppState) -> Result<String, Error> {
 ///
 /// A row that moves out of the Inbox must move the count with it. A stale
 /// count is a small lie.
-pub fn inbox_badge_oob(state: &AppState) -> Result<String, Error> {
+pub fn review_badge_oob(state: &AppState) -> Result<String, Error> {
     let count = count_proposed(state)?;
     let text = if count > 0 {
         count.to_string()
@@ -164,7 +138,7 @@ pub fn inbox_badge_oob(state: &AppState) -> Result<String, Error> {
         String::new()
     };
     Ok(format!(
-        r#"<span class="badge counter" id="inbox-badge" hx-swap-oob="true">{text}</span>"#
+        r#"<span class="badge counter" id="review-badge" hx-swap-oob="true">{text}</span>"#
     ))
 }
 

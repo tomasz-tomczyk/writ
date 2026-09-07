@@ -1,5 +1,5 @@
 use axum::Form;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use writ_core::{
@@ -15,6 +15,10 @@ use crate::ui::pages::layout::{escape, with_store};
 const SWAP: &str = r##" hx-target="#detail-body" hx-swap="outerHTML""##;
 
 pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
+    render_with_origin(state, id, None)
+}
+
+fn render_with_origin(state: &AppState, id: &str, origin: Option<&str>) -> Result<String, Error> {
     with_store(state, |store| {
         let learning = store.get(id)?;
         let exemplars = store.exemplars_of(id)?;
@@ -25,7 +29,11 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
         let good_snippet = good.map(|e| e.snippet.as_str()).unwrap_or("");
         let bad_snippet = bad.map(|e| e.snippet.as_str()).unwrap_or("");
 
+        let (back_href, back_label, origin_param) = origin_context(origin);
         let mut html = String::from(r#"<div id="detail-body">"#);
+        html.push_str(&format!(
+            r#"<a class="detail-back" href="{back_href}">Back to {back_label}</a>"#
+        ));
         html.push_str("<div class=\"detail-meta\">");
         html.push_str(&format!(
             "<span class=\"status-badge {}\">{}</span>",
@@ -47,8 +55,9 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
         ));
         html.push_str("</div>");
         html.push_str(&format!(
-            r#"<form method="post" action="/learnings/{id}" hx-post="/learnings/{id}"{SWAP} class="detail shell">"#,
-            id = escape(id)
+            r#"<form method="post" action="/learnings/{id}{origin_param}" hx-post="/learnings/{id}{origin_param}"{SWAP} class="detail shell">"#,
+            id = escape(id),
+            origin_param = origin_param,
         ));
         html.push_str("<div class=\"field\">");
         html.push_str("<label>Title</label>");
@@ -143,7 +152,7 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
 
         let archive = format!("/learnings/{}/archive", escape(id));
         html.push_str(&format!(
-            "<form method=\"post\" action=\"{archive}\" hx-post=\"{archive}\"{SWAP} class=\"danger-form shell\"><div><strong>Archive learning</strong><span>Remove it from selection while preserving its history.</span></div>"
+            "<form method=\"post\" action=\"{archive}{origin_param}\" hx-post=\"{archive}{origin_param}\"{SWAP} class=\"danger-form shell\"><div><strong>Archive learning</strong><span>Remove it from selection while preserving its history.</span></div>"
         ));
         html.push_str("<button type=\"submit\" class=\"danger\">Archive</button>");
         html.push_str("</form>");
@@ -211,6 +220,27 @@ fn render_finding_row(finding: &Finding) -> String {
     html
 }
 
+fn origin_context(origin: Option<&str>) -> (&'static str, &'static str, String) {
+    let (href, label, value) = match origin {
+        Some("review") => ("/collection?view=review", "Review", Some("review")),
+        Some("needs-attention") => (
+            "/collection?view=needs-attention",
+            "Needs attention",
+            Some("needs-attention"),
+        ),
+        Some("archive") => ("/collection?view=archive", "Archive", Some("archive")),
+        Some("all") => ("/collection?view=all", "All", Some("all")),
+        _ => ("/collection?view=active", "Active", Some("active")),
+    };
+    let param = value.map_or_else(String::new, |value| format!("?from={value}"));
+    (href, label, param)
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DetailQuery {
+    from: Option<String>,
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct SaveForm {
     title: String,
@@ -254,10 +284,15 @@ pub async fn get(
     Path(id): Path<String>,
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<DetailQuery>,
 ) -> Response {
-    match render(&state, &id) {
+    let title = match with_store(&state, |store| Ok(store.get(&id)?.title)) {
+        Ok(title) => title,
+        Err(error) => return layout::error_response(error),
+    };
+    match render_with_origin(&state, &id, query.from.as_deref()) {
         Ok(body) if layout::is_htmx(&headers) => layout::fragment(body.as_str()),
-        Ok(body) => layout::render(&state, "Detail", body.as_str()),
+        Ok(body) => layout::render(&state, &title, body.as_str()),
         Err(error) => layout::error_response(error),
     }
 }
@@ -266,6 +301,7 @@ pub async fn post(
     Path(id): Path<String>,
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<DetailQuery>,
     Form(fields): Form<Vec<(String, String)>>,
 ) -> Response {
     let form = SaveForm::from_fields(fields);
@@ -276,11 +312,16 @@ pub async fn post(
         store.update_learning_and_set_status(&id, &update, status)
     });
     match result {
-        Ok(()) if layout::is_htmx(&headers) => match render(&state, &id) {
-            Ok(body) => layout::fragment(body.as_str()),
-            Err(error) => layout::error_response(error),
-        },
-        Ok(()) => redirect(&format!("/learnings/{id}")),
+        Ok(()) if layout::is_htmx(&headers) => {
+            match render_with_origin(&state, &id, query.from.as_deref()) {
+                Ok(body) => layout::fragment(body.as_str()),
+                Err(error) => layout::error_response(error),
+            }
+        }
+        Ok(()) => redirect(&format!(
+            "/learnings/{id}{}",
+            origin_context(query.from.as_deref()).2
+        )),
         Err(error) => layout::error_response(error),
     }
 }
@@ -293,19 +334,20 @@ pub async fn archive(
     Path(id): Path<String>,
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<DetailQuery>,
 ) -> Response {
     if let Err(error) = with_store(&state, |store| store.set_status(&id, Status::Archived)) {
         return layout::error_response(error);
     }
     if !layout::is_htmx(&headers) {
-        return redirect("/collection");
+        return redirect(origin_context(query.from.as_deref()).0);
     }
     let target = headers
         .get("hx-target")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     let body = match target {
-        "detail-body" => render(&state, &id),
+        "detail-body" => render_with_origin(&state, &id, query.from.as_deref()),
         _ => health::render(&state),
     };
     match body {

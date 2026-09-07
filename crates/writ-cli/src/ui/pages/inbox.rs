@@ -3,8 +3,8 @@ use writ_core::{Error, ExemplarKind, ListFilter, ScopeKind, Status};
 use crate::ui::AppState;
 use crate::ui::pages::layout::{escape, ledger_empty, scope_chip, with_store};
 
-/// The element every Inbox action swaps.
-const SWAP: &str = r##" hx-target="#inbox-list" hx-swap="outerHTML""##;
+/// Proposal actions redraw the Collection shell's current Review mode.
+const SWAP: &str = r##" hx-target="#collection-body" hx-swap="outerHTML""##;
 
 /// Render the Inbox page body.
 ///
@@ -21,8 +21,8 @@ pub fn render(state: &AppState) -> Result<String, Error> {
 
         if proposed.is_empty() {
             html.push_str(&ledger_empty(
-                "Inbox is empty",
-                "Every proposal is curated.",
+                "Review is complete",
+                "Every proposal has been curated. Return to Active to browse the collection.",
             ));
             html.push_str("</section></div>");
             return Ok(html);
@@ -39,7 +39,7 @@ pub fn render(state: &AppState) -> Result<String, Error> {
 
             html.push_str("<article class=\"proposal\">");
             html.push_str(&format!(
-                "<a class=\"proposal-open\" href=\"/learnings/{}\" aria-label=\"Open {}\"></a>",
+                "<a class=\"proposal-open\" href=\"/learnings/{}?from=review\" aria-label=\"Open {}\"></a>",
                 escape(&learning.id),
                 escape(&learning.title)
             ));
@@ -120,10 +120,10 @@ pub fn render(state: &AppState) -> Result<String, Error> {
             ));
             let reject = format!("/inbox/{}/reject", escape(&learning.id));
             html.push_str(&format!(
-                "<form method=\"post\" action=\"{reject}\" hx-post=\"{reject}\"{SWAP}><button type=\"submit\" class=\"btn danger\">Reject</button></form>"
+                "<form method=\"post\" action=\"{reject}\" hx-post=\"{reject}\"{SWAP}><button type=\"submit\" class=\"btn danger\">Archive proposal</button></form>"
             ));
             html.push_str(&format!(
-                "<a href=\"/learnings/{}\" class=\"btn button\">Edit</a>",
+                "<a href=\"/learnings/{}?from=review\" class=\"btn button\">Edit</a>",
                 escape(&learning.id)
             ));
             html.push_str("</div>");
