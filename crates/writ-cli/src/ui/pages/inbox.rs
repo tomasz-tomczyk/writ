@@ -20,7 +20,7 @@ pub fn render(state: &AppState) -> Result<String, Error> {
 
         if proposed.is_empty() {
             html.push_str(
-                r#"<div class="shell empty">Inbox is empty. Every proposal is curated.</div>"#,
+                r#"<div class="shell empty"><strong>Inbox is empty</strong><span>Every proposal is curated.</span></div>"#,
             );
             html.push_str("</div>");
             return Ok(html);
@@ -30,20 +30,43 @@ pub fn render(state: &AppState) -> Result<String, Error> {
             let exemplars = store.exemplars_of(&learning.id)?;
 
             html.push_str("<article class=\"proposal\">");
+            html.push_str("<div class=\"proposal-header\"><div>");
             html.push_str(&format!("<h2>{}</h2>", escape(&learning.title)));
+            html.push_str("<div class=\"proposal-meta\">");
+            html.push_str(r#"<span class="status-badge proposed">proposed</span>"#);
             html.push_str(&format!(
-                "<p class=\"rule\"><strong>Rule:</strong> {}</p>",
+                "<span class=\"mode-badge {}\">{}</span>",
+                if learning.blocking {
+                    "blocking"
+                } else {
+                    "advisory"
+                },
+                if learning.blocking {
+                    "blocking"
+                } else {
+                    "advisory"
+                }
+            ));
+            for scope in &learning.scopes {
+                html.push_str(&format!(
+                    "<span class=\"chip scope\">{}</span>",
+                    escape(&scope.to_string())
+                ));
+            }
+            html.push_str("</div></div></div>");
+            html.push_str(&format!(
+                "<p class=\"rule\"><strong>Rule</strong><span>{}</span></p>",
                 escape(&learning.rule)
             ));
             html.push_str(&format!(
-                "<p class=\"rationale\"><strong>Why:</strong> {}</p>",
+                "<p class=\"rationale\"><strong>Why</strong><span>{}</span></p>",
                 escape(&learning.rationale)
             ));
 
             if let (Some(kind), Some(pattern)) = (learning.matcher_kind, learning.matcher.as_ref())
             {
                 html.push_str(&format!(
-                    "<p><span class=\"badge matcher\">{}: {}</span></p>",
+                    "<p class=\"matcher-row\"><span class=\"badge matcher\">{}: {}</span></p>",
                     escape(kind.as_str()),
                     escape(pattern)
                 ));

@@ -14,6 +14,10 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
         Err(error) => return error_response(error),
     };
     let store_path = escape(&state.db.display().to_string());
+    let inbox_current = current_page(title, "Inbox");
+    let collection_current = current_page(title, "Collection");
+    let health_current = current_page(title, "Health");
+    let lede = page_lede(title);
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -21,32 +25,69 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="{theme_color}">
   <title>{title} · writ</title>
   <link rel="stylesheet" href="/assets/app.css">
   <script src="/assets/htmx.min.js"></script>
 </head>
 <body>
-  <header>
-    <nav>
-      <a href="/" class="brand">writ</a>
-      <a href="/inbox">Inbox{badge}</a>
-      <a href="/collection">Collection</a>
-      <a href="/health">Health</a>
+  <header class="app-header">
+    <nav class="app-header__inner" aria-label="Primary">
+      <a href="/" class="brand" aria-label="writ home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>writ</span>
+      </a>
+      <div class="nav-links">
+        <a href="/inbox" class="nav-link"{inbox_current}>Inbox{badge}</a>
+        <a href="/collection" class="nav-link"{collection_current}>Collection</a>
+        <a href="/health" class="nav-link"{health_current}>Health</a>
+      </div>
     </nav>
   </header>
-  <main>
-    <h1>{title}</h1>
+  <main class="page">
+    <div class="page-header">
+      <h1>{title}</h1>
+      <p>{lede}</p>
+    </div>
     {body}
   </main>
   <footer class="store">
-    <span class="label">store</span>
+    <span class="label">Store</span>
     <code>{store_path}</code>
   </footer>
 </body>
-</html>"#
+</html>"#,
+        theme_color = "#ffffff",
+        title = title,
+        inbox_current = inbox_current,
+        collection_current = collection_current,
+        health_current = health_current,
+        badge = badge,
+        lede = lede,
+        body = body,
+        store_path = store_path,
     );
 
     with_version(Html(html).into_response())
+}
+
+fn current_page(title: &str, page: &str) -> &'static str {
+    if title == page {
+        r#" aria-current="page""#
+    } else {
+        ""
+    }
+}
+
+fn page_lede(title: &str) -> &'static str {
+    match title {
+        "Inbox" => "Review proposed learnings before they enter an audit.",
+        "Collection" => "Browse the rules your agents have learned and where they apply.",
+        "Health" => "Find active learnings that may need maintenance.",
+        "Detail" => "Edit this learning, its scope, and its supporting evidence.",
+        _ => "",
+    }
 }
 
 /// Render one fragment, for an htmx swap.

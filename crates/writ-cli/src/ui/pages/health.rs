@@ -50,13 +50,15 @@ pub fn render(state: &AppState) -> Result<String, Error> {
         }
 
         if rows.is_empty() {
-            return Ok(r#"<div id="health-body"><div class="shell empty">Health is clear. Every active rule has been reached and applied within the last 90 days.</div></div>"#.into());
+            return Ok(r#"<div id="health-body"><div class="shell empty"><strong>Health is clear</strong><span>Every active rule has been reached and applied within the last 90 days.</span></div></div>"#.into());
         }
 
         let mut ordered: Vec<HealthRow> = rows.into_values().collect();
         ordered.sort_by(|left, right| left.learning.title.cmp(&right.learning.title));
 
-        let mut html = String::from(r#"<div id="health-body"><table class="health">"#);
+        let mut html = String::from(
+            r#"<div id="health-body"><div class="table-shell"><table class="health">"#,
+        );
         html.push_str("<thead><tr><th>Learning</th><th>Bucket</th><th>Selected</th><th>Applied</th><th></th></tr></thead><tbody>");
         for row in ordered {
             let class = if row.unused && row.never_applied {
@@ -72,12 +74,18 @@ pub fn render(state: &AppState) -> Result<String, Error> {
                 escape(&learning.id),
                 escape(&learning.title)
             ));
-            html.push_str(&format!("<td>{}</td>", escape(bucket_label)));
             html.push_str(&format!(
-                "<td>{}</td>",
-                learning.last_selected_at.as_deref().unwrap_or("—")
+                "<td><span class=\"badge attention\">{}</span></td>",
+                escape(bucket_label)
             ));
-            html.push_str(&format!("<td>{}</td>", learning.times_applied));
+            html.push_str(&format!(
+                "<td class=\"date\">{}</td>",
+                escape(learning.last_selected_at.as_deref().unwrap_or("—"))
+            ));
+            html.push_str(&format!(
+                "<td class=\"numeric\">{}</td>",
+                learning.times_applied
+            ));
             html.push_str("<td class=\"actions\">");
             let archive = format!("/health/{}/archive", escape(&learning.id));
             html.push_str(&format!(
@@ -94,7 +102,7 @@ pub fn render(state: &AppState) -> Result<String, Error> {
             ));
             html.push_str("</td></tr>");
         }
-        html.push_str("</tbody></table></div>");
+        html.push_str("</tbody></table></div></div>");
         Ok(html)
     })
 }
