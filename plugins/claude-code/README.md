@@ -28,8 +28,8 @@ configuration from `.mcp.json`, not from this plugin:
 { "mcpServers": { "writ": { "command": "writ", "args": ["mcp"] } } }
 ```
 
-That server exposes two tools, `writ_record` and `writ_audit`. Both are
-shells over the same code the CLI runs.
+That server exposes three tools, `writ_record`, `writ_audit`, and
+`writ_edit`. All are shells over the same code the CLI runs.
 
 Claude Code reads `CLAUDE.md` and not `AGENTS.md`. If your instructions
 live in `AGENTS.md`, bridge it with an `@AGENTS.md` import line or a

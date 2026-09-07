@@ -315,6 +315,7 @@ fn every_existing_command_leaves_no_telemetry_store_when_disabled() {
         vec!["list", "--format", "json"],
         vec!["show", id.as_str()],
         vec!["archive", id.as_str()],
+        vec!["edit", id.as_str(), "--title", "t"],
         vec!["telemetry"],
         vec!["telemetry", "show"],
         vec!["telemetry", "off"],
@@ -411,6 +412,10 @@ fn enabled_cli_paths_record_all_metrics_the_current_commands_can_observe() {
         )
         .assert_code(0);
 
+    sandbox
+        .run(&["edit", &second, "--title", "edited"])
+        .assert_code(0);
+
     let root = sandbox.repo("metrics", Some("https://github.com/owner/metrics.git"));
     std::fs::write(root.join("a.rs"), "fn main() { changed(); }\n").unwrap();
     std::fs::write(root.join("private.qqq"), "DIFF_CONTENT_SENTINEL\n").unwrap();
@@ -438,6 +443,7 @@ fn enabled_cli_paths_record_all_metrics_the_current_commands_can_observe() {
     for expected in [
         ("command", "record"),
         ("command", "audit"),
+        ("command", "edit"),
         ("surface", "cli"),
         ("exit_code", "0"),
         ("exit_code", "1"),
@@ -1660,6 +1666,12 @@ const EVERY_SUBCOMMAND: &[&[&str]] = &[
     &["audit"],
     &["show", "01234567-89ab-7def-8000-000000000000"],
     &["archive", "01234567-89ab-7def-8000-000000000000"],
+    &[
+        "edit",
+        "01234567-89ab-7def-8000-000000000000",
+        "--title",
+        "t",
+    ],
     &["ui", "--no-open"],
     &["mcp"],
     // `--print` so that a valid-config variant of this list can never
@@ -2727,11 +2739,267 @@ fn archiving_twice_is_still_archived() {
     assert_eq!(sandbox.learnings()[0]["status"], "archived");
 }
 
+// --- writ edit --------------------------------------------------------
+
+fn backdate_updated_at(sandbox: &Sandbox, id: &str) {
+    let conn = rusqlite::Connection::open(sandbox.db()).unwrap();
+    conn.execute(
+        "UPDATE learnings SET updated_at = '2000-01-01 00:00:00' WHERE id = ?1",
+        [id],
+    )
+    .unwrap();
+}
+
+#[test]
+fn editing_matcher_only_updates_matcher_fields_and_updated_at() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&[
+        "--scope",
+        "language:rust",
+        "--matcher",
+        "old",
+        "--matcher-kind",
+        "regex",
+        "--example-text",
+        "bad:old bad",
+        "--activate",
+    ]);
+    backdate_updated_at(&sandbox, &id);
+
+    let before: serde_json::Value =
+        serde_json::from_str(&sandbox.run(&["show", &id, "--format", "json"]).stdout).unwrap();
+
+    sandbox
+        .run(&[
+            "edit",
+            &id,
+            "--matcher",
+            "$A == $A",
+            "--matcher-kind",
+            "ast_grep",
+        ])
+        .assert_code(0);
+
+    let after: serde_json::Value =
+        serde_json::from_str(&sandbox.run(&["show", &id, "--format", "json"]).stdout).unwrap();
+
+    assert_eq!(after["learning"]["title"], before["learning"]["title"]);
+    assert_eq!(after["learning"]["rule"], before["learning"]["rule"]);
+    assert_eq!(
+        after["learning"]["rationale"],
+        before["learning"]["rationale"]
+    );
+    assert_eq!(
+        after["learning"]["blocking"],
+        before["learning"]["blocking"]
+    );
+    assert_eq!(after["learning"]["scopes"], before["learning"]["scopes"]);
+    assert_eq!(
+        after["exemplars"].as_array().unwrap().len(),
+        before["exemplars"].as_array().unwrap().len()
+    );
+    assert_eq!(
+        after["exemplars"][0]["snippet"],
+        before["exemplars"][0]["snippet"]
+    );
+    assert_eq!(
+        after["exemplars"][0]["kind"],
+        before["exemplars"][0]["kind"]
+    );
+    assert_eq!(after["learning"]["matcher"], "$A == $A");
+    assert_eq!(after["learning"]["matcher_kind"], "ast_grep");
+    assert!(
+        after["learning"]["updated_at"].as_str().unwrap()
+            > before["learning"]["updated_at"].as_str().unwrap(),
+        "updated_at must move: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn omitting_matcher_leaves_it_untouched() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&[
+        "--matcher",
+        "unwrap_me",
+        "--matcher-kind",
+        "regex",
+        "--activate",
+    ]);
+
+    sandbox
+        .run(&["edit", &id, "--title", "new title"])
+        .assert_code(0);
+
+    let after: serde_json::Value =
+        serde_json::from_str(&sandbox.run(&["show", &id, "--format", "json"]).stdout).unwrap();
+    assert_eq!(after["learning"]["matcher"], "unwrap_me");
+    assert_eq!(after["learning"]["matcher_kind"], "regex");
+    assert_eq!(after["learning"]["title"], "new title");
+}
+
+#[test]
+fn clear_matcher_removes_matcher_and_kind() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&[
+        "--matcher",
+        "unwrap_me",
+        "--matcher-kind",
+        "regex",
+        "--activate",
+    ]);
+
+    sandbox
+        .run(&["edit", &id, "--clear-matcher"])
+        .assert_code(0);
+
+    let after: serde_json::Value =
+        serde_json::from_str(&sandbox.run(&["show", &id, "--format", "json"]).stdout).unwrap();
+    assert!(after["learning"]["matcher"].is_null());
+    assert!(after["learning"]["matcher_kind"].is_null());
+}
+
+#[test]
+fn any_scope_replaces_the_full_set() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&["--scope", "language:rust", "--activate"]);
+
+    sandbox
+        .run(&["edit", &id, "--scope", "glob:**/*.rs"])
+        .assert_code(0);
+
+    let after: serde_json::Value =
+        serde_json::from_str(&sandbox.run(&["show", &id, "--format", "json"]).stdout).unwrap();
+    let scopes: Vec<&str> = after["learning"]["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(scopes, vec!["glob:**/*.rs"]);
+}
+
+#[test]
+fn editing_an_unknown_id_exits_five() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&[
+        "edit",
+        "01900000-0000-7000-8000-000000000000",
+        "--title",
+        "t",
+    ]);
+    output.assert_code(5);
+    assert!(
+        output.stderr.contains("no learning has id"),
+        "{}",
+        output.stderr
+    );
+}
+
+#[test]
+fn an_empty_rationale_in_edit_is_refused() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&[]);
+    let output = sandbox.run(&["edit", &id, "--rationale", "   "]);
+    output.assert_code(2);
+    assert!(output.stderr.contains("rationale"), "{}", output.stderr);
+}
+
+#[test]
+fn a_matcher_in_edit_needs_its_kind() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&[]);
+    let output = sandbox.run(&["edit", &id, "--matcher", "$A == $A"]);
+    output.assert_code(2);
+    assert!(output.stderr.contains("matcher-kind"), "{}", output.stderr);
+}
+
+#[test]
+fn activate_on_proposed_makes_it_active() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&[]);
+
+    sandbox.run(&["edit", &id, "--activate"]).assert_code(0);
+
+    let after: serde_json::Value =
+        serde_json::from_str(&sandbox.run(&["show", &id, "--format", "json"]).stdout).unwrap();
+    assert_eq!(after["learning"]["status"], "active");
+    assert!(!after["learning"]["activated_at"].is_null());
+}
+
+#[test]
+fn activate_on_archived_is_refused() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&["--activate"]);
+    sandbox.run(&["archive", &id]).assert_code(0);
+
+    let output = sandbox.run(&["edit", &id, "--activate"]);
+    output.assert_code(2);
+    assert!(output.stderr.contains("archived"), "{}", output.stderr);
+}
+
+#[test]
+fn edit_with_no_mutating_flags_is_refused() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&[]);
+
+    let output = sandbox.run(&["edit", &id]);
+    output.assert_code(2);
+    assert!(
+        output.stderr.contains("nothing to edit"),
+        "{}",
+        output.stderr
+    );
+}
+
+#[test]
+fn example_text_replaces_the_full_exemplar_set() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&["--example-text", "bad:old bad"]);
+
+    sandbox
+        .run(&["edit", &id, "--example-text", "good:let x = 1;"])
+        .assert_code(0);
+
+    let after: serde_json::Value =
+        serde_json::from_str(&sandbox.run(&["show", &id, "--format", "json"]).stdout).unwrap();
+    let exemplars = after["exemplars"].as_array().unwrap();
+    assert_eq!(exemplars.len(), 1);
+    assert_eq!(exemplars[0]["kind"], "good");
+    assert_eq!(exemplars[0]["snippet"], "let x = 1;");
+}
+
+#[test]
+fn blocking_and_advisory_can_be_toggled() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&["--advisory", "--activate"]);
+    assert_eq!(sandbox.learnings()[0]["blocking"], false);
+
+    sandbox.run(&["edit", &id, "--blocking"]).assert_code(0);
+    assert_eq!(sandbox.learnings()[0]["blocking"], true);
+
+    sandbox.run(&["edit", &id, "--advisory"]).assert_code(0);
+    assert_eq!(sandbox.learnings()[0]["blocking"], false);
+}
+
+#[test]
+fn global_with_another_scope_is_refused_in_edit() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.record(&["--scope", "language:rust"]);
+
+    let output = sandbox.run(&["edit", &id, "--scope", "global", "--scope", "language:rust"]);
+    output.assert_code(2);
+    assert!(
+        output.stderr.contains("cannot be combined"),
+        "{}",
+        output.stderr
+    );
+}
+
 // --- P8 and P7 ---------------------------------------------------------
 
-/// P8: every flag section 5 lists for these three commands is a real flag.
+/// P8: every flag section 5 lists for these four commands is a real flag.
 #[test]
-fn audit_show_and_archive_advertise_every_documented_flag() {
+fn audit_show_archive_and_edit_advertise_every_documented_flag() {
     let audit =
         String::from_utf8(writ().args(["audit", "--help"]).output().unwrap().stdout).unwrap();
     for flag in [
@@ -2747,12 +3015,32 @@ fn audit_show_and_archive_advertise_every_documented_flag() {
             "writ audit --help lacks {flag}:\n{audit}"
         );
     }
-    for command in ["show", "archive"] {
+    for command in ["show", "archive", "edit"] {
         let help =
             String::from_utf8(writ().args([command, "--help"]).output().unwrap().stdout).unwrap();
         assert!(
             help.contains("<ID>"),
             "writ {command} --help lacks ID:\n{help}"
+        );
+    }
+    let edit = String::from_utf8(writ().args(["edit", "--help"]).output().unwrap().stdout).unwrap();
+    for flag in [
+        "--title",
+        "--rule",
+        "--rationale",
+        "--scope",
+        "--advisory",
+        "--blocking",
+        "--matcher",
+        "--matcher-kind",
+        "--clear-matcher",
+        "--example-text",
+        "--activate",
+        "--format",
+    ] {
+        assert!(
+            edit.contains(flag),
+            "writ edit --help lacks {flag}:\n{edit}"
         );
     }
 }

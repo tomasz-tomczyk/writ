@@ -247,14 +247,18 @@ impl Args {
 }
 
 /// Split `good:REST`, and say which flag wanted it.
-fn split_kind<'a>(text: &'a str, flag: &str, rest: &str) -> Result<(ExemplarKind, &'a str)> {
+pub(crate) fn split_kind<'a>(
+    text: &'a str,
+    flag: &str,
+    rest: &str,
+) -> Result<(ExemplarKind, &'a str)> {
     let (kind, value) = text.split_once(':').ok_or_else(|| Error::Validation {
         message: format!("{flag} takes good:{rest} or bad:{rest}, not {text}"),
     })?;
     Ok((kind.parse()?, value))
 }
 
-fn exemplar(kind: ExemplarKind, snippet: String) -> NewExemplar {
+pub(crate) fn exemplar(kind: ExemplarKind, snippet: String) -> NewExemplar {
     NewExemplar {
         kind,
         language: None,

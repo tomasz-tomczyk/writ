@@ -29,6 +29,7 @@ pub enum CommandMetric {
     Audit,
     Show,
     Archive,
+    Edit,
     Ui,
     Mcp,
 }
@@ -41,6 +42,7 @@ impl CommandMetric {
             Self::Audit => "audit",
             Self::Show => "show",
             Self::Archive => "archive",
+            Self::Edit => "edit",
             Self::Ui => "ui",
             Self::Mcp => "mcp",
         }

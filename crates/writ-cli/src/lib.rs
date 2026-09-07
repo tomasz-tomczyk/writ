@@ -7,6 +7,7 @@
 
 pub mod audit;
 pub mod context;
+pub mod edit;
 pub mod git;
 pub mod hook;
 pub mod inspect;
@@ -58,6 +59,8 @@ pub enum Command {
     Show(inspect::ShowArgs),
     /// Prune a learning. It stops being selected and stays in the database
     Archive(inspect::ArchiveArgs),
+    /// Edit an existing learning
+    Edit(edit::Args),
     /// Open the local web interface
     Ui(ui::Args),
     /// Run the MCP server on stdio
@@ -76,6 +79,7 @@ impl Command {
             Self::Audit(_) => CommandMetric::Audit,
             Self::Show(_) => CommandMetric::Show,
             Self::Archive(_) => CommandMetric::Archive,
+            Self::Edit(_) => CommandMetric::Edit,
             Self::Ui(_) => CommandMetric::Ui,
             Self::Mcp(_) => CommandMetric::Mcp,
             // Installing is a one-off setup step, not a use of the
@@ -142,6 +146,7 @@ pub fn dispatch(cli: Cli) -> ExitCode {
         }
         Command::Archive(args) => inspect::archive(&args, &paths.db)
             .map(|()| (ExitCode::SUCCESS, TelemetryBatch::default())),
+        Command::Edit(args) => edit::run(&args, &paths.db).map(|batch| (ExitCode::SUCCESS, batch)),
         Command::Ui(args) => {
             ui::run(&args, &paths, &config).map(|code| (code, TelemetryBatch::default()))
         }

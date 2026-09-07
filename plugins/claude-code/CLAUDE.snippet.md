@@ -4,7 +4,7 @@
 `writ` is a local ledger of the steering this developer gives coding
 agents. One correction goes in once, and every later audit puts it back
 in front of whoever is about to repeat it. It is reachable over MCP as
-two tools: `writ_record` and `writ_audit`.
+three tools: `writ_record`, `writ_audit`, and `writ_edit`.
 
 **Record a learning when the user corrects you on something that would
 apply again.** A convention, a rejected pattern, a "never do X", an

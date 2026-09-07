@@ -24,6 +24,7 @@ fn subcommand(command: &'static str) -> clap::Command {
     match command {
         "record" => <writ_cli::record::Args as clap::Args>::augment_args(base),
         "audit" => <writ_cli::audit::Args as clap::Args>::augment_args(base),
+        "edit" => <writ_cli::edit::Args as clap::Args>::augment_args(base),
         other => panic!("no such subcommand {other}"),
     }
 }
@@ -39,16 +40,39 @@ fn long_flags(command: &'static str) -> Vec<String> {
 #[test]
 fn every_mcp_argument_maps_to_a_cli_flag() {
     for tool in TOOLS {
+        let built = subcommand(tool.command);
         let flags = long_flags(tool.command);
+        let positionals: Vec<String> = built
+            .get_arguments()
+            .filter(|a| a.is_positional())
+            .filter_map(|a| {
+                a.get_value_names()
+                    .and_then(|names| names.first().map(|s| s.to_lowercase()))
+            })
+            .collect();
         for arg in tool.args {
-            assert!(
-                flags.contains(&arg.flag.to_string()),
-                "{}.{} claims --{}, which writ {} does not accept. Flags: {flags:?}",
-                tool.name,
-                arg.name,
-                arg.flag,
-                tool.command,
-            );
+            match arg.kind {
+                Kind::Positional => {
+                    assert!(
+                        positionals.contains(&arg.name.to_lowercase()),
+                        "{}.{} is positional but writ {} has no positional named {}",
+                        tool.name,
+                        arg.name,
+                        tool.command,
+                        arg.name,
+                    );
+                }
+                _ => {
+                    assert!(
+                        flags.contains(&arg.flag.to_string()),
+                        "{}.{} claims --{}, which writ {} does not accept. Flags: {flags:?}",
+                        tool.name,
+                        arg.name,
+                        arg.flag,
+                        tool.command,
+                    );
+                }
+            }
         }
     }
 }
@@ -62,29 +86,51 @@ fn every_mcp_argument_has_the_arity_its_flag_has() {
     for tool in TOOLS {
         let built = subcommand(tool.command);
         for arg in tool.args {
-            let found = built
-                .get_arguments()
-                .find(|one| one.get_long() == Some(arg.flag))
-                .unwrap();
-            let takes_value = found.get_action().takes_values();
-            // A Stdin argument is a bare flag on the command line: the
-            // document it carries goes down stdin, not after the flag.
-            let declared_as_value = !matches!(arg.kind, Kind::Flag | Kind::Stdin);
-            assert_eq!(
-                takes_value, declared_as_value,
-                "{}.{} and --{} disagree about taking a value",
-                tool.name, arg.name, arg.flag,
-            );
+            match arg.kind {
+                Kind::Positional => {
+                    let found = built
+                        .get_arguments()
+                        .find(|one| {
+                            one.is_positional()
+                                && one.get_value_names().is_some_and(|names| {
+                                    names.first().map(|s| s.to_lowercase())
+                                        == Some(arg.name.to_lowercase())
+                                })
+                        })
+                        .unwrap();
+                    assert!(
+                        found.get_action().takes_values(),
+                        "{}.{} is positional and must take a value",
+                        tool.name,
+                        arg.name,
+                    );
+                }
+                _ => {
+                    let found = built
+                        .get_arguments()
+                        .find(|one| one.get_long() == Some(arg.flag))
+                        .unwrap();
+                    let takes_value = found.get_action().takes_values();
+                    // A Stdin argument is a bare flag on the command line: the
+                    // document it carries goes down stdin, not after the flag.
+                    let declared_as_value = !matches!(arg.kind, Kind::Flag | Kind::Stdin);
+                    assert_eq!(
+                        takes_value, declared_as_value,
+                        "{}.{} and --{} disagree about taking a value",
+                        tool.name, arg.name, arg.flag,
+                    );
+                }
+            }
         }
     }
 }
 
-/// Section 9.1: exactly two tools. A third would sit in every agent's
-/// context all session for a verb a human runs.
+/// Section 9.1: three tools. More would sit in every agent's context all
+/// session for verbs a human runs.
 #[test]
-fn the_tool_list_is_two_tools() {
+fn the_tool_list_is_three_tools() {
     let names: Vec<_> = TOOLS.iter().map(|one| one.name).collect();
-    assert_eq!(names, vec!["writ_record", "writ_audit"]);
+    assert_eq!(names, vec!["writ_record", "writ_audit", "writ_edit"]);
 }
 
 /// A schema an agent cannot fill in is not a contract.
@@ -128,6 +174,59 @@ fn recording_through_mcp_matches_recording_through_the_cli() {
 
     assert_eq!(anonymize(&through_mcp), anonymize(&through_cli));
     // And both actually wrote the same row.
+    assert_eq!(
+        anonymize(&mcp_home.learnings()),
+        anonymize(&cli_home.learnings())
+    );
+}
+
+#[test]
+fn editing_through_mcp_matches_editing_through_the_cli() {
+    let record_args = &[
+        "--title",
+        "prefer sd",
+        "--rule",
+        "use sd",
+        "--rationale",
+        "sed is terse",
+        "--scope",
+        "language:rust",
+        "--matcher",
+        "unwrap_me",
+        "--matcher-kind",
+        "regex",
+        "--example-text",
+        "bad:sed -i '' s/a/b/ f",
+    ];
+
+    let mcp_home = Sandbox::new();
+    let mcp_id = mcp_home.record_json(record_args)[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mcp_arguments = json!({
+        "id": mcp_id,
+        "title": "prefer sd and ripgrep",
+        "matcher": "let $A = $B;",
+        "matcher_kind": "ast_grep",
+        "example_text": ["good:sd a b f"],
+        "activate": true,
+    });
+
+    let mut server = mcp_home.server();
+    let through_mcp = server.call("writ_edit", &mcp_arguments);
+    server.close();
+
+    let cli_home = Sandbox::new();
+    let cli_id = cli_home.record_json(record_args)[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut cli_arguments = mcp_arguments.clone();
+    cli_arguments["id"] = json!(cli_id);
+    let through_cli = cli_home.edit_json(&argv_of("writ_edit", &cli_arguments));
+
+    assert_eq!(anonymize(&through_mcp), anonymize(&through_cli));
     assert_eq!(
         anonymize(&mcp_home.learnings()),
         anonymize(&cli_home.learnings())
@@ -351,8 +450,9 @@ fn the_server_initializes_and_lists_its_tools() {
 
     let listed = server.request("tools/list", &json!({}));
     let tools = listed["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 3);
     assert_eq!(tools[0]["name"], "writ_record");
+    assert_eq!(tools[2]["name"], "writ_edit");
 
     let unknown = server.request("resources/list", &json!({}));
     assert_eq!(unknown["error"]["code"], -32601);
@@ -469,6 +569,23 @@ impl Sandbox {
     fn record_json<S: AsRef<str>>(&self, args: &[S]) -> Value {
         let mut all = vec![
             "record".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+        all.extend(args.iter().map(|one| one.as_ref().to_string()));
+        let borrowed: Vec<&str> = all.iter().map(String::as_str).collect();
+        let output = self.cmd_at(self.dir.path(), &borrowed).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    fn edit_json<S: AsRef<str>>(&self, args: &[S]) -> Value {
+        let mut all = vec![
+            "edit".to_string(),
             "--format".to_string(),
             "json".to_string(),
         ];
