@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/tomasztomczyk/writ"
 
 [workspace.dependencies]
-rusqlite = { version = "0.37", features = ["bundled", "functions", "trace"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint", "functions", "trace"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 clap = { version = "4", features = ["derive"] }
