@@ -1,6 +1,6 @@
 target/
 *.db
-docs/
+docs/*
 .worktrees/
 .superpowers/
 /writ
