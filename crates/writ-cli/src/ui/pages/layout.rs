@@ -2,7 +2,7 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header::HeaderValue;
 use axum::response::{Html, IntoResponse, Response};
-use writ_core::{Error, ListFilter, Status, Store};
+use writ_core::{Error, ListFilter, Scope, ScopeKind, Status, Store};
 
 use crate::ui::AppState;
 use crate::ui::UI_PROTOCOL_VERSION;
@@ -197,4 +197,32 @@ where
         message: "store lock was poisoned".to_string(),
     })?;
     f(&mut store)
+}
+
+/// Primer scope/project chip used across Collection, Inbox, and Health.
+pub fn scope_chip(scope: &Scope, class: &str) -> String {
+    if scope.kind == ScopeKind::Global {
+        return format!(r#"<span class="chip {class}" title="global">global</span>"#);
+    }
+
+    let kind = match scope.kind {
+        ScopeKind::Project => "project:",
+        ScopeKind::Language => "language:",
+        ScopeKind::Glob => "glob:",
+        ScopeKind::Global => unreachable!("global returned above"),
+    };
+    let title = escape(&scope.to_string());
+    format!(
+        r#"<span class="chip {class}" title="{title}"><span class="scope-kind">{kind}</span>{}</span>"#,
+        escape(&scope.value)
+    )
+}
+
+/// Empty ledger panel shared by Collection / Inbox / Health.
+pub fn ledger_empty(title: &str, body: &str) -> String {
+    format!(
+        r#"<div class="table-shell ledger-empty empty"><strong>{}</strong><span>{}</span></div>"#,
+        escape(title),
+        escape(body)
+    )
 }

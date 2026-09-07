@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use writ_core::{Error, ListFilter, Scope, ScopeKind, Status};
 
 use crate::ui::AppState;
-use crate::ui::pages::layout::{escape, with_store};
+use crate::ui::pages::layout::{escape, scope_chip, with_store};
 
 const UNUSED_DAYS: u32 = 90;
 
@@ -84,9 +84,11 @@ pub fn render(
         ));
 
         if rows.is_empty() {
-            html.push_str(
-                r#"<div class="table-shell collection-empty empty"><strong>No learnings match</strong><span>Try a different search or status filter.</span></div></section></div>"#,
-            );
+            html.push_str(&crate::ui::pages::layout::ledger_empty(
+                "No learnings match",
+                "Try a different search or status filter.",
+            ));
+            html.push_str("</section></div>");
             return Ok(html);
         }
 
@@ -258,24 +260,6 @@ fn project_cell(scopes: &[Scope]) -> String {
     }
     html.push_str("</div></td>");
     html
-}
-
-fn scope_chip(scope: &Scope, class: &str) -> String {
-    if scope.kind == ScopeKind::Global {
-        return format!(r#"<span class="chip {class}" title="global">global</span>"#);
-    }
-
-    let kind = match scope.kind {
-        ScopeKind::Project => "project:",
-        ScopeKind::Language => "language:",
-        ScopeKind::Glob => "glob:",
-        ScopeKind::Global => unreachable!("global returned above"),
-    };
-    let title = escape(&scope.to_string());
-    format!(
-        r#"<span class="chip {class}" title="{title}"><span class="scope-kind">{kind}</span>{}</span>"#,
-        escape(&scope.value)
-    )
 }
 
 fn health_class(unused: bool, never_applied: bool) -> &'static str {

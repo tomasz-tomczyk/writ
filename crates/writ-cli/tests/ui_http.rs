@@ -843,6 +843,10 @@ async fn inbox_empty_state_shows_curation_copy() {
 
     assert!(body.contains("Inbox is empty"), "{body}");
     assert!(body.contains("Every proposal is curated"), "{body}");
+    assert!(
+        body.contains(r#"class="table-shell ledger-empty empty""#),
+        "empty inbox should use the shared ledger empty panel: {body}"
+    );
 }
 
 #[tokio::test]
@@ -854,6 +858,84 @@ async fn health_empty_state_shows_clear_copy() {
     let body = get(&app, "/health").await.body;
 
     assert!(body.contains("Health is clear"), "{body}");
+    assert!(
+        body.contains(r#"class="table-shell ledger-empty empty""#),
+        "empty health should use the shared ledger empty panel: {body}"
+    );
+}
+
+#[tokio::test]
+async fn inbox_uses_collection_style_chrome() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("inbox chrome", "rule", "rationale");
+        learning.scopes = vec![
+            "project:github.com/acme/writ".parse().unwrap(),
+            "language:rust".parse().unwrap(),
+        ];
+        store.record(&learning).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/inbox").await.body;
+
+    assert!(
+        body.contains(r#"class="inbox-ledger""#),
+        "inbox should sit in a ledger section: {body}"
+    );
+    assert!(
+        body.contains(r#"class="table-shell proposal-list""#),
+        "{body}"
+    );
+    assert!(body.contains(r#"class="title-link""#), "{body}");
+    assert!(
+        body.contains(r#"<span class="scope-kind">language:</span>rust"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"<span class="scope-kind">project:</span>github.com/acme/writ"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"class="btn btn--primary primary""#),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn health_uses_collection_style_chrome() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("health chrome", "rule", "rationale");
+        learning.status = Some(Status::Active);
+        learning.created_at = Some("2000-01-01 00:00:00".into());
+        learning.scopes = vec!["language:elixir".parse().unwrap()];
+        store.record(&learning).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let body = get(&app, "/health").await.body;
+
+    assert!(
+        body.contains(r#"class="health-ledger""#),
+        "health should sit in a ledger section: {body}"
+    );
+    assert!(
+        body.contains(
+            r#"<colgroup><col class="title"><col class="bucket"><col class="used"><col class="hits"><col class="actions"></colgroup>"#
+        ),
+        "{body}"
+    );
+    assert!(body.contains(r#"class="title-link""#), "{body}");
+    assert!(
+        body.contains(r#"<span class="scope-kind">language:</span>elixir"#),
+        "{body}"
+    );
+    assert!(body.contains(r#"class="btn danger""#), "{body}");
 }
 
 #[tokio::test]
