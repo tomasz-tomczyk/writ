@@ -1,8 +1,10 @@
 name: CI
 
+# Full suite on pull requests only — same split as crit (test.yml is
+# pull_request-only; coverage.yml runs on main). Squash-merges already
+# passed CI on the PR; re-running every job on main is wasted wall time.
+
 on:
-  push:
-    branches: [main]
   pull_request:
 
 concurrency:
@@ -133,7 +135,8 @@ jobs:
         run: mise run lint
 
   # Instrumented rebuild cannot reuse compile's target/, so do not wait on
-  # it — overlap with compile for wall-clock.
+  # it — overlap with compile for wall-clock. Also runs on main via
+  # coverage.yml so Codecov keeps a default-branch baseline.
   coverage:
     name: coverage
     runs-on: ubuntu-latest
