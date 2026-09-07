@@ -153,6 +153,10 @@ jobs:
       - name: Generate LCOV
         run: mise run coverage
       - name: Upload to Codecov
+        # Dependabot PRs do not receive Actions secrets, so Codecov rejects
+        # uploads on protected branches without a token. Still generate LCOV
+        # above; only skip the upload gate for that actor.
+        if: ${{ github.actor != 'dependabot[bot]' }}
         uses: codecov/codecov-action@v5
         with:
           files: target/llvm-cov/lcov.info
