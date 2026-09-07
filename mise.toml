@@ -51,7 +51,7 @@ run = "cargo build --release --locked"
 
 [tasks.coverage]
 description = "Instrumented test run; write LCOV for Codecov"
-run = "cargo llvm-cov --workspace --locked --lcov --output-path target/llvm-cov/lcov.info"
+run = "mkdir -p target/llvm-cov && cargo llvm-cov --workspace --locked --lcov --output-path target/llvm-cov/lcov.info"
 
 [tasks.lint]
 description = "Supply-chain, unused deps, typos, and shell scripts"

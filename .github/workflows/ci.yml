@@ -132,9 +132,11 @@ jobs:
       - name: Supply-chain, unused deps, typos, shell scripts
         run: mise run lint
 
-  # Instrumented rebuild — cannot reuse the compile job's target/.
+  # Instrumented rebuild — cannot reuse the compile job's target/, but
+  # still waits on compile so the graph is compile-first, then fan-out.
   coverage:
     name: coverage
+    needs: compile
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
