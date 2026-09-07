@@ -35,8 +35,6 @@ writ-release
   ├─ release-notes
   └─ host-parity?         (if versioned plugin manifests drift)
 
-deep-audit                (standalone discovery → validate → optional fixes)
-  └─ writ-review          (per fix group, when implementing)
 ```
 
 `?` means conditional on the diff.
@@ -50,7 +48,6 @@ deep-audit                (standalone discovery → validate → optional fixes)
 | `writ-review` | Pre-landing review; spawns domain subagents + validators |
 | `writ-ship` | Review → mise gates → PR → CI → squash merge |
 | `writ-fix` | GitHub issue → worktree → fix → review → optional ship |
-| `deep-audit` | Whole-codebase audit with independent validation |
 | `release-audit` | Everything since last stable tag before cutting a release |
 | `release-notes` | Draft `vX.Y.Z-release-notes.md` (gitignored) |
 | `writ-release` | Version bump, tag, and verify publish outputs |

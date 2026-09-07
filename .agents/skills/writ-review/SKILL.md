@@ -95,7 +95,13 @@ Do not hide an environmental failure. Record the exact command, exit status, and
 
 Fresh agent. Inspect the diff for secrets and network-client dependencies. Telemetry remains opt-in, local, aggregate-only, and physically separate from the learning store. No command may leak rule text, paths, repositories, identities, diffs, or finer timestamps through telemetry.
 
-### 8. Validate findings
+### 8. Simplify
+
+After domain findings are collected, run `/simplify` over the files in the review diff (Cursor's simplify / code-simplifier pass). Keep behavior unchanged; prefer clearer structure, less duplication, and smaller surfaces.
+
+If simplify edits files, note the new HEAD and re-run only the domain validators that touch those files before the verdict. Do not expand scope beyond the reviewed change.
+
+### 9. Validate findings
 
 Review agents are over-eager. Before presenting anything, dispatch **fresh validator agents in parallel** (one per domain agent from phases 2–5 and 7). Each validator critically re-checks its domain's findings against the actual code and returns `REAL`, `PARTIAL`, or `FALSE POSITIVE` with evidence. Carry only real findings and the supported part of partial findings forward; list dropped false positives briefly.
 
