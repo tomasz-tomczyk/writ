@@ -2151,6 +2151,75 @@ fn a_matcher_that_misses_drops_the_learning() {
     );
 }
 
+#[test]
+fn an_ast_grep_matcher_hits_a_shape_removed_from_the_working_tree() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(
+        root.join("a.ex"),
+        "defmodule A do\n  @spec value() :: integer()\n  def value, do: 1\nend\n",
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add spec"]);
+
+    let learning = sandbox.record(&[
+        "--scope",
+        "language:elixir",
+        "--matcher",
+        "@spec $A",
+        "--matcher-kind",
+        "ast_grep",
+        "--activate",
+    ]);
+    std::fs::write(
+        root.join("a.ex"),
+        "defmodule A do\n  def value, do: 1\nend\n",
+    )
+    .unwrap();
+
+    let output = audit_with_ast_grep(&sandbox, &root, &[]);
+    output.assert_code(0);
+    assert!(output.stdout.contains(&learning), "{}", output.stdout);
+    assert!(
+        !output.stderr.contains("on scope alone"),
+        "the pre-image must have been evaluated: {}",
+        output.stderr
+    );
+}
+
+#[test]
+fn an_ast_grep_miss_on_an_added_file_stays_a_miss_without_a_pre_image() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    let learning = sandbox.record(&[
+        "--scope",
+        "language:elixir",
+        "--matcher",
+        "@spec $A",
+        "--matcher-kind",
+        "ast_grep",
+        "--activate",
+    ]);
+    std::fs::write(
+        root.join("new.ex"),
+        "defmodule New do\n  def value, do: 1\nend\n",
+    )
+    .unwrap();
+    git(&root, &["add", "new.ex"]);
+
+    let output = audit_with_ast_grep(&sandbox, &root, &[]);
+    output.assert_code(0);
+    assert!(!output.stdout.contains(&learning), "{}", output.stdout);
+    // Add-only diffs have no removed content, so the pre-image path is
+    // skipped rather than emitting a fallback notice for every new file.
+    assert!(
+        !output.stderr.contains("cannot read pre-image HEAD:new.ex"),
+        "add-only misses should not probe pre-images: {}",
+        output.stderr
+    );
+}
+
 /// A hit selects a learning. It does not create a finding: `times_applied`
 /// only moves on ingest.
 #[test]
@@ -2237,7 +2306,7 @@ fn a_pattern_that_does_not_parse_keeps_the_learning_and_exits_zero() {
 }
 
 #[test]
-fn a_regex_matcher_reads_the_added_lines_only() {
+fn a_regex_matcher_reads_added_and_removed_lines() {
     let sandbox = Sandbox::new();
     let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
     std::fs::write(root.join("a.rs"), "fn main() { unwrap_me(); }\n").unwrap();
@@ -2251,9 +2320,9 @@ fn a_regex_matcher_reads_the_added_lines_only() {
         "regex",
         "--activate",
     ]);
-    // The shape leaves the tree, so the rule about it is not in play.
+    // The removed shape is part of the diff, so the rule is in play.
     std::fs::write(root.join("a.rs"), "fn main() { }\n").unwrap();
-    assert!(!audit_ids(&sandbox, &root, &[]).contains(&learning));
+    assert!(audit_ids(&sandbox, &root, &[]).contains(&learning));
 
     std::fs::write(root.join("a.rs"), "fn main() { unwrap_me(); }\n").unwrap();
     git(&root, &["checkout", "-q", "--", "."]);
