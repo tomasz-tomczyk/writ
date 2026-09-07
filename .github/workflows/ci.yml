@@ -35,6 +35,13 @@ jobs:
           install: true
           cache: true
 
+      # `cargo install writ-cli` uses this package-to-bin mapping. Assert the
+      # naming footgun directly instead of rebuilding the workspace to install it.
+      - name: Check cargo install naming contract
+        run: |
+          mise exec -- cargo metadata --locked --no-deps --format-version 1 |
+            jq -e 'any(.packages[]; .name == "writ-cli" and any(.targets[]; .name == "writ" and (.kind | index("bin"))))'
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -100,26 +107,6 @@ jobs:
           chmod +x "$WRIT"
           ./scripts/check-doc-flags.sh
 
-  install:
-    name: install
-    needs: compile
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v4
-        with:
-          install: true
-          cache: true
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: workspace
-          save-if: false
-      - name: cargo install resolves the writ binary
-        run: |
-          mise exec -- cargo install --path crates/writ-cli --locked --force
-          writ --version
-
   # No compile needed (deny/machete/typos/shellcheck). Run beside compile.
   lint:
     name: lint
@@ -169,7 +156,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [compile, test, docs, install, lint, coverage]
+    needs: [compile, test, docs, lint, coverage]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
