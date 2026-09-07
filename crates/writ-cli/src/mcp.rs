@@ -5,7 +5,7 @@
 //! P3 is about not spending context you did not have to. The UI, health,
 //! archive, and telemetry stay human-only and out of the tool list.
 //!
-//! Both tools are shells. Each turns its arguments into the argv the CLI
+//! The tools are shells. Each turns its arguments into the argv the CLI
 //! would have been given, hands that to the same clap parser the binary
 //! uses, and calls the same function. Nothing here validates, defaults, or
 //! decides. That is what makes the parity test in `tests/mcp.rs` provable
@@ -14,8 +14,8 @@
 //!
 //! The transport is newline-delimited JSON-RPC 2.0 on stdio, written by
 //! hand. A crate would add a dependency, an async runtime, and a derive
-//! layer to serve two tools over a protocol whose stdio framing is one
-//! line of JSON per message.
+//! layer to serve them over a protocol whose stdio framing is one line of
+//! JSON per message.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};

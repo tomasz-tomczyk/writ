@@ -567,48 +567,26 @@ impl Sandbox {
     }
 
     fn record_json<S: AsRef<str>>(&self, args: &[S]) -> Value {
-        let mut all = vec![
-            "record".to_string(),
-            "--format".to_string(),
-            "json".to_string(),
-        ];
-        all.extend(args.iter().map(|one| one.as_ref().to_string()));
-        let borrowed: Vec<&str> = all.iter().map(String::as_str).collect();
-        let output = self.cmd_at(self.dir.path(), &borrowed).output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice(&output.stdout).unwrap()
+        self.run_json(self.dir.path(), "record", args)
     }
 
     fn edit_json<S: AsRef<str>>(&self, args: &[S]) -> Value {
-        let mut all = vec![
-            "edit".to_string(),
-            "--format".to_string(),
-            "json".to_string(),
-        ];
-        all.extend(args.iter().map(|one| one.as_ref().to_string()));
-        let borrowed: Vec<&str> = all.iter().map(String::as_str).collect();
-        let output = self.cmd_at(self.dir.path(), &borrowed).output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice(&output.stdout).unwrap()
+        self.run_json(self.dir.path(), "edit", args)
     }
 
     fn audit_json<S: AsRef<str>>(&self, repo: &Path, args: &[S]) -> Value {
+        self.run_json(repo, "audit", args)
+    }
+
+    fn run_json<S: AsRef<str>>(&self, dir: &Path, command: &str, args: &[S]) -> Value {
         let mut all = vec![
-            "audit".to_string(),
+            command.to_string(),
             "--format".to_string(),
             "json".to_string(),
         ];
         all.extend(args.iter().map(|one| one.as_ref().to_string()));
         let borrowed: Vec<&str> = all.iter().map(String::as_str).collect();
-        let output = self.cmd_at(repo, &borrowed).output().unwrap();
+        let output = self.cmd_at(dir, &borrowed).output().unwrap();
         assert!(
             output.status.success(),
             "{}",

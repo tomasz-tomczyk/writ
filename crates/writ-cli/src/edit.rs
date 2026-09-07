@@ -138,21 +138,6 @@ impl Args {
     fn scopes(&self) -> Result<Vec<Scope>> {
         self.scopes.iter().map(|text| text.parse()).collect()
     }
-
-    fn exemplars(&self) -> Result<Vec<NewExemplar>> {
-        self.example_texts
-            .iter()
-            .map(|text| {
-                let (kind, snippet) = record::split_kind(text, "--example-text", "TEXT")?;
-                if snippet.is_empty() {
-                    return Err(Error::Validation {
-                        message: "an --example-text snippet is empty".to_string(),
-                    });
-                }
-                Ok(record::exemplar(kind, snippet.to_string()))
-            })
-            .collect()
-    }
 }
 
 fn build_update(
@@ -160,68 +145,21 @@ fn build_update(
     current: &Learning,
     current_exemplars: &[Exemplar],
 ) -> Result<LearningUpdate> {
-    let matcher = if args.clear_matcher {
-        None
-    } else if args.matcher.is_some() || args.matcher_kind.is_some() {
-        args.matcher.clone()
-    } else {
-        current.matcher.clone()
-    };
-
-    let matcher_kind = if args.clear_matcher {
-        None
-    } else if args.matcher_kind.is_some() {
-        args.matcher_kind
-            .as_deref()
-            .map(str::parse::<MatcherKind>)
-            .transpose()?
-    } else if args.matcher.is_some() {
-        // --matcher without --matcher-kind: keep current kind if any, but
-        // validation will catch the mismatch if there is no current kind.
-        current.matcher_kind
-    } else {
-        current.matcher_kind
-    };
-
+    let (matcher, matcher_kind) = resolve_matcher(args, current)?;
     let exemplars = if args.example_texts.is_empty() {
-        current_exemplars
-            .iter()
-            .map(|e| NewExemplar {
-                kind: e.kind,
-                language: e.language.clone(),
-                snippet: e.snippet.clone(),
-                note: e.note.clone(),
-            })
-            .collect()
+        current_exemplars.iter().map(as_new_exemplar).collect()
     } else {
-        args.exemplars()?
+        record::parse_example_texts(&args.example_texts)?
     };
 
     Ok(LearningUpdate {
-        title: args
-            .title
-            .as_deref()
-            .map(str::trim)
-            .map(String::from)
-            .unwrap_or_else(|| current.title.clone()),
-        rule: args
-            .rule
-            .as_deref()
-            .map(str::trim)
-            .map(String::from)
-            .unwrap_or_else(|| current.rule.clone()),
-        rationale: args
-            .rationale
-            .as_deref()
-            .map(str::trim)
-            .map(String::from)
-            .unwrap_or_else(|| current.rationale.clone()),
-        blocking: if args.advisory {
-            false
-        } else if args.blocking {
-            true
-        } else {
-            current.blocking
+        title: keep_text(&args.title, &current.title),
+        rule: keep_text(&args.rule, &current.rule),
+        rationale: keep_text(&args.rationale, &current.rationale),
+        blocking: match (args.advisory, args.blocking) {
+            (true, _) => false,
+            (_, true) => true,
+            _ => current.blocking,
         },
         matcher_kind,
         matcher,
@@ -232,6 +170,46 @@ fn build_update(
         },
         exemplars,
     })
+}
+
+/// Keep the current value unless the flag was passed; trim when it was.
+fn keep_text(next: &Option<String>, current: &str) -> String {
+    next.as_deref()
+        .map(str::trim)
+        .map(String::from)
+        .unwrap_or_else(|| current.to_string())
+}
+
+fn resolve_matcher(
+    args: &Args,
+    current: &Learning,
+) -> Result<(Option<String>, Option<MatcherKind>)> {
+    if args.clear_matcher {
+        return Ok((None, None));
+    }
+
+    // Touching either matcher flag replaces the pair as a unit: a kind-only
+    // edit clears the pattern (args.matcher is None). Validation refuses a
+    // pattern with no kind when the learning has none either.
+    let matcher = if args.matcher.is_some() || args.matcher_kind.is_some() {
+        args.matcher.clone()
+    } else {
+        current.matcher.clone()
+    };
+    let matcher_kind = match args.matcher_kind.as_deref() {
+        Some(kind) => Some(kind.parse()?),
+        None => current.matcher_kind,
+    };
+    Ok((matcher, matcher_kind))
+}
+
+fn as_new_exemplar(exemplar: &Exemplar) -> NewExemplar {
+    NewExemplar {
+        kind: exemplar.kind,
+        language: exemplar.language.clone(),
+        snippet: exemplar.snippet.clone(),
+        note: exemplar.note.clone(),
+    }
 }
 
 /// Say what was edited. crit #446: no silent no-ops on user data.
@@ -293,12 +271,10 @@ mod tests {
         (learning, exemplars)
     }
 
-    #[test]
-    fn omitted_fields_keep_current_values() {
-        let (current, exemplars) = sample_learning();
-        let args = Args {
+    fn bare_args() -> Args {
+        Args {
             id: "id".into(),
-            title: Some("new title".into()),
+            title: None,
             rule: None,
             rationale: None,
             scopes: vec![],
@@ -310,7 +286,14 @@ mod tests {
             example_texts: vec![],
             activate: false,
             format: Format::Text,
-        };
+        }
+    }
+
+    #[test]
+    fn omitted_fields_keep_current_values() {
+        let (current, exemplars) = sample_learning();
+        let mut args = bare_args();
+        args.title = Some("new title".into());
         let update = build_update(&args, &current, &exemplars).unwrap();
         assert_eq!(update.title, "new title");
         assert_eq!(update.rule, current.rule);
@@ -325,21 +308,8 @@ mod tests {
         let (mut current, exemplars) = sample_learning();
         current.matcher = Some("$A".into());
         current.matcher_kind = Some(MatcherKind::AstGrep);
-        let args = Args {
-            id: "id".into(),
-            title: None,
-            rule: None,
-            rationale: None,
-            scopes: vec![],
-            advisory: false,
-            blocking: false,
-            matcher: None,
-            matcher_kind: None,
-            clear_matcher: true,
-            example_texts: vec![],
-            activate: false,
-            format: Format::Text,
-        };
+        let mut args = bare_args();
+        args.clear_matcher = true;
         let update = build_update(&args, &current, &exemplars).unwrap();
         assert!(update.matcher.is_none());
         assert!(update.matcher_kind.is_none());
@@ -348,21 +318,8 @@ mod tests {
     #[test]
     fn example_texts_replace_the_full_set() {
         let (current, exemplars) = sample_learning();
-        let args = Args {
-            id: "id".into(),
-            title: None,
-            rule: None,
-            rationale: None,
-            scopes: vec![],
-            advisory: false,
-            blocking: false,
-            matcher: None,
-            matcher_kind: None,
-            clear_matcher: false,
-            example_texts: vec!["good:let x = 1;".into()],
-            activate: false,
-            format: Format::Text,
-        };
+        let mut args = bare_args();
+        args.example_texts = vec!["good:let x = 1;".into()];
         let update = build_update(&args, &current, &exemplars).unwrap();
         assert_eq!(update.exemplars.len(), 1);
         assert_eq!(update.exemplars[0].kind, ExemplarKind::Good);
