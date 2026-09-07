@@ -27,6 +27,8 @@ writ record --title TITLE --rule RULE --rationale WHY --activate
 | `--scope` | Where it applies. Repeat it for more than one |
 | `--advisory` | Report it, but never block the handoff |
 | `--example-text` | A snippet, as `good:TEXT` or `bad:TEXT`. Repeat it |
+| `--matcher` | A structural retrieval pattern. Default on for code-shape rules |
+| `--matcher-kind` | `ast_grep` (preferred with `language:`) or `regex` (escape hatch) |
 | `--activate` | Use the learning from now on |
 
 Without `--activate` the learning lands in the Inbox as `proposed` and
@@ -72,6 +74,21 @@ writ record --title T --rule R --rationale WHY --activate \
 
 writ stores the text and never the path, so a snippet keeps teaching
 after the file moves or the branch goes.
+
+## Match structural rules
+
+A matcher lets an audit find the code a rule is about. Add one whenever
+the rule describes code shape; omit it only for process or style rules
+that have no structural anchor.
+
+- Default on for structural rules. Process or style rules may omit it.
+- Prefer `ast_grep` when the scope includes `language:`.
+- Use `regex` only when `ast_grep` cannot express it.
+- For "do not remove X" rules, match a durable token that stays in the
+  file, not the thing being removed. Matchers currently cannot see
+  removals, so matching the disappearing token silently misses the
+  violation. Example: for "Do not bulk-delete Elixir `@spec`", match the
+  `def` or `defp` that should keep its spec, not `@spec` alone.
 
 ## After writing
 

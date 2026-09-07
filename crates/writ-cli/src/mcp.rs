@@ -133,13 +133,13 @@ const RECORD_ARGS: &[ToolArg] = &[
         name: "matcher",
         flag: "matcher",
         kind: Kind::Text,
-        about: "A retrieval pattern. Needs matcher_kind",
+        about: "A structural retrieval pattern for the rule. Add it whenever the rule is about code shape; omit only for process or style rules that have no structural anchor. Pair with matcher_kind",
     },
     ToolArg {
         name: "matcher_kind",
         flag: "matcher-kind",
         kind: Kind::Text,
-        about: "The dialect of matcher: ast_grep or regex",
+        about: "The dialect of --matcher: ast_grep (preferred, especially with a language: scope) or regex (escape hatch)",
     },
     ToolArg {
         name: "status",
