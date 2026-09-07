@@ -189,6 +189,8 @@ These are decisions, not preferences. Breaking one is a spec violation.
 
 ## Working style
 
+- Commits and PR titles follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
+  (`feat:`, `fix:`, `chore:`, `ci:`, …).
 - TDD. Write the failing test first.
 - Exit codes are a contract. Test every one.
 - `writ audit --format prompt` output is asserted byte for byte.
