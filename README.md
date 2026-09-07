@@ -9,12 +9,37 @@ machine, and writ never calls a model — your agent does the reasoning.
 
 ## Install
 
+### Homebrew
+
 ```
-cargo install --path crates/writ-cli
+brew install tomasz-tomczyk/tap/writ
+```
+
+### Nix
+
+```
+nix profile install github:tomasz-tomczyk/writ
+nix run github:tomasz-tomczyk/writ
+```
+
+### GitHub Releases
+
+Prebuilt binaries are available on the [releases page](https://github.com/tomasz-tomczyk/writ/releases).
+
+### cargo
+
+```
+cargo install writ-cli
 ```
 
 That installs a binary named `writ`. On crates.io the package is
 `writ-cli`, because `writ` belongs to an unrelated markdown editor.
+
+From a checkout:
+
+```
+cargo install --path crates/writ-cli
+```
 
 ## The loop
 
