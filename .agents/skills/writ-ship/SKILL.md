@@ -43,7 +43,7 @@ Resolve simple conflicts by understanding both sides. For a conflict with two pl
 
 ## Review and fix
 
-Invoke `writ-review`. It includes the independent `intent-check`, `AGENTS.md` invariants, Rust/SQLite/CLI/MCP/hooks review, security/privacy, tests, and docs. Do not substitute the product command `writ audit` for this developer review.
+Invoke `writ-review`. It includes the independent `intent-check`, `AGENTS.md` invariants, Rust/SQLite/CLI/MCP/hooks review, security/privacy, tests, and docs.
 
 Fix every blocker, commit the fixes, and repeat affected review phases until the verdict is `SHIP IT`. If the caller already completed `writ-review` against the same final diff, verify the reviewed commit still matches HEAD before reusing it.
 
