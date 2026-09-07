@@ -118,9 +118,9 @@ jobs:
           mise exec -- cargo install --path crates/writ-cli --locked --force
           writ --version
 
+  # No compile needed (deny/machete/typos/shellcheck). Run beside compile.
   lint:
     name: lint
-    needs: compile
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -132,11 +132,10 @@ jobs:
       - name: Supply-chain, unused deps, typos, shell scripts
         run: mise run lint
 
-  # Instrumented rebuild — cannot reuse the compile job's target/, but
-  # still waits on compile so the graph is compile-first, then fan-out.
+  # Instrumented rebuild cannot reuse compile's target/, so do not wait on
+  # it — overlap with compile for wall-clock.
   coverage:
     name: coverage
-    needs: compile
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
