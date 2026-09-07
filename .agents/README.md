@@ -13,7 +13,8 @@ release-notes         (leaf)
 
 writ-review
   ├─ intent-check
-  └─ host-parity          (when plugins/host artifacts changed)
+  ├─ host-parity?         (when plugins/host artifacts changed)
+  └─ /simplify            (after domain findings, before validators)
 
 writ-ship
   ├─ writ-review
@@ -45,7 +46,7 @@ writ-release
 | --- | --- |
 | `intent-check` | Diff vs stated intent (PR or release window) |
 | `host-parity` | Claude Code / Codex / Cursor / OpenCode plugin drift |
-| `writ-review` | Pre-landing review; spawns domain subagents + validators |
+| `writ-review` | Pre-landing review; domain subagents, `/simplify`, validators |
 | `writ-ship` | Review → mise gates → PR → CI → squash merge |
 | `writ-fix` | GitHub issue → worktree → fix → review → optional ship |
 | `release-audit` | Everything since last stable tag before cutting a release |
