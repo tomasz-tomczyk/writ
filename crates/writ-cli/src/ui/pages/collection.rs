@@ -26,10 +26,6 @@ pub fn render(
         };
         let mut rows = store.list(&filter)?;
 
-        if status_filter.is_none() {
-            rows.retain(|r| r.status != Status::Archived);
-        }
-
         let sort_field = sort
             .filter(|field| matches!(*field, "hit" | "last_used" | "status"))
             .unwrap_or("title");
@@ -167,21 +163,19 @@ fn status_chips(current: Option<&str>) -> String {
     let mut html = String::from(
         r#"<div class="filters filter-chips" role="group" aria-label="Filter by status">"#,
     );
+    let selected = current.unwrap_or("all");
     for (label, param) in [
-        ("Active", Some("active")),
-        ("Proposed", Some("proposed")),
-        ("Archived", Some("archived")),
-        ("All", Some("all")),
+        ("Active", "active"),
+        ("Proposed", "proposed"),
+        ("Archived", "archived"),
+        ("All", "all"),
     ] {
-        let current_attr = if current == param {
+        let current_attr = if selected == param {
             r#" aria-current="true""#
         } else {
             ""
         };
-        let href = match param {
-            Some(p) => format!("/collection?status={}", p),
-            None => "/collection".into(),
-        };
+        let href = format!("/collection?status={param}");
         html.push_str(&format!(
             "<a href=\"{href}\" hx-get=\"{href}\"{SWAP} class=\"filter filter-chip\"{current_attr}>{label}</a>"
         ));

@@ -205,17 +205,33 @@ pub fn scope_chip(scope: &Scope, class: &str) -> String {
         return format!(r#"<span class="chip {class}" title="global">global</span>"#);
     }
 
+    if scope.kind == ScopeKind::Project {
+        let name = project_repo_name(&scope.value);
+        let title = escape(&scope.to_string());
+        return format!(
+            r#"<span class="chip {class}" title="{title}">{name}</span>"#,
+            name = escape(name)
+        );
+    }
+
     let kind = match scope.kind {
-        ScopeKind::Project => "project:",
         ScopeKind::Language => "language:",
         ScopeKind::Glob => "glob:",
-        ScopeKind::Global => unreachable!("global returned above"),
+        ScopeKind::Project | ScopeKind::Global => unreachable!("handled above"),
     };
     let title = escape(&scope.to_string());
     format!(
         r#"<span class="chip {class}" title="{title}"><span class="scope-kind">{kind}</span>{}</span>"#,
         escape(&scope.value)
     )
+}
+
+/// Show only the repository leaf for project scopes (`github.com/acme/writ` → `writ`).
+pub fn project_repo_name(value: &str) -> &str {
+    value
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(value)
 }
 
 /// Empty ledger panel shared by Collection / Inbox / Health.

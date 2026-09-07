@@ -498,8 +498,16 @@ async fn collection_uses_project_scope_and_mode_columns() {
         "the default title order should be announced: {body}"
     );
     assert!(
-        body.contains(r#"<span class="scope-kind">project:</span>github.com/acme/writ"#),
+        body.contains(r#">writ</span>"#),
+        "project chips should show only the repo leaf: {body}"
+    );
+    assert!(
+        !body.contains(r#"<span class="scope-kind">project:</span>"#),
         "{body}"
+    );
+    assert!(
+        body.contains(r#"title="project:github.com/acme/writ""#),
+        "full project identity stays on the title attribute: {body}"
     );
     assert!(
         body.contains(r#"class="title-meta""#),
@@ -537,7 +545,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
     }
 
     let app = start_app(&db, config());
-    let body = get(&app, "/collection?status=active&sort=title&dir=asc")
+    let body = get(&app, "/collection?status=all&sort=title&dir=asc")
         .await
         .body;
 
@@ -567,7 +575,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
     );
     assert!(
         body.contains(
-            r##"hx-get="/collection?status=active" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
+            r##"hx-get="/collection?status=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
         ),
         "{body}"
     );
@@ -634,7 +642,7 @@ async fn empty_collection_has_no_record_or_new_learning_cta() {
 }
 
 #[tokio::test]
-async fn collection_hides_archived_by_default() {
+async fn collection_defaults_to_all_including_archived() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
     let active_id = {
@@ -649,7 +657,13 @@ async fn collection_hides_archived_by_default() {
     let body = get(&app, "/collection").await.body;
 
     assert!(body.contains(&active_id), "{body}");
-    assert!(!body.contains("now archived"), "{body}");
+    assert!(body.contains("now archived"), "{body}");
+    assert!(
+        body.contains(
+            r##"hx-get="/collection?status=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
+        ),
+        "page load should highlight All like the github mockup: {body}"
+    );
 }
 
 #[tokio::test]
@@ -895,7 +909,11 @@ async fn inbox_uses_collection_style_chrome() {
         "{body}"
     );
     assert!(
-        body.contains(r#"<span class="scope-kind">project:</span>github.com/acme/writ"#),
+        body.contains(r#">writ</span>"#),
+        "project chips should show only the repo leaf: {body}"
+    );
+    assert!(
+        !body.contains(r#"<span class="scope-kind">project:</span>"#),
         "{body}"
     );
     assert!(
