@@ -92,12 +92,11 @@ pub fn render(
 
         html.push_str(r#"<div class="table-shell"><table class="collection">"#);
         html.push_str(
-            r#"<colgroup><col class="title"><col class="project"><col class="scope"><col class="mode"><col class="hits"><col class="used"><col class="status"><col class="health"></colgroup>"#,
+            r#"<colgroup><col class="title"><col class="project"><col class="mode"><col class="hits"><col class="used"><col class="status"><col class="health"></colgroup>"#,
         );
         html.push_str("<thead><tr>");
         html.push_str(&sort_link("Title", "title", Some(sort_field), sort_dir, q));
         html.push_str(r#"<th scope="col">Project</th>"#);
-        html.push_str(r#"<th scope="col">Scope</th>"#);
         html.push_str(r#"<th scope="col">Mode</th>"#);
         html.push_str(&sort_link("Hits", "hit", Some(sort_field), sort_dir, q));
         html.push_str(&sort_link(
@@ -124,13 +123,8 @@ pub fn render(
             let last_used = row.last_selected_at.as_deref().unwrap_or("—");
 
             html.push_str("<tr>");
-            html.push_str(&format!(
-                "<td class=\"title-cell\"><a class=\"title-link\" href=\"/learnings/{}\">{}</a></td>",
-                escape(&row.id),
-                escape(&row.title)
-            ));
-            html.push_str(&scope_cell(&row.scopes, ScopeKind::Project));
-            html.push_str(&scope_cell_excluding(&row.scopes, ScopeKind::Project));
+            html.push_str(&title_cell(&row.id, &row.title, &row.scopes));
+            html.push_str(&project_cell(&row.scopes));
             html.push_str(&format!(
                 "<td><span class=\"mode-badge {}\">{}</span></td>",
                 if row.blocking { "blocking" } else { "advisory" },
@@ -228,31 +222,38 @@ fn sort_link(label: &str, field: &str, sort: Option<&str>, dir: &str, q: Option<
     )
 }
 
-fn scope_cell(scopes: &[Scope], kind: ScopeKind) -> String {
-    let matching: Vec<&Scope> = scopes.iter().filter(|scope| scope.kind == kind).collect();
-    let mut html = String::from("<td><div class=\"cell-chips\">");
-    if matching.is_empty() {
-        html.push_str(r#"<span class="muted empty-value">—</span>"#);
-    } else {
-        for scope in matching {
-            html.push_str(&scope_chip(scope, "project"));
+fn title_cell(id: &str, title: &str, scopes: &[Scope]) -> String {
+    let mut html = format!(
+        "<td class=\"title-cell\"><a class=\"title-link\" href=\"/learnings/{}\">{}</a>",
+        escape(id),
+        escape(title)
+    );
+    let meta: Vec<&Scope> = scopes
+        .iter()
+        .filter(|scope| scope.kind != ScopeKind::Project)
+        .collect();
+    if !meta.is_empty() {
+        html.push_str(r#"<div class="title-meta">"#);
+        for scope in meta {
+            html.push_str(&scope_chip(scope, "scope"));
         }
+        html.push_str("</div>");
     }
-    html.push_str("</div></td>");
+    html.push_str("</td>");
     html
 }
 
-fn scope_cell_excluding(scopes: &[Scope], excluded: ScopeKind) -> String {
+fn project_cell(scopes: &[Scope]) -> String {
     let matching: Vec<&Scope> = scopes
         .iter()
-        .filter(|scope| scope.kind != excluded)
+        .filter(|scope| scope.kind == ScopeKind::Project)
         .collect();
     let mut html = String::from("<td><div class=\"cell-chips\">");
     if matching.is_empty() {
         html.push_str(r#"<span class="muted empty-value">—</span>"#);
     } else {
         for scope in matching {
-            html.push_str(&scope_chip(scope, "scope"));
+            html.push_str(&scope_chip(scope, "project"));
         }
     }
     html.push_str("</div></td>");

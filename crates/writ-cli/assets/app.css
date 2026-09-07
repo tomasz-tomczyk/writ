@@ -485,14 +485,10 @@ table {
 }
 
 .collection col.title {
-  width: 24%;
+  width: 34%;
 }
 
 .collection col.project {
-  width: 16%;
-}
-
-.collection col.scope {
   width: 18%;
 }
 
@@ -618,6 +614,14 @@ tr:hover td {
   color: var(--accent);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+
+.title-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
 }
 
 .cell-chips {

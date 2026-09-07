@@ -487,7 +487,7 @@ async fn collection_uses_project_scope_and_mode_columns() {
     let body = get(&app, "/collection").await.body;
 
     assert!(body.contains(">Project</th>"), "{body}");
-    assert!(body.contains(">Scope</th>"), "{body}");
+    assert!(!body.contains(">Scope</th>"), "{body}");
     assert!(body.contains(">Mode</th>"), "{body}");
     assert!(!body.contains(">Matcher</th>"), "{body}");
     assert!(!body.contains("collection-only-secret"), "{body}");
@@ -500,6 +500,10 @@ async fn collection_uses_project_scope_and_mode_columns() {
     assert!(
         body.contains(r#"<span class="scope-kind">project:</span>github.com/acme/writ"#),
         "{body}"
+    );
+    assert!(
+        body.contains(r#"class="title-meta""#),
+        "non-project scopes belong under the title: {body}"
     );
     assert!(
         body.contains(r#"<span class="scope-kind">language:</span>rust"#),
@@ -551,7 +555,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
     );
     assert!(
         body.contains(
-            r#"<colgroup><col class="title"><col class="project"><col class="scope"><col class="mode"><col class="hits"><col class="used"><col class="status"><col class="health"></colgroup>"#
+            r#"<colgroup><col class="title"><col class="project"><col class="mode"><col class="hits"><col class="used"><col class="status"><col class="health"></colgroup>"#
         ),
         "{body}"
     );
