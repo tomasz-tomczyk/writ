@@ -80,14 +80,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Apple Silicon only on macOS — Intel runners are slow and sunsetting.
           - runner: macos-14
             target: aarch64-apple-darwin
             artifact: writ-darwin-arm64
-            binary: writ
-            strip: true
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-            artifact: writ-darwin-amd64
             binary: writ
             strip: true
           - runner: ubuntu-latest
@@ -194,7 +190,6 @@ jobs:
           VERSION="${TAG#v}"
 
           SHA_DARWIN_ARM64=$(sha256sum dist/writ-darwin-arm64 | cut -d' ' -f1)
-          SHA_DARWIN_AMD64=$(sha256sum dist/writ-darwin-amd64 | cut -d' ' -f1)
           SHA_LINUX_AMD64=$(sha256sum dist/writ-linux-amd64 | cut -d' ' -f1)
           SHA_LINUX_ARM64=$(sha256sum dist/writ-linux-arm64 | cut -d' ' -f1)
 
@@ -214,10 +209,6 @@ jobs:
               on_arm do
                 url "${BASE_URL}/writ-darwin-arm64"
                 sha256 "${SHA_DARWIN_ARM64}"
-              end
-              on_intel do
-                url "${BASE_URL}/writ-darwin-amd64"
-                sha256 "${SHA_DARWIN_AMD64}"
               end
             end
 
