@@ -8,6 +8,9 @@ use tower::ServiceExt;
 use writ_cli::ui::{AppState, router};
 use writ_core::{Config, ExemplarKind, NewExemplar, NewLearning, Selected, Status, Store};
 
+const TEST_HOST: &str = "writ.local:4173";
+const TEST_ORIGIN: &str = "http://writ.local:4173";
+
 fn start_app(db: &Path, config: Config) -> Router {
     let store = Store::open(db).unwrap();
     let state = AppState {
@@ -32,10 +35,27 @@ async fn request_kind(
     form: Option<&[(&str, &str)]>,
     htmx: bool,
 ) -> TestResponse {
+    request_kind_with_origin(app, method, uri, form, htmx, Some(TEST_ORIGIN)).await
+}
+
+async fn request_kind_with_origin(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    form: Option<&[(&str, &str)]>,
+    htmx: bool,
+    origin: Option<&str>,
+) -> TestResponse {
     let body = form
         .map(|fields| serde_urlencoded::to_string(fields).unwrap())
         .unwrap_or_default();
-    let mut builder = Request::builder().method(method).uri(uri);
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::HOST, TEST_HOST);
+    if let Some(origin) = origin {
+        builder = builder.header(header::ORIGIN, origin);
+    }
     if form.is_some() {
         builder = builder.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
     }
@@ -91,6 +111,18 @@ async fn post(app: &Router, uri: &str) -> TestResponse {
 
 async fn post_form(app: &Router, uri: &str, form: &[(&str, &str)]) -> TestResponse {
     request(app, Method::POST, uri, Some(form)).await
+}
+
+async fn foreign_post(app: &Router, uri: &str, form: Option<&[(&str, &str)]>) -> TestResponse {
+    request_kind_with_origin(
+        app,
+        Method::POST,
+        uri,
+        form,
+        false,
+        Some("https://attacker.example"),
+    )
+    .await
 }
 
 fn config() -> Config {
@@ -1166,4 +1198,162 @@ async fn health_archive_removes_from_health() {
 
     let body = get(&app, "/health").await.body;
     assert!(!body.contains("archive me"), "{body}");
+}
+
+#[tokio::test]
+async fn foreign_origin_is_rejected_before_every_post_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let marker = dir.path().join("editor-opened");
+    let (
+        approve_id,
+        reject_id,
+        health_archive_id,
+        detail_save_id,
+        detail_archive_id,
+        finding_owner_id,
+        finding_id,
+    ) = {
+        let mut store = Store::open(&db).unwrap();
+        let approve_id = proposed_with_exemplars(&mut store, "approve target", "a");
+        let reject_id = proposed_with_exemplars(&mut store, "reject target", "b");
+        let health_archive_id = active_with_exemplar(&mut store, "health archive target");
+        let detail_save_id = active_with_exemplar(&mut store, "detail save target");
+        let detail_archive_id = active_with_exemplar(&mut store, "detail archive target");
+        let finding_owner_id = active_with_exemplar(&mut store, "finding target");
+        let finding_id =
+            finding_with_path(&mut store, &finding_owner_id, Some("source.rs"), Some(12));
+        (
+            approve_id,
+            reject_id,
+            health_archive_id,
+            detail_save_id,
+            detail_archive_id,
+            finding_owner_id,
+            finding_id,
+        )
+    };
+    let mut app_config = config();
+    app_config.ui.editor_cmd = format!("touch {}", marker.display());
+    let app = start_app(&db, app_config);
+
+    let detail_form = [
+        ("title", "attacker changed title"),
+        ("rule", "attacker changed rule"),
+        ("rationale", "attacker changed rationale"),
+    ];
+    let requests = [
+        foreign_post(&app, &format!("/inbox/{approve_id}/approve"), None).await,
+        foreign_post(&app, &format!("/inbox/{reject_id}/reject"), None).await,
+        foreign_post(&app, &format!("/health/{health_archive_id}/archive"), None).await,
+        foreign_post(
+            &app,
+            &format!("/learnings/{detail_save_id}"),
+            Some(&detail_form),
+        )
+        .await,
+        foreign_post(
+            &app,
+            &format!("/learnings/{detail_archive_id}/archive"),
+            None,
+        )
+        .await,
+        foreign_post(&app, &format!("/findings/{finding_id}/reject"), None).await,
+        foreign_post(&app, &format!("/findings/{finding_id}/open"), None).await,
+    ];
+
+    for response in requests {
+        assert_eq!(response.status, StatusCode::FORBIDDEN, "{}", response.body);
+        assert!(response.body.contains("Origin"), "{}", response.body);
+        assert_eq!(response.headers["x-writ-protocol-version"], "1");
+    }
+
+    let store = Store::open(&db).unwrap();
+    assert_eq!(store.get(&approve_id).unwrap().status, Status::Proposed);
+    assert_eq!(store.get(&reject_id).unwrap().status, Status::Proposed);
+    assert_eq!(
+        store.get(&health_archive_id).unwrap().status,
+        Status::Active
+    );
+    let detail_save = store.get(&detail_save_id).unwrap();
+    assert_eq!(detail_save.title, "detail save target");
+    assert_eq!(detail_save.rule, "rule");
+    assert_eq!(detail_save.rationale, "rationale");
+    assert_eq!(
+        store.get(&detail_archive_id).unwrap().status,
+        Status::Active
+    );
+    assert_eq!(
+        store.finding(&finding_id).unwrap().outcome,
+        writ_core::Outcome::Open
+    );
+    assert_eq!(store.get(&finding_owner_id).unwrap().status, Status::Active);
+    assert!(
+        !marker.exists(),
+        "foreign Origin must not launch the editor"
+    );
+}
+
+#[tokio::test]
+async fn posts_without_an_origin_are_rejected_clearly() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        proposed_with_exemplars(&mut store, "missing origin", "a")
+    };
+    let app = start_app(&db, config());
+
+    let response = request_kind_with_origin(
+        &app,
+        Method::POST,
+        &format!("/inbox/{id}/approve"),
+        None,
+        false,
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::FORBIDDEN);
+    assert!(
+        response.body.contains("missing Origin"),
+        "{}",
+        response.body
+    );
+    assert_eq!(
+        Store::open(&db).unwrap().get(&id).unwrap().status,
+        Status::Proposed
+    );
+}
+
+#[tokio::test]
+async fn same_origin_post_succeeds_and_get_cannot_mutate() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let (same_origin_id, get_id) = {
+        let mut store = Store::open(&db).unwrap();
+        (
+            proposed_with_exemplars(&mut store, "same origin", "a"),
+            proposed_with_exemplars(&mut store, "get target", "b"),
+        )
+    };
+    let app = start_app(&db, config());
+
+    let accepted = post(&app, &format!("/inbox/{same_origin_id}/approve")).await;
+    assert_eq!(accepted.status, StatusCode::SEE_OTHER, "{}", accepted.body);
+
+    let get_response = request_kind_with_origin(
+        &app,
+        Method::GET,
+        &format!("/inbox/{get_id}/approve"),
+        None,
+        false,
+        Some("https://attacker.example"),
+    )
+    .await;
+    assert_eq!(get_response.status, StatusCode::METHOD_NOT_ALLOWED);
+
+    let store = Store::open(&db).unwrap();
+    assert_eq!(store.get(&same_origin_id).unwrap().status, Status::Active);
+    assert_eq!(store.get(&get_id).unwrap().status, Status::Proposed);
 }
