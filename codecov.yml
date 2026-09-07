@@ -1,0 +1,34 @@
+# Patch coverage is the hard gate for new work (option C).
+# Project stays on auto until overall coverage reaches 80%, then ratchet
+# target to 80% and set informational: false.
+codecov:
+  require_ci_to_pass: true
+  notify:
+    wait_for_ci: true
+
+coverage:
+  precision: 1
+  round: down
+  range: "70...90"
+
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 0%
+        if_ci_failed: error
+        informational: true
+        removed_code_behavior: adjust_base
+
+    patch:
+      default:
+        target: 80%
+        threshold: 0%
+        informational: false
+
+comment:
+  layout: "diff, flags, files"
+  behavior: default
+  require_changes: true
+  require_base: true
+  require_head: true

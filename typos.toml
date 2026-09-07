@@ -1,0 +1,14 @@
+[files]
+extend-exclude = [
+  "Cargo.lock",
+  "target/",
+  "*.db",
+  # Vendored / minified assets; not prose.
+  "crates/writ-cli/assets/**",
+]
+
+[default]
+extend-ignore-re = [
+  # Short hex / opaque IDs in tests and fixtures.
+  "\\b[0-9a-f]{7,}\\b",
+]
