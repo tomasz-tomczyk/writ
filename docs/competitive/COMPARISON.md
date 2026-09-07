@@ -36,3 +36,23 @@ marked final.
 | Multi-agent host neutrality | Broad SDK/framework integrations plus MCP server for Claude Code, Cursor, Codex, Windsurf, OpenCode. |
 | Open source | Yes; Apache 2.0 open-source library/server plus optional managed cloud. |
 | Pricing posture | Freemium managed cloud (free Hobby → $249+/mo Pro/Enterprise) plus free self-hosted open source. |
+
+## Suggested matrix values from per-tool research (langmem)
+
+The following are proposed values for the `langmem` column, pending synthesis.
+They should be reconciled with the full matrix format before the matrix is
+marked final.
+
+| Dimension | Suggested value for langmem |
+|---|---|
+| Local-first / data leaves machine | Core SDK runs in-process; storage can be local `InMemoryStore` or self-hosted Postgres/Redis/MongoDB. Not local-only by design; managed service interest form exists. |
+| Durable rules with rationale | Stores extracted facts, profiles, episodes, and prompt rules; no required human-authored rationale per memory. |
+| Human approve before active | No explicit `proposed → active` approval gate; memories enter retrieval once written to the store. |
+| Scope model | Hierarchical namespaces (`namespace` + `key`) plus metadata filters; not rule-level applicability scopes like project/language/glob. |
+| Diff-time selection / audit | Retrieval by semantic similarity / metadata filtering to the current query; not a diff-time rule selection or review prompt. |
+| Prune / archive | Update/delete/consolidate operations are configurable; evidence-preserving archive equivalent to `writ archive` not confirmed. |
+| UI for collection | No dedicated curation UI in the open-source SDK; LangGraph Platform provides deployment tooling. |
+| Terminal findings | Not a terminal findings tool; it is a retrieval and prompt-optimization layer. |
+| Multi-agent host neutrality | LangGraph-native; core API is storage-agnostic but documented examples are LangGraph/LangChain. Python SDK only in the main repo. |
+| Open source | Yes; MIT license. |
+| Pricing posture | Free open-source SDK; managed service is an interest form, not a launched paid tier. |
