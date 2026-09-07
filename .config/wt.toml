@@ -1,0 +1,4 @@
+# Worktrunk project hooks for writ.
+# mise manages the toolchain (see AGENTS.md); new worktrees must trust mise.toml
+# before `mise exec` / `mise run` will work.
+pre-start = "if [ -f mise.toml ] || [ -f .mise.toml ]; then mise trust; fi"
