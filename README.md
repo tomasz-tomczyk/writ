@@ -47,6 +47,7 @@ cargo install --path crates/writ-cli
 writ record --title T --rule R --rationale WHY --scope language:rust --activate
 writ audit
 writ list --never-applied
+writ edit ID --matcher PATTERN --matcher-kind ast_grep
 writ archive ID
 writ ui
 ```
@@ -58,9 +59,12 @@ writ ui
    learnings that apply to it, and prints them for a reviewing agent.
 3. **`writ list`** reads the collection back. `--unused-days` and
    `--never-applied` find the rules that are not earning their place.
-4. **`writ archive`** prunes one. It stops being selected and stays in
+4. **`writ edit ID`** mutates an existing learning. Omitted fields stay
+   unchanged; `--scope` and `--example-text` replace their full sets;
+   `--activate` moves a `proposed` learning to `active`.
+5. **`writ archive`** prunes one. It stops being selected and stays in
    the database.
-5. **`writ ui`** opens four screens: Inbox, Collection, Detail, Health.
+6. **`writ ui`** opens four screens: Inbox, Collection, Detail, Health.
 
 An audit costs what the diff costs, not what the collection costs. It
 sends at most `max_rules` learnings and `max_chars` of rule text,
@@ -68,9 +72,10 @@ whether you hold fifty learnings or a thousand.
 
 ## Agents
 
-`writ mcp` serves two tools, `writ_record` and `writ_audit`, on stdio.
-Both are shells over the same code the commands above run. That makes
-writ reachable. It does not make the review happen.
+`writ mcp` serves three tools, `writ_record`, `writ_audit`, and
+`writ_edit`, on stdio. All are shells over the same code the commands
+above run. That makes writ reachable. It does not make the review
+happen.
 
 `writ audit --hook HOST` is what makes the review not optional. It emits
 the same verdict in each host's own gate protocol, so a turn that

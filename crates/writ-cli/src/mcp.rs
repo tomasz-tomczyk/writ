@@ -1,11 +1,11 @@
 //! `writ mcp`. Spec section 9.1.
 //!
-//! Two tools, `writ_record` and `writ_audit`. Not one per verb: every tool
-//! definition sits in the agent's context all session, and P3 is about not
-//! spending context you did not have to. The UI, health, and pruning stay
-//! human-only and out of the tool list.
+//! Three tools, `writ_record`, `writ_audit`, and `writ_edit`. Not one per
+//! verb: every tool definition sits in the agent's context all session, and
+//! P3 is about not spending context you did not have to. The UI, health,
+//! archive, and telemetry stay human-only and out of the tool list.
 //!
-//! Both tools are shells. Each turns its arguments into the argv the CLI
+//! The tools are shells. Each turns its arguments into the argv the CLI
 //! would have been given, hands that to the same clap parser the binary
 //! uses, and calls the same function. Nothing here validates, defaults, or
 //! decides. That is what makes the parity test in `tests/mcp.rs` provable
@@ -14,8 +14,8 @@
 //!
 //! The transport is newline-delimited JSON-RPC 2.0 on stdio, written by
 //! hand. A crate would add a dependency, an async runtime, and a derive
-//! layer to serve two tools over a protocol whose stdio framing is one
-//! line of JSON per message.
+//! layer to serve them over a protocol whose stdio framing is one line of
+//! JSON per message.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -28,6 +28,7 @@ use writ_core::{
 };
 
 use crate::audit;
+use crate::edit;
 use crate::record;
 use crate::telemetry;
 
@@ -56,6 +57,8 @@ pub enum Kind {
     /// A document the CLI reads on stdin. stdin is the transport here, so
     /// the tool takes it as an argument instead.
     Stdin,
+    /// A positional value: `writ edit ID`.
+    Positional,
 }
 
 /// One argument of one tool, and the flag it is.
@@ -202,7 +205,90 @@ const AUDIT_ARGS: &[ToolArg] = &[
     },
 ];
 
-/// The whole tool list. Two entries, and section 9.1 says why not three.
+/// Spec section 5, the `writ edit ID` row.
+///
+/// `--example` is absent for the same reason it is absent from
+/// `writ_record`: an agent holds snippet text, not a file path.
+/// `--format` is absent because this surface always answers JSON.
+const EDIT_ARGS: &[ToolArg] = &[
+    ToolArg {
+        name: "id",
+        flag: "id",
+        kind: Kind::Positional,
+        about: "The learning to edit",
+    },
+    ToolArg {
+        name: "title",
+        flag: "title",
+        kind: Kind::Text,
+        about: "A short name for the learning",
+    },
+    ToolArg {
+        name: "rule",
+        flag: "rule",
+        kind: Kind::Text,
+        about: "What to do",
+    },
+    ToolArg {
+        name: "rationale",
+        flag: "rationale",
+        kind: Kind::Text,
+        about: "Why the rule exists. Required, and never empty",
+    },
+    ToolArg {
+        name: "scope",
+        flag: "scope",
+        kind: Kind::TextList,
+        about: "Where it applies: global, project:ID, language:LANG or glob:PAT. \
+                Any scope replaces the full set",
+    },
+    ToolArg {
+        name: "advisory",
+        flag: "advisory",
+        kind: Kind::Flag,
+        about: "Demote to report-only",
+    },
+    ToolArg {
+        name: "blocking",
+        flag: "blocking",
+        kind: Kind::Flag,
+        about: "Promote to blocking (the default for new learnings)",
+    },
+    ToolArg {
+        name: "matcher",
+        flag: "matcher",
+        kind: Kind::Text,
+        about: "Structural retrieval pattern for the rule. Pair with matcher_kind",
+    },
+    ToolArg {
+        name: "matcher_kind",
+        flag: "matcher-kind",
+        kind: Kind::Text,
+        about: "Dialect of matcher: ast_grep (preferred with language: scope) or regex",
+    },
+    ToolArg {
+        name: "clear_matcher",
+        flag: "clear-matcher",
+        kind: Kind::Flag,
+        about: "Remove any matcher and matcher-kind",
+    },
+    ToolArg {
+        name: "example_text",
+        flag: "example-text",
+        kind: Kind::TextList,
+        about: "A snippet the rule is about, as good:TEXT or bad:TEXT. Give the pair when you \
+                can: the wrong code and the right code teach more than the rule alone. \
+                Any example_text replaces the full exemplar set",
+    },
+    ToolArg {
+        name: "activate",
+        flag: "activate",
+        kind: Kind::Flag,
+        about: "Sugar for proposed → active after a successful edit",
+    },
+];
+
+/// The whole tool list. Three entries, and section 9.1 says why not more.
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "writ_record",
@@ -217,6 +303,14 @@ pub const TOOLS: &[Tool] = &[
         about: "Check a diff against the learnings that apply to it, or, with findings, \
                 write back what the review found.",
         args: AUDIT_ARGS,
+    },
+    Tool {
+        name: "writ_edit",
+        command: "edit",
+        about: "Edit an existing learning: title, rule, rationale, scope, blocking, \
+                matcher, or exemplars. Proposed learnings can be activated; \
+                archived ones cannot.",
+        args: EDIT_ARGS,
     },
 ];
 
@@ -240,6 +334,7 @@ impl Tool {
                     "description": arg.about,
                 }),
                 Kind::Stdin => json!({ "type": "object", "description": arg.about }),
+                Kind::Positional => json!({ "type": "string", "description": arg.about }),
             };
             properties.insert(arg.name.to_string(), schema);
         }
@@ -270,6 +365,7 @@ impl Tool {
     ) -> std::result::Result<(Vec<String>, Option<String>), String> {
         let mut argv = vec!["writ".to_string()];
         let mut stdin = None;
+        let mut positional = Vec::new();
         let Some(object) = arguments.as_object() else {
             return Err("arguments must be a JSON object".to_string());
         };
@@ -288,14 +384,23 @@ impl Tool {
                         .join(", ")
                 ));
             };
-            let flag = format!("--{}", arg.flag);
             match arg.kind {
-                Kind::Flag => match value.as_bool() {
-                    Some(true) => argv.push(flag),
-                    Some(false) => {}
-                    None => return Err(format!("{name} takes true or false")),
-                },
+                Kind::Positional => {
+                    let text = value
+                        .as_str()
+                        .ok_or_else(|| format!("{name} takes a string"))?;
+                    positional.push(text.to_string());
+                }
+                Kind::Flag => {
+                    let flag = format!("--{}", arg.flag);
+                    match value.as_bool() {
+                        Some(true) => argv.push(flag),
+                        Some(false) => {}
+                        None => return Err(format!("{name} takes true or false")),
+                    }
+                }
                 Kind::Text => {
+                    let flag = format!("--{}", arg.flag);
                     let text = value
                         .as_str()
                         .ok_or_else(|| format!("{name} takes a string"))?;
@@ -303,6 +408,7 @@ impl Tool {
                     argv.push(text.to_string());
                 }
                 Kind::Number => {
+                    let flag = format!("--{}", arg.flag);
                     let number = value
                         .as_u64()
                         .ok_or_else(|| format!("{name} takes a whole number"))?;
@@ -310,6 +416,7 @@ impl Tool {
                     argv.push(number.to_string());
                 }
                 Kind::TextList => {
+                    let flag = format!("--{}", arg.flag);
                     let list = value
                         .as_array()
                         .ok_or_else(|| format!("{name} takes an array of strings"))?;
@@ -322,11 +429,12 @@ impl Tool {
                     }
                 }
                 Kind::Stdin => {
-                    argv.push(flag);
+                    argv.push(format!("--{}", arg.flag));
                     stdin = Some(value.to_string());
                 }
             }
         }
+        argv.extend(positional);
         Ok((argv, stdin))
     }
 }
@@ -344,6 +452,13 @@ struct RecordLine {
 struct AuditLine {
     #[command(flatten)]
     inner: audit::Args,
+}
+
+/// The same for `edit::Args`.
+#[derive(Debug, Parser)]
+struct EditLine {
+    #[command(flatten)]
+    inner: edit::Args,
 }
 
 /// The server, with the paths every subcommand resolved once.
@@ -411,7 +526,7 @@ impl Server {
 
         let Some(tool) = tool(name) else {
             return failure(&format!(
-                "unknown tool {name}. writ serves writ_record and writ_audit"
+                "unknown tool {name}. writ serves writ_record, writ_audit, and writ_edit"
             ));
         };
         let (argv, stdin) = match tool.to_argv(&arguments) {
@@ -456,6 +571,12 @@ impl Server {
                 }
                 self.observe(std::mem::take(&mut run.telemetry), CommandMetric::Audit);
                 Ok(report)
+            }
+            "edit" => {
+                let line = EditLine::try_parse_from(argv).map_err(usage)?;
+                let learning = edit::execute(&line.inner, &self.db).map_err(cause)?;
+                self.observe(TelemetryBatch::default(), CommandMetric::Edit);
+                Ok(serde_json::to_value(&learning).expect("Learning serializes"))
             }
             other => Err(format!("no such command {other}")),
         }

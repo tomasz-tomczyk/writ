@@ -95,3 +95,20 @@ Say the id back to the user, and say whether it is active or waiting in
 the Inbox. Nothing detects duplicates, so when the user says the lesson
 is already recorded, use `writ record --reinforce ID` with the id they
 name instead of writing a second row that says the same thing.
+
+## Fix a learning in place
+
+When the user corrects a rule that is already recorded — a better
+rationale, a narrower scope, a sharper matcher, a missing exemplar —
+edit it instead of writing a second one.
+
+```
+writ edit ID --rationale "..."
+writ edit ID --scope language:rust --scope glob:crates/**
+writ edit ID --matcher PATTERN --matcher-kind ast_grep --activate
+```
+
+Omitted fields stay unchanged. `--scope` and `--example-text` replace
+their full sets. `--activate` moves a `proposed` learning to `active`;
+it is rejected for archived learnings. The same edit is available as
+the `writ_edit` MCP tool.

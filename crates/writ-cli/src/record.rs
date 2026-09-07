@@ -223,7 +223,8 @@ impl Args {
 
     /// Every exemplar, from both forms. Files first, then inline text.
     fn exemplars(&self) -> Result<Vec<NewExemplar>> {
-        let files = self.examples.iter().map(|text| {
+        let mut out = Vec::with_capacity(self.examples.len() + self.example_texts.len());
+        for text in &self.examples {
             let (kind, path) = split_kind(text, "--example", "FILE")?;
             let snippet = read_snippet(Path::new(path))?;
             if snippet.is_empty() {
@@ -231,9 +232,40 @@ impl Args {
                     message: format!("the example file {path} is empty"),
                 });
             }
-            Ok(exemplar(kind, snippet))
-        });
-        let inline = self.example_texts.iter().map(|text| {
+            out.push(exemplar(kind, snippet));
+        }
+        out.extend(parse_example_texts(&self.example_texts)?);
+        Ok(out)
+    }
+}
+
+/// Split `good:REST`, and say which flag wanted it.
+pub(crate) fn split_kind<'a>(
+    text: &'a str,
+    flag: &str,
+    rest: &str,
+) -> Result<(ExemplarKind, &'a str)> {
+    let (kind, value) = text.split_once(':').ok_or_else(|| Error::Validation {
+        message: format!("{flag} takes good:{rest} or bad:{rest}, not {text}"),
+    })?;
+    Ok((kind.parse()?, value))
+}
+
+pub(crate) fn exemplar(kind: ExemplarKind, snippet: String) -> NewExemplar {
+    NewExemplar {
+        kind,
+        language: None,
+        snippet,
+        note: None,
+    }
+}
+
+/// Parse repeated `--example-text KIND:TEXT` values. Shared by `record` and
+/// `edit` so the two commands refuse the same empty snippet the same way.
+pub(crate) fn parse_example_texts(texts: &[String]) -> Result<Vec<NewExemplar>> {
+    texts
+        .iter()
+        .map(|text| {
             let (kind, snippet) = split_kind(text, "--example-text", "TEXT")?;
             if snippet.is_empty() {
                 return Err(Error::Validation {
@@ -241,26 +273,8 @@ impl Args {
                 });
             }
             Ok(exemplar(kind, snippet.to_string()))
-        });
-        files.chain(inline).collect()
-    }
-}
-
-/// Split `good:REST`, and say which flag wanted it.
-fn split_kind<'a>(text: &'a str, flag: &str, rest: &str) -> Result<(ExemplarKind, &'a str)> {
-    let (kind, value) = text.split_once(':').ok_or_else(|| Error::Validation {
-        message: format!("{flag} takes good:{rest} or bad:{rest}, not {text}"),
-    })?;
-    Ok((kind.parse()?, value))
-}
-
-fn exemplar(kind: ExemplarKind, snippet: String) -> NewExemplar {
-    NewExemplar {
-        kind,
-        language: None,
-        snippet,
-        note: None,
-    }
+        })
+        .collect()
 }
 
 /// Read the whole stream, and never wait on a person.
