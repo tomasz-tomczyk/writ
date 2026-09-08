@@ -1232,6 +1232,66 @@ mod tests {
         assert_eq!(applied, SCHEMA_VERSION);
     }
 
+    /// An existing v1 database must pick up `sides` with DEFAULT `both`
+    /// without rewriting rows by hand.
+    #[test]
+    fn migrating_a_v1_database_adds_sides_defaulting_to_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learnings.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE writ_migrations (
+                   version    INTEGER PRIMARY KEY,
+                   applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+                 );",
+            )
+            .unwrap();
+            conn.execute_batch(include_str!("migrations/0001_initial.sql"))
+                .unwrap();
+            conn.execute("INSERT INTO writ_migrations (version) VALUES (1)", [])
+                .unwrap();
+            let id = new_id();
+            conn.execute(
+                "INSERT INTO learnings (id, title, rule, rationale, source_kind)
+                 VALUES (?1, 'old', 'keep', 'why', 'manual')",
+                [&id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO learning_scopes (learning_id, kind, value)
+                 VALUES (?1, 'global', '')",
+                [&id],
+            )
+            .unwrap();
+
+            let columns: Vec<String> = {
+                let mut stmt = conn.prepare("PRAGMA table_info(learnings)").unwrap();
+                stmt.query_map([], |row| row.get::<_, String>(1))
+                    .unwrap()
+                    .map(|row| row.unwrap())
+                    .collect()
+            };
+            assert!(
+                !columns.iter().any(|name| name == "sides"),
+                "v1 schema must lack sides: {columns:?}"
+            );
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        let learning = store
+            .list(&ListFilter::default())
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("the pre-migration row must survive");
+        assert_eq!(learning.title, "old");
+        assert_eq!(learning.rule, "keep");
+        assert_eq!(learning.sides, Sides::Both);
+    }
+
     #[test]
     fn inserting_a_learning_fills_the_fts_index() {
         let store = Store::open_in_memory().unwrap();

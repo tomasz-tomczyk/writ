@@ -453,10 +453,6 @@ fn blocking_default() -> bool {
     true
 }
 
-fn sides_default() -> Sides {
-    Sides::Both
-}
-
 /// Everything one `writ record` writes.
 ///
 /// The three timestamp fields exist for import only. Invariant 7 forbids
@@ -488,7 +484,7 @@ pub struct NewLearning {
     #[serde(default = "blocking_default")]
     pub blocking: bool,
     /// Which half of the diff the rule cares about. `both` is the default.
-    #[serde(default = "sides_default")]
+    #[serde(default)]
     pub sides: Sides,
     /// The dialect of `matcher`.
     #[serde(default)]

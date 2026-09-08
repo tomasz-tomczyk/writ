@@ -794,6 +794,7 @@ fn record_and_list_advertise_every_documented_flag() {
         "--example",
         "--matcher",
         "--matcher-kind",
+        "--sides",
         "--status",
         "--activate",
         "--json",
@@ -2447,6 +2448,23 @@ fn sides_is_stored_and_editable() {
 }
 
 #[test]
+fn sides_added_without_a_matcher_drops_a_removal_only_diff() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(root.join("a.rs"), "fn keep_me() {}\nfn main() {}\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "two"]);
+
+    let learning = sandbox.record(&["--sides", "added", "--activate"]);
+    // Pure deletion: one line gone, nothing added.
+    std::fs::write(root.join("a.rs"), "fn main() {}\n").unwrap();
+    assert!(
+        !audit_ids(&sandbox, &root, &[]).contains(&learning),
+        "a matcher-less sides=added rule must not burn budget on a pure deletion"
+    );
+}
+
+#[test]
 fn an_unknown_sides_value_is_a_usage_error() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&[
@@ -3153,6 +3171,7 @@ fn audit_show_archive_and_edit_advertise_every_documented_flag() {
         "--scope",
         "--advisory",
         "--blocking",
+        "--sides",
         "--matcher",
         "--matcher-kind",
         "--clear-matcher",

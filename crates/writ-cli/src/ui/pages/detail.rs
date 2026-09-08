@@ -95,14 +95,11 @@ fn render_with_origin(state: &AppState, id: &str, origin: Option<&str>) -> Resul
             writ_core::Sides::Added,
             writ_core::Sides::Removed,
         ] {
+            let selected = learning.sides == side;
             html.push_str(&format!(
                 "<option value=\"{}\"{}>{}</option>",
                 escape(side.as_str()),
-                if learning.sides == side {
-                    " selected"
-                } else {
-                    ""
-                },
+                if selected { " selected" } else { "" },
                 escape(side.as_str())
             ));
         }

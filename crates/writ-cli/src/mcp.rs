@@ -264,7 +264,8 @@ const EDIT_ARGS: &[ToolArg] = &[
         name: "sides",
         flag: "sides",
         kind: Kind::Text,
-        about: "Which half of the diff the rule cares about: added, removed, or both (default both)",
+        about: "Which half of the diff the rule cares about: added, removed, or both. \
+                Omit to keep the current value",
     },
     ToolArg {
         name: "matcher",

@@ -46,7 +46,7 @@ pub fn parse_jsonl(text: &str) -> Result<Vec<NewLearning>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ExemplarKind, Status};
+    use crate::model::{ExemplarKind, Sides, Status};
 
     const ONE: &str = r#"{"title":"t","rule":"r","rationale":"why"}"#;
 
@@ -57,7 +57,7 @@ mod tests {
         assert_eq!(learnings[0].rule, "r");
         assert_eq!(learnings[0].source_kind, Some(SourceKind::Import));
         assert!(learnings[0].blocking, "blocking is the default");
-        assert_eq!(learnings[0].sides, crate::model::Sides::Both);
+        assert_eq!(learnings[0].sides, Sides::Both);
         assert_eq!(learnings[0].effective_status(), Status::Proposed);
     }
 
@@ -80,7 +80,7 @@ mod tests {
             ]
         );
         assert!(!learning.blocking);
-        assert_eq!(learning.sides, crate::model::Sides::Added);
+        assert_eq!(learning.sides, Sides::Added);
         assert_eq!(learning.exemplars[0].kind, ExemplarKind::Bad);
         assert_eq!(learning.exemplars[0].snippet, "let x = 1;");
     }

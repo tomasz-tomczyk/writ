@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diff::Diff;
 use crate::error::{Error, Result};
-use crate::model::{Exemplar, ExemplarKind, Learning};
+use crate::model::{Exemplar, ExemplarKind, Learning, Sides};
 use crate::repo::RepoIdentity;
 
 /// What one audit is looking at.
@@ -124,7 +124,7 @@ pub fn rule_block(position: usize, selected: &Selected) -> String {
             "advisory"
         }
     ));
-    if selected.learning.sides != crate::model::Sides::Both {
+    if selected.learning.sides != Sides::Both {
         block.push_str(&format!("sides: {}\n", selected.learning.sides));
     }
     let scopes = selected
@@ -330,7 +330,7 @@ pub struct Ingested {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{SourceKind, Status};
+    use crate::model::{Scope, SourceKind, Status};
 
     fn learning(id: &str, blocking: bool) -> Learning {
         Learning {
@@ -342,7 +342,7 @@ mod tests {
             rule: "r".into(),
             rationale: "why".into(),
             blocking,
-            sides: crate::model::Sides::Both,
+            sides: Sides::Both,
             matcher_kind: None,
             matcher: None,
             source_kind: SourceKind::Manual,
@@ -356,7 +356,7 @@ mod tests {
             times_applied: 0,
             last_applied_at: None,
             last_verified: None,
-            scopes: vec![crate::model::Scope::global()],
+            scopes: vec![Scope::global()],
         }
     }
 
@@ -424,7 +424,7 @@ mod tests {
         );
 
         let mut added = learning("b", true);
-        added.sides = crate::model::Sides::Added;
+        added.sides = Sides::Added;
         let added_block = rule_block(
             1,
             &Selected {

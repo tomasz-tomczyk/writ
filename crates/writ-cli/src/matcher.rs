@@ -86,16 +86,9 @@ fn regex_verdict(pattern: &str, diff: &Diff, sides: Sides) -> Verdict {
 /// Shell out to `ast-grep`. Spec section 8.2: shell out now, embed on a
 /// trigger.
 fn ast_grep_verdict(pattern: &str, learning: &Learning, diff: &Diff, root: &Path) -> Verdict {
-    let check_added = learning.sides.includes_added();
-    let check_removed = learning.sides.includes_removed();
+    let present = paths_on_disk(diff, root);
 
-    if check_added {
-        let present: HashSet<&str> = diff
-            .paths
-            .iter()
-            .map(String::as_str)
-            .filter(|path| root.join(path).is_file())
-            .collect();
+    if learning.sides.includes_added() {
         let files: Vec<String> = present.iter().map(|path| (*path).to_string()).collect();
         if !files.is_empty() {
             match run_ast_grep_files(pattern, learning, &files, root) {
@@ -106,21 +99,12 @@ fn ast_grep_verdict(pattern: &str, learning: &Learning, diff: &Diff, root: &Path
         }
     }
 
-    if !check_removed {
+    // Add-only diffs, or sides that ignore removals, have nothing to
+    // recover from a pre-image.
+    if !learning.sides.includes_removed() || diff.removed.is_empty() {
         return Verdict::Miss;
     }
 
-    // Add-only diffs have nothing to recover from a pre-image.
-    if diff.removed.is_empty() {
-        return Verdict::Miss;
-    }
-
-    let present: HashSet<&str> = diff
-        .paths
-        .iter()
-        .map(String::as_str)
-        .filter(|path| root.join(path).is_file())
-        .collect();
     let language_scope = language_scope(learning);
     let mut fallback_notices = Vec::new();
     for path in &diff.paths {
@@ -157,6 +141,16 @@ fn ast_grep_verdict(pattern: &str, learning: &Learning, diff: &Diff, root: &Path
     } else {
         Verdict::MissWithNotice(fallback_notices.join("; "))
     }
+}
+
+/// Diff paths that still exist on disk. Used both to run post-image
+/// ast-grep and to decide whether a missing pre-image is a soft fallback.
+fn paths_on_disk<'a>(diff: &'a Diff, root: &Path) -> HashSet<&'a str> {
+    diff.paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| root.join(path).is_file())
+        .collect()
 }
 
 fn language_scope(learning: &Learning) -> Option<&str> {
