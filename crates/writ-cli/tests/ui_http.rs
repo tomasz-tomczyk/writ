@@ -280,7 +280,7 @@ async fn collection_filters_exclude_review_and_cover_ledger_states() {
 
     let attention = get(&app, "/collection?view=needs-attention").await.body;
     assert!(attention.contains("stale rule"), "{attention}");
-    assert!(attention.contains("Not selected in 90 days"), "{attention}");
+    assert!(attention.contains("Unused 90d"), "{attention}");
 
     let archive = get(&app, "/collection?view=archive").await.body;
     assert!(archive.contains("archived evidence"), "{archive}");
@@ -306,11 +306,11 @@ async fn detail_uses_the_learning_title_and_returns_to_its_collection_mode() {
         "{body}"
     );
     assert!(
-        body.contains(
-            r#"class="detail-back" href="/collection?view=needs-attention">Back to Needs attention</a>"#
-        ),
+        body.contains(r#"class="back-link" href="/collection?view=needs-attention""#),
         "{body}"
     );
+    assert!(body.contains("Needs attention</a>"), "{body}");
+    assert!(!body.contains("Back to "), "{body}");
 }
 
 #[tokio::test]
@@ -1525,7 +1525,7 @@ async fn health_lists_unused_rules() {
     let body = get(&app, "/collection?view=needs-attention").await.body;
 
     assert!(body.contains("old and unused"), "{body}");
-    assert!(body.contains("Not selected in 90 days"), "{body}");
+    assert!(body.contains("Unused 90d"), "{body}");
 }
 
 #[tokio::test]
@@ -1542,7 +1542,9 @@ async fn health_lists_never_applied_rules() {
     let body = get(&app, "/collection?view=needs-attention").await.body;
 
     assert!(body.contains("selected but silent"), "{body}");
-    assert!(body.contains("Selected but never applied"), "{body}");
+    assert!(body.contains("Never applied"), "{body}");
+    assert!(!body.contains(">Edit</a>"), "{body}");
+    assert!(body.contains(r#"class="row-actions""#), "{body}");
 }
 
 #[tokio::test]
@@ -1618,6 +1620,10 @@ async fn inbox_opens_learning_detail_from_proposal() {
     assert!(
         body.contains(r#"class="proposal-title""#),
         "title stays visible while the card opens detail: {body}"
+    );
+    assert!(
+        !body.contains(">Edit</a>"),
+        "title opens detail; no separate Edit control: {body}"
     );
 }
 
@@ -1697,7 +1703,13 @@ async fn health_uses_collection_style_chrome() {
         body.contains(r#"<span class="scope-kind">language:</span>elixir"#),
         "{body}"
     );
-    assert!(body.contains(r#"class="btn danger""#), "{body}");
+    assert!(body.contains(r#"class="row-actions""#), "{body}");
+    assert!(body.contains(r#"class="action-link danger""#), "{body}");
+    assert!(!body.contains(">Edit</a>"), "{body}");
+    assert!(
+        body.contains("health-controls"),
+        "Needs attention should share Collection control chrome: {body}"
+    );
 }
 
 #[tokio::test]

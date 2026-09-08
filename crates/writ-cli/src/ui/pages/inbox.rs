@@ -8,7 +8,7 @@ const SWAP: &str = r##" hx-target="#collection-body" hx-swap="outerHTML""##;
 
 /// Render the Inbox page body.
 ///
-/// Merge-into is deferred: the UI offers Approve, Reject, and Edit only.
+/// Merge-into is deferred: the UI offers Approve and Reject; the title opens Detail.
 pub fn render(state: &AppState) -> Result<String, Error> {
     with_store(state, |store| {
         let proposed = store.list(&ListFilter {
@@ -121,10 +121,6 @@ pub fn render(state: &AppState) -> Result<String, Error> {
             let reject = format!("/inbox/{}/reject", escape(&learning.id));
             html.push_str(&format!(
                 "<form method=\"post\" action=\"{reject}\" hx-post=\"{reject}\"{SWAP}><button type=\"submit\" class=\"btn danger\">Archive proposal</button></form>"
-            ));
-            html.push_str(&format!(
-                "<a href=\"/learnings/{}?from=review\" class=\"btn button\">Edit</a>",
-                escape(&learning.id)
             ));
             html.push_str("</div>");
 

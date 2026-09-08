@@ -33,7 +33,18 @@ pub fn render(state: &AppState) -> Result<String, Error> {
 
         let mut ordered: Vec<HealthRow> = rows.into_values().collect();
         ordered.sort_by(|left, right| left.learning.title.cmp(&right.learning.title));
+        let result_count = ordered.len();
 
+        html.push_str(r#"<div class="collection-controls health-controls">"#);
+        html.push_str(&format!(
+            r#"<span class="result-count">{} {}</span></div>"#,
+            result_count,
+            if result_count == 1 {
+                "needs attention"
+            } else {
+                "need attention"
+            }
+        ));
         html.push_str(r#"<div class="table-shell"><table class="health collection">"#);
         html.push_str(
             r#"<colgroup><col class="title"><col class="bucket"><col class="selections"><col class="used"><col class="hits"><col class="actions"></colgroup>"#,
@@ -85,21 +96,17 @@ pub fn render(state: &AppState) -> Result<String, Error> {
                 "<td class=\"numeric\">{}</td>",
                 learning.times_applied
             ));
-            html.push_str("<td class=\"actions\">");
-            let archive = format!("/health/{}/archive", escape(&learning.id));
+            html.push_str(r#"<td class="actions-cell"><div class="row-actions">"#);
             html.push_str(&format!(
-                "<form method=\"post\" action=\"{archive}\" hx-post=\"{archive}\"{SWAP}><button type=\"submit\" class=\"btn danger\">Archive</button></form>"
-            ));
-            html.push_str(&format!(
-                "<a href=\"/learnings/{}?from=needs-attention\" class=\"btn button\">Edit</a>",
-                escape(&learning.id)
-            ));
-            html.push_str(&format!(
-                "<a href=\"/health/{}/keep\" hx-get=\"/health/{}/keep\"{SWAP} class=\"btn button keep\">Keep active</a>",
+                "<a href=\"/health/{}/keep\" hx-get=\"/health/{}/keep\"{SWAP} class=\"action-link keep\">Keep</a>",
                 escape(&learning.id),
                 escape(&learning.id)
             ));
-            html.push_str("</td></tr>");
+            let archive = format!("/health/{}/archive", escape(&learning.id));
+            html.push_str(&format!(
+                "<form method=\"post\" action=\"{archive}\" hx-post=\"{archive}\"{SWAP}><button type=\"submit\" class=\"action-link danger\">Archive</button></form>"
+            ));
+            html.push_str("</div></td></tr>");
         }
         html.push_str("</tbody></table></div></section></div>");
         Ok(html)
@@ -146,9 +153,9 @@ fn attention_rows(store: &mut Store) -> Result<HashMap<String, HealthRow>, Error
 
 fn bucket_label(unused: bool, never_applied: bool) -> &'static str {
     match (unused, never_applied) {
-        (true, true) => "Not selected in 90 days + selected but never applied",
-        (true, false) => "Not selected in 90 days",
-        (false, true) => "Selected but never applied",
+        (true, true) => "Unused · never applied",
+        (true, false) => "Unused 90d",
+        (false, true) => "Never applied",
         (false, false) => "",
     }
 }
