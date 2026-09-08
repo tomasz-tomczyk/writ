@@ -138,13 +138,26 @@ fn record_proposed(store: &mut Store, title: &str) {
 }
 
 #[tokio::test]
-async fn root_always_redirects_to_the_collection_home() {
+async fn root_redirects_to_review_when_proposals_exist() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
     {
         let mut store = Store::open(&db).unwrap();
         record_proposed(&mut store, "a proposal");
     }
+
+    let app = start_app(&db, config());
+    let response = get(&app, "/").await;
+
+    assert_eq!(response.status, 302);
+    assert_eq!(response.headers["location"], "/collection?view=review");
+}
+
+#[tokio::test]
+async fn root_redirects_to_collection_when_inbox_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    Store::open(&db).unwrap();
 
     let app = start_app(&db, config());
     let response = get(&app, "/").await;
@@ -184,7 +197,7 @@ async fn protocol_version_header_is_present() {
 }
 
 #[tokio::test]
-async fn layout_presents_collection_as_the_only_primary_destination() {
+async fn layout_presents_collection_and_review_as_primary_nav() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
     {
@@ -194,20 +207,35 @@ async fn layout_presents_collection_as_the_only_primary_destination() {
     }
 
     let app = start_app(&db, config());
-    let body = get(&app, "/collection").await.body;
+    let collection = get(&app, "/collection").await.body;
+    let review = get(&app, "/collection?view=review").await.body;
 
-    assert!(body.contains(r#"aria-label="Collection""#), "{body}");
-    assert!(body.contains("Review proposals"), "{body}");
+    assert!(collection.contains(r#"aria-label="Primary""#), "{collection}");
     assert!(
-        body.contains(">2</span>"),
-        "review count should be 2: {body}"
+        collection.contains(r#">Collection</a>"#),
+        "{collection}"
     );
-    assert!(!body.contains(r#">Inbox</a>"#), "{body}");
-    assert!(!body.contains(r#">Health</a>"#), "{body}");
+    assert!(collection.contains(r#">Review"#), "{collection}");
+    assert!(
+        collection.contains(">2</span>"),
+        "review count should be 2: {collection}"
+    );
+    assert!(
+        collection.contains(r#"aria-current="page">Collection</a>"#),
+        "{collection}"
+    );
+    assert!(
+        review.contains(r#"aria-current="page">Review"#),
+        "{review}"
+    );
+    assert!(review.contains("<h1"), "{review}");
+    assert!(review.contains("Review"), "{review}");
+    assert!(!collection.contains(r#">Inbox</a>"#), "{collection}");
+    assert!(!collection.contains(r#">Health</a>"#), "{collection}");
 }
 
 #[tokio::test]
-async fn collection_modes_make_every_ledger_state_discoverable() {
+async fn collection_filters_exclude_review_and_cover_ledger_states() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
     {
@@ -227,21 +255,29 @@ async fn collection_modes_make_every_ledger_state_discoverable() {
     let active = get(&app, "/collection").await.body;
     for (label, view) in [
         ("Active", "active"),
-        ("Review", "review"),
         ("Needs attention", "needs-attention"),
         ("Archive", "archive"),
         ("All", "all"),
     ] {
         assert!(
             active.contains(&format!("/collection?view={view}")),
-            "missing {label} mode: {active}"
+            "missing {label} filter: {active}"
         );
     }
+    assert!(
+        !active.contains("ledger-mode\">Review")
+            && !active.contains("ledger-mode\" aria-current=\"true\">Review"),
+        "Review must not be a Collection filter: {active}"
+    );
     assert!(active.contains("active rule"), "{active}");
     assert!(!active.contains("waiting proposal"), "{active}");
     assert!(!active.contains("archived evidence"), "{active}");
 
     let review = get(&app, "/collection?view=review").await.body;
+    assert!(
+        !review.contains(r#"class="ledger-modes""#),
+        "Review page should not show Collection filters: {review}"
+    );
     assert!(review.contains("waiting proposal"), "{review}");
     assert!(!review.contains("active rule"), "{review}");
 
@@ -699,7 +735,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
         "controls should share a ledger wrapper with the table: {body}"
     );
     assert!(
-        body.contains(r#"class="filter filter-chip collection-mode" aria-current="page""#),
+        body.contains(r#"class="ledger-mode" aria-current="true""#),
         "{body}"
     );
     assert!(
@@ -724,7 +760,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
     );
     assert!(
         body.contains(
-            r##"hx-get="/collection?view=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip collection-mode" aria-current="page""##
+            r##"hx-get="/collection?view=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="ledger-mode" aria-current="true""##
         ),
         "{body}"
     );
@@ -809,9 +845,9 @@ async fn collection_all_view_includes_archived() {
     assert!(body.contains("now archived"), "{body}");
     assert!(
         body.contains(
-            r##"hx-get="/collection?view=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip collection-mode" aria-current="page""##
+            r##"hx-get="/collection?view=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="ledger-mode" aria-current="true""##
         ),
-        "All view should highlight its filter chip: {body}"
+        "All view should highlight its filter: {body}"
     );
 }
 

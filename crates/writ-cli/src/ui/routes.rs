@@ -134,7 +134,13 @@ async fn collection(
         &projects,
     ) {
         Ok(body) if layout::is_htmx(&headers) => layout::fragment(body.as_str()),
-        Ok(body) => layout::render(&state, "Collection", body.as_str()),
+        Ok(body) => {
+            let title = match query.view.as_deref() {
+                Some("review") => "Review",
+                _ => "Collection",
+            };
+            layout::render(&state, title, body.as_str())
+        }
         Err(error) => layout::error_response(error),
     }
 }

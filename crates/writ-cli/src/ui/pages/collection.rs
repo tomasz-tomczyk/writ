@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use writ_core::{Error, Learning, ListFilter, Scope, ScopeKind, Status};
 
 use crate::ui::AppState;
-use crate::ui::pages::layout::{count_proposed, escape, project_repo_name, scope_chip, with_store};
+use crate::ui::pages::layout::{escape, project_repo_name, scope_chip, with_store};
 use crate::ui::pages::{health, inbox};
 
 /// Sentinel for learnings that carry no `project:` scope.
@@ -94,7 +94,6 @@ pub fn render_with_notice(
     notice: Option<&str>,
 ) -> Result<String, Error> {
     let view = View::from_query(view_filter, legacy_status);
-    let proposed_count = count_proposed(state)?;
     let attention_count = health::count(state)?;
     let content = match view {
         View::Review => inbox::render(state)?,
@@ -105,7 +104,10 @@ pub fn render_with_notice(
     };
 
     let mut html = String::from(r#"<div id="collection-body">"#);
-    html.push_str(&mode_chips(view, proposed_count, attention_count));
+    // Review is a top-nav page, not a Collection filter — no mode chips there.
+    if view != View::Review {
+        html.push_str(&mode_chips(view, attention_count));
+    }
     if let Some(notice) = notice {
         html.push_str(&format!(
             r#"<p class="flash" role="status" aria-live="polite">{}</p>"#,
@@ -304,13 +306,12 @@ fn search_form(params: &Params<'_>) -> String {
     html
 }
 
-fn mode_chips(selected: View, proposed_count: usize, attention_count: usize) -> String {
+fn mode_chips(selected: View, attention_count: usize) -> String {
     let mut html = String::from(
-        r#"<nav class="collection-modes filters filter-chips" aria-label="Collection modes">"#,
+        r#"<nav class="ledger-modes" aria-label="Collection filters">"#,
     );
     for (label, view, count) in [
         ("Active", View::Active, None),
-        ("Review", View::Review, Some(proposed_count)),
         (
             "Needs attention",
             View::NeedsAttention,
@@ -320,7 +321,7 @@ fn mode_chips(selected: View, proposed_count: usize, attention_count: usize) -> 
         ("All", View::All, None),
     ] {
         let current_attr = if selected == view {
-            r#" aria-current="page""#
+            r#" aria-current="true""#
         } else {
             ""
         };
@@ -330,7 +331,7 @@ fn mode_chips(selected: View, proposed_count: usize, attention_count: usize) -> 
             format!(r#" <span class="mode-count">{count}</span>"#)
         });
         html.push_str(&format!(
-            "<a href=\"{href}\" hx-get=\"{href}\"{SWAP} class=\"filter filter-chip collection-mode\"{current_attr}>{label}{count}</a>"
+            "<a href=\"{href}\" hx-get=\"{href}\"{SWAP} class=\"ledger-mode\"{current_attr}>{label}{count}</a>"
         ));
     }
     html.push_str("</nav>");

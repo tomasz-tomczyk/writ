@@ -15,6 +15,8 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
     };
     let store_path = escape(&state.db.display().to_string());
     let lede = page_lede(title);
+    let collection_current = current_page(title, "Collection");
+    let review_current = current_page(title, "Review");
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -41,10 +43,16 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
         </span>
         <span>writ</span>
       </a>
-      <nav aria-label="Collection" class="collection-nav">
-        <a href="/collection" class="nav-link collection-nav__home" aria-current="page">Collection</a>
+      <nav aria-label="Primary">
+        <ul class="underline-nav">
+          <li class="underline-nav__item">
+            <a href="/collection" class="nav-link underline-nav__link"{collection_current}>Collection</a>
+          </li>
+          <li class="underline-nav__item">
+            <a href="/collection?view=review" class="nav-link underline-nav__link"{review_current}>Review{badge}</a>
+          </li>
+        </ul>
       </nav>
-      <a href="/collection?view=review" class="btn review-button">Review proposals{badge}</a>
     </div>
   </header>
   <main class="page">
@@ -64,6 +72,8 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
         theme_color = "#ffffff",
         title = title,
         badge = badge,
+        collection_current = collection_current,
+        review_current = review_current,
         lede = lede,
         body = body,
         store_path = store_path,
@@ -72,9 +82,19 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
     with_version(Html(html).into_response())
 }
 
+fn current_page(title: &str, page: &str) -> &'static str {
+    if title == page {
+        r#" aria-current="page""#
+    } else {
+        ""
+    }
+}
+
 fn page_lede(title: &str) -> &'static str {
     match title {
-        "Collection" => "Browse, review, and maintain the rules your agents have learned.",
+        "Collection" => "Browse and maintain the rules your agents have learned.",
+        "Review" => "Approve or reject proposed learnings before they enter an audit.",
+        "Detail" => "Edit this learning, its scope, and its supporting evidence.",
         _ => "",
     }
 }
@@ -110,7 +130,7 @@ pub fn is_htmx(headers: &HeaderMap) -> bool {
     headers.contains_key("hx-request")
 }
 
-/// The navigation Inbox count.
+/// The navigation Review count.
 ///
 /// The element is always present, so an out-of-band swap has a target
 /// even when the count reaches zero. Empty content hides it in CSS.
@@ -128,7 +148,7 @@ pub fn review_badge(state: &AppState) -> Result<String, Error> {
 
 /// The same badge, marked for an out-of-band swap.
 ///
-/// A row that moves out of the Inbox must move the count with it. A stale
+/// A row that moves out of Review must move the count with it. A stale
 /// count is a small lie.
 pub fn review_badge_oob(state: &AppState) -> Result<String, Error> {
     let count = count_proposed(state)?;
@@ -142,33 +162,30 @@ pub fn review_badge_oob(state: &AppState) -> Result<String, Error> {
     ))
 }
 
-/// Count proposed learnings, or surface a real store/lock failure (P7).
 pub fn count_proposed(state: &AppState) -> Result<usize, Error> {
     with_store(state, |store| {
-        let rows = store.list(&ListFilter {
+        let filter = ListFilter {
             status: Some(Status::Proposed),
             ..Default::default()
-        })?;
-        Ok(rows.len())
+        };
+        Ok(store.list(&filter)?.len())
     })
 }
 
-/// Escape text for insertion into HTML.
+/// Escape text for an HTML text node or attribute value.
 pub fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-/// Turn a `writ-core` error into an HTTP response.
-pub fn error_response(error: Error) -> Response {
-    let status = match error {
-        Error::NotFound { .. } => StatusCode::NOT_FOUND,
-        Error::Validation { .. } => StatusCode::BAD_REQUEST,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    with_version((status, escape(&error.to_string())).into_response())
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn with_version(mut response: Response) -> Response {
@@ -179,19 +196,15 @@ fn with_version(mut response: Response) -> Response {
     response
 }
 
-/// Lock the shared store. A poisoned lock is reported, not papered over (P7).
 pub fn with_store<T, F>(state: &AppState, f: F) -> Result<T, Error>
 where
     F: FnOnce(&mut Store) -> Result<T, Error>,
 {
-    let mut store = state.store.lock().map_err(|_| Error::Command {
-        program: "writ ui".to_string(),
-        message: "store lock was poisoned".to_string(),
-    })?;
+    let mut store = Store::open(&state.db)?;
     f(&mut store)
 }
 
-/// Primer scope/project chip used across Collection, Inbox, and Health.
+/// Primer scope/project chip used across Collection, Review, and Health.
 pub fn scope_chip(scope: &Scope, class: &str) -> String {
     if scope.kind == ScopeKind::Global {
         return format!(r#"<span class="chip {class}" title="global">global</span>"#);
@@ -226,11 +239,21 @@ pub fn project_repo_name(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-/// Empty ledger panel shared by Collection / Inbox / Health.
+/// Empty ledger panel shared by Collection / Review / Health.
 pub fn ledger_empty(title: &str, body: &str) -> String {
     format!(
         r#"<div class="table-shell ledger-empty empty"><strong>{}</strong><span>{}</span></div>"#,
         escape(title),
         escape(body)
     )
+}
+
+/// A store or validation error as an HTTP response.
+pub fn error_response(error: Error) -> Response {
+    let status = match &error {
+        Error::NotFound { .. } => StatusCode::NOT_FOUND,
+        Error::Validation { .. } => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    with_version((status, escape(&error.to_string())).into_response())
 }

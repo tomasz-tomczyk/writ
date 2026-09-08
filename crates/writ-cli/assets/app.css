@@ -288,17 +288,18 @@ button,
   box-shadow: 0 1px 0 rgba(31, 35, 40, 0.04);
 }
 
-button:hover,
-.button:hover,
-.btn:hover {
+/* Neutral hover must not repaint primary/danger text. */
+button:hover:not(.primary):not(.btn--primary):not(.danger),
+.button:hover:not(.primary):not(.danger),
+.btn:hover:not(.primary):not(.btn--primary):not(.danger) {
   background: var(--bg);
   border-color: var(--border);
   color: var(--ink);
   text-decoration: none;
 }
 
-button:active,
-.btn:active {
+button:active:not(.primary):not(.btn--primary),
+.btn:active:not(.primary):not(.btn--primary) {
   background: var(--canvas-inset);
   box-shadow: inset 0 1px 0 rgba(208, 215, 222, 0.2);
 }
@@ -308,14 +309,26 @@ button.primary,
 .btn--primary {
   background: var(--ok-emphasis);
   border-color: rgba(27, 31, 35, 0.15);
-  color: var(--accent-ink);
+  color: #fff;
 }
 
 button.primary:hover,
 .button.primary:hover,
-.btn--primary:hover {
-  background: var(--ok);
+.btn--primary:hover,
+.btn.btn--primary:hover,
+button.btn.primary:hover {
+  background: #116329;
+  border-color: rgba(27, 31, 35, 0.2);
+  color: #fff;
   filter: none;
+}
+
+button.primary:active,
+.button.primary:active,
+.btn--primary:active,
+.btn.btn--primary:active {
+  background: #0e542b;
+  color: #fff;
 }
 
 button.danger,
@@ -885,6 +898,70 @@ tr:hover td {
   gap: 8px;
 }
 
+/*
+ * Collection status filters — secondary underline rail.
+ * Review lives in primary nav; these are Collection scopes only.
+ * Deliberately not a segmented/pill tray (generic SaaS chrome).
+ */
+.ledger-modes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+}
+
+.ledger-mode {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  margin-bottom: -1px;
+  padding: 0.55rem 0.85rem;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.25;
+  color: var(--muted);
+  text-decoration: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+}
+
+.ledger-mode:hover {
+  color: var(--ink);
+  text-decoration: none;
+  background: transparent;
+  border-bottom-color: var(--border-muted);
+}
+
+.ledger-mode:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.ledger-mode[aria-current="true"] {
+  color: var(--ink);
+  background: transparent;
+  border-bottom-color: var(--ink);
+  box-shadow: none;
+  font-weight: 600;
+}
+
+.ledger-mode .mode-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--subtle);
+}
+
+.ledger-mode[aria-current="true"] .mode-count {
+  color: var(--muted);
+}
+
 .filter,
 .filter-chip {
   display: inline-flex;
@@ -908,7 +985,9 @@ tr:hover td {
 }
 
 .filter[aria-current="true"],
-.filter-chip[aria-current="true"] {
+.filter-chip[aria-current="true"],
+.filter[aria-current="page"],
+.filter-chip[aria-current="page"] {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-ink);
@@ -1250,6 +1329,17 @@ footer.store code {
   .collection-controls .filter {
     flex: 1;
     justify-content: center;
+  }
+
+  .ledger-modes {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ledger-mode {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
 
   .result-count {
