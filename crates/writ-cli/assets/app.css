@@ -945,6 +945,33 @@ tr:hover td {
   border: 0;
 }
 
+#action-feedback {
+  position: fixed;
+  right: var(--gap);
+  bottom: var(--gap);
+  z-index: 10;
+}
+
+#action-feedback:empty {
+  display: none;
+}
+
+.toast,
+.action-error {
+  max-width: 30rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--ink);
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(31, 35, 40, 0.12);
+}
+
+.action-error {
+  margin: var(--gap);
+  border-color: var(--danger);
+}
+
 /* Inbox */
 
 .inbox-ledger,

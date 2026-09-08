@@ -66,6 +66,7 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
     </div>
     {body}
   </main>
+  <div id="action-feedback" role="status" aria-live="polite" aria-atomic="true"></div>
   <footer class="store">
     <span class="store-label">Store</span>
     <code>{store_path}</code>
@@ -110,6 +111,23 @@ fn page_lede(title: &str) -> &'static str {
 /// exactly this markup. Spec section 9.4.
 pub fn fragment(body: &str) -> Response {
     with_version(Html(body.to_string()).into_response())
+}
+
+/// Update the stable action feedback region without replacing page content.
+pub fn action_feedback_oob(message: &str) -> String {
+    format!(
+        r#"<div id="action-feedback" hx-swap-oob="innerHTML"><div class="toast">{}</div></div>"#,
+        escape(message)
+    )
+}
+
+/// Return a visible, specific error for an unavailable UI action.
+pub fn action_error(status: StatusCode, message: &str) -> Response {
+    let body = format!(
+        r#"<div class="action-error" role="alert">{}</div>"#,
+        escape(message)
+    );
+    with_version((status, Html(body)).into_response())
 }
 
 /// Whether htmx sent this request. Every action still answers a plain
