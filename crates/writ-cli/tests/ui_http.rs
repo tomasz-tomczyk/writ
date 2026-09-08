@@ -210,11 +210,11 @@ async fn layout_presents_collection_and_review_as_primary_nav() {
     let collection = get(&app, "/collection").await.body;
     let review = get(&app, "/collection?view=review").await.body;
 
-    assert!(collection.contains(r#"aria-label="Primary""#), "{collection}");
     assert!(
-        collection.contains(r#">Collection</a>"#),
+        collection.contains(r#"aria-label="Primary""#),
         "{collection}"
     );
+    assert!(collection.contains(r#">Collection</a>"#), "{collection}");
     assert!(collection.contains(r#">Review"#), "{collection}");
     assert!(
         collection.contains(">2</span>"),
@@ -224,10 +224,7 @@ async fn layout_presents_collection_and_review_as_primary_nav() {
         collection.contains(r#"aria-current="page">Collection</a>"#),
         "{collection}"
     );
-    assert!(
-        review.contains(r#"aria-current="page">Review"#),
-        "{review}"
-    );
+    assert!(review.contains(r#"aria-current="page">Review"#), "{review}");
     assert!(review.contains("<h1"), "{review}");
     assert!(review.contains("Review"), "{review}");
     assert!(!collection.contains(r#">Inbox</a>"#), "{collection}");

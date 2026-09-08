@@ -307,9 +307,7 @@ fn search_form(params: &Params<'_>) -> String {
 }
 
 fn mode_chips(selected: View, attention_count: usize) -> String {
-    let mut html = String::from(
-        r#"<nav class="ledger-modes" aria-label="Collection filters">"#,
-    );
+    let mut html = String::from(r#"<nav class="ledger-modes" aria-label="Collection filters">"#);
     for (label, view, count) in [
         ("Active", View::Active, None),
         (
