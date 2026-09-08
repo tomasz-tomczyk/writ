@@ -1,6 +1,7 @@
 use axum::Router;
-use axum::extract::{Path, Query, RawQuery, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::extract::{Path, Query, RawQuery, Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use rust_embed::RustEmbed;
@@ -29,7 +30,56 @@ pub fn router(state: AppState) -> Router {
         .route("/findings/{id}/reject", post(actions::reject_finding))
         .route("/findings/{id}/open", post(actions::open_editor))
         .route("/assets/{*path}", get(assets))
+        .layer(middleware::from_fn(require_same_origin))
         .with_state(state)
+}
+
+async fn require_same_origin(request: Request, next: Next) -> Response {
+    if request.method() != Method::POST {
+        return next.run(request).await;
+    }
+
+    let host = match request.headers().get(header::HOST) {
+        Some(value) => match value.to_str() {
+            Ok(host) => host,
+            Err(_) => {
+                return origin_error(
+                    StatusCode::BAD_REQUEST,
+                    "cannot verify request Origin: invalid Host header",
+                );
+            }
+        },
+        None => {
+            return origin_error(
+                StatusCode::BAD_REQUEST,
+                "cannot verify request Origin: missing Host header",
+            );
+        }
+    };
+    let origin = match request.headers().get(header::ORIGIN) {
+        Some(value) => match value.to_str() {
+            Ok(origin) => origin,
+            Err(_) => {
+                return origin_error(StatusCode::FORBIDDEN, "forbidden: invalid Origin header");
+            }
+        },
+        None => {
+            return origin_error(StatusCode::FORBIDDEN, "forbidden: missing Origin header");
+        }
+    };
+    let expected = format!("http://{host}");
+    if !origin.eq_ignore_ascii_case(&expected) {
+        return origin_error(
+            StatusCode::FORBIDDEN,
+            "forbidden: Origin does not match this writ UI",
+        );
+    }
+
+    next.run(request).await
+}
+
+fn origin_error(status: StatusCode, message: &'static str) -> Response {
+    with_protocol_header((status, message).into_response())
 }
 
 async fn root(State(state): State<AppState>) -> Response {
