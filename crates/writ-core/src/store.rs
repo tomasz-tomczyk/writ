@@ -14,7 +14,7 @@ use crate::id::new_id;
 use crate::migrate;
 use crate::model::{
     Exemplar, ExemplarKind, Finding, Learning, LearningUpdate, ListFilter, MatcherKind,
-    NewExemplar, NewLearning, Recorded, Scope, ScopeKind, SourceKind, Status,
+    NewExemplar, NewLearning, Recorded, Scope, ScopeKind, Sides, SourceKind, Status,
 };
 
 // Paths the current `candidates()` call is evaluating against.
@@ -179,14 +179,16 @@ impl Store {
                     rule = ?2,
                     rationale = ?3,
                     blocking = ?4,
-                    matcher_kind = ?5,
-                    matcher = ?6
-              WHERE id = ?7",
+                    sides = ?5,
+                    matcher_kind = ?6,
+                    matcher = ?7
+              WHERE id = ?8",
             params![
                 &update.title,
                 &update.rule,
                 &update.rationale,
                 update.blocking,
+                update.sides.as_str(),
                 update.matcher_kind.map(MatcherKind::as_str),
                 &update.matcher,
                 id,
@@ -281,7 +283,7 @@ impl Store {
     fn list_where(&self, filter: &ListFilter, id: Option<&str>) -> Result<Vec<Learning>> {
         let mut sql = String::from(
             "SELECT id, created_at, updated_at, status, title, rule, rationale, blocking,
-                    matcher_kind, matcher, source_kind, source_adapter, source_ref,
+                    sides, matcher_kind, matcher, source_kind, source_adapter, source_ref,
                     author, activated_at, reinforced, times_selected, last_selected_at,
                     times_applied, last_applied_at, last_verified
              FROM learnings WHERE 1 = 1",
@@ -419,7 +421,7 @@ impl Store {
         // authoritative second pass that enforces AND-across-kinds.
         let mut sql = String::from(
             "SELECT id, created_at, updated_at, status, title, rule, rationale, blocking,
-                    matcher_kind, matcher, source_kind, source_adapter, source_ref,
+                    sides, matcher_kind, matcher, source_kind, source_adapter, source_ref,
                     author, activated_at, reinforced, times_selected, last_selected_at,
                     times_applied, last_applied_at, last_verified
              FROM learnings
@@ -857,14 +859,14 @@ fn insert_learning(tx: &Transaction<'_>, learning: &NewLearning) -> Result<Recor
     tx.execute(
         "INSERT INTO learnings
            (id, created_at, updated_at, status, title, rule, rationale, blocking,
-            matcher_kind, matcher, source_kind, source_adapter, source_ref,
+            sides, matcher_kind, matcher, source_kind, source_adapter, source_ref,
             author, activated_at)
          VALUES
            (?1,
             COALESCE(?2, datetime('now')),
             COALESCE(?3, datetime('now')),
-            ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-            COALESCE(?15, CASE WHEN ?4 = 'active' THEN datetime('now') END))",
+            ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+            COALESCE(?16, CASE WHEN ?4 = 'active' THEN datetime('now') END))",
         params![
             &id,
             &learning.created_at,
@@ -874,6 +876,7 @@ fn insert_learning(tx: &Transaction<'_>, learning: &NewLearning) -> Result<Recor
             &learning.rule,
             &learning.rationale,
             learning.blocking,
+            learning.sides.as_str(),
             learning.matcher_kind.map(MatcherKind::as_str),
             &learning.matcher,
             learning.source_kind.unwrap_or(SourceKind::Manual).as_str(),
@@ -989,8 +992,9 @@ fn set_status(tx: &Transaction<'_>, id: &str, status: Status) -> Result<()> {
 
 fn read_learning(row: &Row<'_>) -> rusqlite::Result<Learning> {
     let status: String = row.get(3)?;
-    let source_kind: String = row.get(10)?;
-    let matcher_kind: Option<String> = row.get(8)?;
+    let sides: String = row.get(8)?;
+    let source_kind: String = row.get(11)?;
+    let matcher_kind: Option<String> = row.get(9)?;
     Ok(Learning {
         id: row.get(0)?,
         created_at: row.get(1)?,
@@ -1000,22 +1004,23 @@ fn read_learning(row: &Row<'_>) -> rusqlite::Result<Learning> {
         rule: row.get(5)?,
         rationale: row.get(6)?,
         blocking: row.get(7)?,
+        sides: sides.parse::<Sides>().map_err(to_sqlite_error)?,
         matcher_kind: matcher_kind
             .map(|kind| kind.parse::<MatcherKind>())
             .transpose()
             .map_err(to_sqlite_error)?,
-        matcher: row.get(9)?,
+        matcher: row.get(10)?,
         source_kind: parse_source_kind(&source_kind).map_err(to_sqlite_error)?,
-        source_adapter: row.get(11)?,
-        source_ref: row.get(12)?,
-        author: row.get(13)?,
-        activated_at: row.get(14)?,
-        reinforced: row.get(15)?,
-        times_selected: row.get(16)?,
-        last_selected_at: row.get(17)?,
-        times_applied: row.get(18)?,
-        last_applied_at: row.get(19)?,
-        last_verified: row.get(20)?,
+        source_adapter: row.get(12)?,
+        source_ref: row.get(13)?,
+        author: row.get(14)?,
+        activated_at: row.get(15)?,
+        reinforced: row.get(16)?,
+        times_selected: row.get(17)?,
+        last_selected_at: row.get(18)?,
+        times_applied: row.get(19)?,
+        last_applied_at: row.get(20)?,
+        last_verified: row.get(21)?,
         scopes: Vec::new(),
     })
 }
@@ -1530,6 +1535,7 @@ mod tests {
             rule: "updated rule".into(),
             rationale: "updated rationale".into(),
             blocking: false,
+            sides: Sides::Added,
             matcher_kind: Some(MatcherKind::Regex),
             matcher: Some("updated.*".into()),
             scopes: vec!["language:rust".parse().unwrap()],
@@ -1583,6 +1589,7 @@ mod tests {
         assert_eq!(updated.rule, "updated rule");
         assert_eq!(updated.rationale, "updated rationale");
         assert!(!updated.blocking);
+        assert_eq!(updated.sides, Sides::Added);
         assert_eq!(updated.matcher_kind, Some(MatcherKind::Regex));
         assert_eq!(updated.matcher.as_deref(), Some("updated.*"));
         assert_eq!(

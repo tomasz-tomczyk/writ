@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-use writ_core::{Diff, Learning, MatcherKind, ScopeKind, language_of};
+use writ_core::{Diff, Learning, MatcherKind, ScopeKind, Sides, language_of};
 
 use crate::git;
 
@@ -44,23 +44,36 @@ impl Verdict {
 /// Evaluate a learning's matcher against this diff.
 ///
 /// A learning with no matcher is kept on scope alone, which is section 7.1
-/// step 2.
+/// step 2, except when `sides` excludes every half the diff actually has.
 pub fn evaluate(learning: &Learning, diff: &Diff, root: &Path) -> Verdict {
+    if !sides_present(learning.sides, diff) {
+        return Verdict::Miss;
+    }
     let (Some(pattern), Some(kind)) = (&learning.matcher, learning.matcher_kind) else {
         return Verdict::Hit;
     };
     match kind {
-        MatcherKind::Regex => regex_verdict(pattern, diff),
+        MatcherKind::Regex => regex_verdict(pattern, diff, learning.sides),
         MatcherKind::AstGrep => ast_grep_verdict(pattern, learning, diff, root),
     }
 }
 
-/// A regex runs over added and removed content, not the whole diff, so
+fn sides_present(sides: Sides, diff: &Diff) -> bool {
+    match sides {
+        Sides::Both => true,
+        Sides::Added => !diff.added.is_empty(),
+        Sides::Removed => !diff.removed.is_empty(),
+    }
+}
+
+/// A regex runs over the halves `sides` allows, not the whole diff, so
 /// file headers cannot themselves produce a hit.
-fn regex_verdict(pattern: &str, diff: &Diff) -> Verdict {
+fn regex_verdict(pattern: &str, diff: &Diff, sides: Sides) -> Verdict {
     match regex::Regex::new(pattern) {
         Ok(regex) => {
-            if regex.is_match(&diff.added) || regex.is_match(&diff.removed) {
+            let hit_added = sides.includes_added() && regex.is_match(&diff.added);
+            let hit_removed = sides.includes_removed() && regex.is_match(&diff.removed);
+            if hit_added || hit_removed {
                 Verdict::Hit
             } else {
                 Verdict::Miss
@@ -73,19 +86,28 @@ fn regex_verdict(pattern: &str, diff: &Diff) -> Verdict {
 /// Shell out to `ast-grep`. Spec section 8.2: shell out now, embed on a
 /// trigger.
 fn ast_grep_verdict(pattern: &str, learning: &Learning, diff: &Diff, root: &Path) -> Verdict {
-    let present: HashSet<&str> = diff
-        .paths
-        .iter()
-        .map(String::as_str)
-        .filter(|path| root.join(path).is_file())
-        .collect();
-    let files: Vec<String> = present.iter().map(|path| (*path).to_string()).collect();
-    if !files.is_empty() {
-        match run_ast_grep_files(pattern, learning, &files, root) {
-            Verdict::Hit => return Verdict::Hit,
-            Verdict::Unevaluable(why) => return Verdict::Unevaluable(why),
-            Verdict::Miss | Verdict::MissWithNotice(_) => {}
+    let check_added = learning.sides.includes_added();
+    let check_removed = learning.sides.includes_removed();
+
+    if check_added {
+        let present: HashSet<&str> = diff
+            .paths
+            .iter()
+            .map(String::as_str)
+            .filter(|path| root.join(path).is_file())
+            .collect();
+        let files: Vec<String> = present.iter().map(|path| (*path).to_string()).collect();
+        if !files.is_empty() {
+            match run_ast_grep_files(pattern, learning, &files, root) {
+                Verdict::Hit => return Verdict::Hit,
+                Verdict::Unevaluable(why) => return Verdict::Unevaluable(why),
+                Verdict::Miss | Verdict::MissWithNotice(_) => {}
+            }
         }
+    }
+
+    if !check_removed {
+        return Verdict::Miss;
     }
 
     // Add-only diffs have nothing to recover from a pre-image.
@@ -93,6 +115,12 @@ fn ast_grep_verdict(pattern: &str, learning: &Learning, diff: &Diff, root: &Path
         return Verdict::Miss;
     }
 
+    let present: HashSet<&str> = diff
+        .paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| root.join(path).is_file())
+        .collect();
     let language_scope = language_scope(learning);
     let mut fallback_notices = Vec::new();
     for path in &diff.paths {

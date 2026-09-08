@@ -124,6 +124,9 @@ pub fn rule_block(position: usize, selected: &Selected) -> String {
             "advisory"
         }
     ));
+    if selected.learning.sides != crate::model::Sides::Both {
+        block.push_str(&format!("sides: {}\n", selected.learning.sides));
+    }
     let scopes = selected
         .learning
         .scopes
@@ -339,6 +342,7 @@ mod tests {
             rule: "r".into(),
             rationale: "why".into(),
             blocking,
+            sides: crate::model::Sides::Both,
             matcher_kind: None,
             matcher: None,
             source_kind: SourceKind::Manual,
@@ -405,6 +409,33 @@ mod tests {
         ];
         rank(&mut candidates);
         assert_eq!(candidates[0].learning.id, "b");
+    }
+
+    #[test]
+    fn rule_block_names_sides_only_when_not_both() {
+        let both = Selected {
+            learning: learning("a", true),
+            exemplars: vec![],
+        };
+        let both_block = rule_block(1, &both);
+        assert!(
+            !both_block.contains("sides:"),
+            "both costs no prompt budget: {both_block}"
+        );
+
+        let mut added = learning("b", true);
+        added.sides = crate::model::Sides::Added;
+        let added_block = rule_block(
+            1,
+            &Selected {
+                learning: added,
+                exemplars: vec![],
+            },
+        );
+        assert!(
+            added_block.contains("sides: added\n"),
+            "narrow sides must reach the reviewer: {added_block}"
+        );
     }
 
     #[test]

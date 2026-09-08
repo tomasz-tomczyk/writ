@@ -145,6 +145,12 @@ const RECORD_ARGS: &[ToolArg] = &[
         about: "Dialect of matcher: ast_grep (preferred with language: scope) or regex (escape hatch)",
     },
     ToolArg {
+        name: "sides",
+        flag: "sides",
+        kind: Kind::Text,
+        about: "Which half of the diff the rule cares about: added, removed, or both (default both)",
+    },
+    ToolArg {
         name: "status",
         flag: "status",
         kind: Kind::Text,
@@ -255,6 +261,12 @@ const EDIT_ARGS: &[ToolArg] = &[
         about: "Promote to blocking (the default for new learnings)",
     },
     ToolArg {
+        name: "sides",
+        flag: "sides",
+        kind: Kind::Text,
+        about: "Which half of the diff the rule cares about: added, removed, or both (default both)",
+    },
+    ToolArg {
         name: "matcher",
         flag: "matcher",
         kind: Kind::Text,
@@ -308,7 +320,7 @@ pub const TOOLS: &[Tool] = &[
         name: "writ_edit",
         command: "edit",
         about: "Edit an existing learning: title, rule, rationale, scope, blocking, \
-                matcher, or exemplars. Proposed learnings can be activated; \
+                sides, matcher, or exemplars. Proposed learnings can be activated; \
                 archived ones cannot.",
         args: EDIT_ARGS,
     },

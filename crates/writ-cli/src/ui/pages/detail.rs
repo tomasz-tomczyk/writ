@@ -88,6 +88,29 @@ fn render_with_origin(state: &AppState, id: &str, origin: Option<&str>) -> Resul
         html.push_str("</div>");
 
         html.push_str("<div class=\"field\">");
+        html.push_str("<label>Sides</label>");
+        html.push_str(r#"<select name="sides">"#);
+        for side in [
+            writ_core::Sides::Both,
+            writ_core::Sides::Added,
+            writ_core::Sides::Removed,
+        ] {
+            html.push_str(&format!(
+                "<option value=\"{}\"{}>{}</option>",
+                escape(side.as_str()),
+                if learning.sides == side {
+                    " selected"
+                } else {
+                    ""
+                },
+                escape(side.as_str())
+            ));
+        }
+        html.push_str("</select>");
+        html.push_str("<small>Which half of the diff this rule cares about.</small>");
+        html.push_str("</div>");
+
+        html.push_str("<div class=\"field\">");
         html.push_str("<label>Matcher kind</label>");
         html.push_str(r#"<select name="matcher_kind"><option value="">—</option>"#);
         for kind in [
@@ -244,6 +267,7 @@ pub struct SaveForm {
     rule: String,
     rationale: String,
     blocking: Option<String>,
+    sides: Option<String>,
     matcher_kind: Option<String>,
     matcher: Option<String>,
     scope: Vec<String>,
@@ -264,6 +288,7 @@ impl SaveForm {
                 "rule" => form.rule = value,
                 "rationale" => form.rationale = value,
                 "blocking" => form.blocking = Some(value),
+                "sides" => form.sides = Some(value),
                 "matcher_kind" => form.matcher_kind = Some(value),
                 "matcher" => form.matcher = Some(value),
                 "scope" => form.scope.push(value),
@@ -376,11 +401,22 @@ fn build_update(form: &SaveForm, current_exemplars: &[Exemplar]) -> Result<Learn
 
     let exemplars = merge_visible_exemplars(form, current_exemplars);
 
+    let sides = match form
+        .sides
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(text) => text.parse()?,
+        None => writ_core::Sides::Both,
+    };
+
     Ok(LearningUpdate {
         title: form.title.trim().into(),
         rule: form.rule.trim().into(),
         rationale: form.rationale.trim().into(),
         blocking: form.blocking.is_some(),
+        sides,
         matcher_kind,
         matcher,
         scopes: scopes?,

@@ -29,6 +29,7 @@ writ record --title TITLE --rule RULE --rationale WHY --activate
 | `--example-text` | A snippet, as `good:TEXT` or `bad:TEXT`. Repeat it |
 | `--matcher` | A structural retrieval pattern. Default on for code-shape rules |
 | `--matcher-kind` | `ast_grep` (preferred with `language:`) or `regex` (escape hatch) |
+| `--sides` | Which half of the diff to care about: `added`, `removed`, or `both` (default) |
 | `--activate` | Use the learning from now on |
 
 Without `--activate` the learning lands in the Inbox as `proposed` and
@@ -83,11 +84,13 @@ that have no structural anchor.
 
 - Prefer `ast_grep` when the scope includes `language:`.
 - Use `regex` only when `ast_grep` cannot express it.
-- Matchers see additions and removals (`regex` on both line sets;
-  `ast_grep` on the post-change file and its pre-image). For "do not
-  remove X" rules, match X itself — e.g. Elixir `@spec` for "Do not
-  bulk-delete typespecs". A broader durable cue (`def` / `defp`) is
-  fine when you want the rule in play on nearby edits too.
+- Matchers honour `--sides`. Default `both` sees additions and removals
+  (`regex` on both line sets; `ast_grep` on the post-change file and its
+  pre-image). Use `--sides added` for "do not introduce X" and
+  `--sides removed` for "do not delete Y". For "do not remove X" rules,
+  match X itself — e.g. Elixir `@spec` for "Do not bulk-delete
+  typespecs". A broader durable cue (`def` / `defp`) is fine when you
+  want the rule in play on nearby edits too.
 
 ## After writing
 
@@ -106,6 +109,7 @@ edit it instead of writing a second one.
 writ edit ID --rationale "..."
 writ edit ID --scope language:rust --scope glob:crates/**
 writ edit ID --matcher PATTERN --matcher-kind ast_grep --activate
+writ edit ID --sides added
 ```
 
 Omitted fields stay unchanged. `--scope` and `--example-text` replace

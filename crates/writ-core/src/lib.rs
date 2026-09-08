@@ -32,7 +32,7 @@ pub use jsonl::parse_jsonl;
 pub use migrate::SCHEMA_VERSION;
 pub use model::{
     Exemplar, ExemplarKind, Finding, Learning, LearningUpdate, ListFilter, MatcherKind,
-    NewExemplar, NewLearning, Recorded, Scope, ScopeKind, SourceKind, Status,
+    NewExemplar, NewLearning, Recorded, Scope, ScopeKind, Sides, SourceKind, Status,
 };
 pub use paths::{Env, Paths, resolve_paths};
 pub use repo::{RepoIdentity, normalize_remote};

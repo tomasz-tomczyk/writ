@@ -54,7 +54,9 @@ Four nouns. `store.rs` is easier to read once they are clear.
 is what lets a rule transfer to a case its author did not foresee. It
 carries `blocking`, a boolean and not a severity scale, because "does
 breaking this stop the handoff" is answerable and "how strongly do you
-mean it" is not. Status runs `proposed` → `active` → `archived`. Only an
+mean it" is not. It also carries `sides`: `added`, `removed`, or
+`both` (the default), which half of the diff the rule cares about.
+Status runs `proposed` → `active` → `archived`. Only an
 `active` learning is ever selected.
 
 **A scope** says where a learning applies: `global`, `project:<id>`,

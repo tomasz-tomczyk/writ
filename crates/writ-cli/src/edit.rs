@@ -8,8 +8,8 @@ use std::io::Write;
 use std::path::Path;
 
 use writ_core::{
-    Error, Exemplar, Learning, LearningUpdate, MatcherKind, NewExemplar, Result, Scope, Status,
-    Store, TelemetryBatch,
+    Error, Exemplar, Learning, LearningUpdate, MatcherKind, NewExemplar, Result, Scope, Sides,
+    Status, Store, TelemetryBatch,
 };
 
 use crate::output::Format;
@@ -46,6 +46,10 @@ pub struct Args {
     /// Promote to blocking (the default for new learnings)
     #[arg(long, conflicts_with = "advisory")]
     blocking: bool,
+
+    /// Which half of the diff the rule cares about: added, removed, or both
+    #[arg(long, value_name = "SIDES")]
+    sides: Option<String>,
 
     /// A retrieval pattern. Needs --matcher-kind
     #[arg(long, value_name = "PATTERN", conflicts_with = "clear_matcher")]
@@ -104,7 +108,7 @@ pub fn execute(args: &Args, db: &Path) -> Result<Learning> {
     if !args.has_mutation() {
         return Err(Error::Validation {
             message: "nothing to edit; pass at least one of --title, --rule, --rationale, \
-                 --scope, --advisory, --blocking, --matcher, --matcher-kind, \
+                 --scope, --advisory, --blocking, --sides, --matcher, --matcher-kind, \
                  --clear-matcher, --example-text, or --activate"
                 .to_string(),
         });
@@ -125,6 +129,7 @@ impl Args {
             || !self.scopes.is_empty()
             || self.advisory
             || self.blocking
+            || self.sides.is_some()
             || self.matcher.is_some()
             || self.matcher_kind.is_some()
             || self.clear_matcher
@@ -157,6 +162,10 @@ fn build_update(
             (true, _) => false,
             (_, true) => true,
             _ => current.blocking,
+        },
+        sides: match &args.sides {
+            Some(text) => text.parse::<Sides>()?,
+            None => current.sides,
         },
         matcher_kind,
         matcher,
@@ -240,6 +249,7 @@ mod tests {
             rule: "rule".into(),
             rationale: "rationale".into(),
             blocking: true,
+            sides: Sides::Both,
             matcher_kind: None,
             matcher: None,
             source_kind: SourceKind::Manual,
@@ -277,6 +287,7 @@ mod tests {
             scopes: vec![],
             advisory: false,
             blocking: false,
+            sides: None,
             matcher: None,
             matcher_kind: None,
             clear_matcher: false,
