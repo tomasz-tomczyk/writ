@@ -14,10 +14,6 @@ use crate::ui::pages::layout::{escape, with_store};
 /// The element every Detail action swaps.
 const SWAP: &str = r##" hx-target="#detail-body" hx-swap="outerHTML""##;
 
-pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
-    render_with_origin(state, id, None)
-}
-
 fn render_with_origin(state: &AppState, id: &str, origin: Option<&str>) -> Result<String, Error> {
     with_store(state, |store| {
         let learning = store.get(id)?;
