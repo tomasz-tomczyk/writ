@@ -28,7 +28,7 @@ fn render_with_origin(state: &AppState, id: &str, origin: Option<&str>) -> Resul
         let (back_href, back_label, origin_param) = origin_context(origin);
         let mut html = String::from(r#"<div id="detail-body">"#);
         html.push_str(&format!(
-            r#"<a class="detail-back" href="{back_href}">Back to {back_label}</a>"#
+            r#"<nav class="back-nav" aria-label="Breadcrumb"><a class="back-link" href="{back_href}"><span class="back-link__arrow" aria-hidden="true">←</span> {back_label}</a></nav>"#
         ));
         html.push_str("<div class=\"detail-meta\">");
         html.push_str(&format!(
@@ -217,6 +217,7 @@ fn render_finding_row(finding: &Finding) -> String {
 }
 
 fn origin_context(origin: Option<&str>) -> (&'static str, &'static str, String) {
+    // Label is the destination in the ledger, not "Back to …".
     let (href, label, value) = match origin {
         Some("review") => ("/collection?view=review", "Review", Some("review")),
         Some("needs-attention") => (
@@ -226,7 +227,7 @@ fn origin_context(origin: Option<&str>) -> (&'static str, &'static str, String) 
         ),
         Some("archive") => ("/collection?view=archive", "Archive", Some("archive")),
         Some("all") => ("/collection?view=all", "All", Some("all")),
-        _ => ("/collection?view=active", "Active", Some("active")),
+        _ => ("/collection?view=active", "Collection", Some("active")),
     };
     let param = value.map_or_else(String::new, |value| format!("?from={value}"));
     (href, label, param)
