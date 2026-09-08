@@ -386,6 +386,7 @@ async fn main_htmx_detail_collection_contracts_are_preserved() {
             ("title", "editable over htmx"),
             ("rule", "swapped rule"),
             ("rationale", "swapped rationale"),
+            ("scope", "global"),
         ]),
     )
     .await;
@@ -938,6 +939,7 @@ async fn detail_save_updates_rule_text() {
             ("title", "editable"),
             ("rule", "updated rule"),
             ("rationale", "updated rationale"),
+            ("scope", "global"),
             ("good_snippet", "let good = true;"),
         ],
     )
@@ -949,6 +951,255 @@ async fn detail_save_updates_rule_text() {
     let learning = store.get(&id).unwrap();
     assert_eq!(learning.rule, "updated rule");
     assert_eq!(learning.rationale, "updated rationale");
+}
+
+#[tokio::test]
+async fn detail_scope_inputs_round_trip_as_repeated_form_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("scoped", "rule", "rationale");
+        learning.status = Some(Status::Active);
+        learning.scopes = vec!["language:rust".parse().unwrap()];
+        store.record(&learning).unwrap().id
+    };
+
+    let app = start_app(&db, config());
+    let detail = get(&app, &format!("/learnings/{id}")).await.body;
+    assert!(detail.contains(r#"name="scope""#), "{detail}");
+    assert!(!detail.contains(r#"name="scope[]""#), "{detail}");
+
+    let response = post_form(
+        &app,
+        &format!("/learnings/{id}"),
+        &[
+            ("title", "scoped"),
+            ("rule", "updated"),
+            ("rationale", "rationale"),
+            ("scope", "language:rust"),
+            ("scope", "glob:crates/**"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status, 303, "body: {}", response.body);
+
+    let scopes = Store::open(&db).unwrap().get(&id).unwrap().scopes;
+    assert_eq!(
+        scopes,
+        vec![
+            "glob:crates/**".parse().unwrap(),
+            "language:rust".parse().unwrap(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn detail_save_without_a_scope_is_rejected_without_widening() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("narrow", "old rule", "rationale");
+        learning.scopes = vec!["language:rust".parse().unwrap()];
+        store.record(&learning).unwrap().id
+    };
+
+    let app = start_app(&db, config());
+    for scopes in [&[][..], &[("scope", "")][..]] {
+        let mut fields = vec![
+            ("title", "changed"),
+            ("rule", "changed rule"),
+            ("rationale", "rationale"),
+        ];
+        fields.extend_from_slice(scopes);
+        let response = post_form(&app, &format!("/learnings/{id}"), &fields).await;
+        assert_eq!(response.status, 400, "body: {}", response.body);
+        assert!(response.body.contains("scope"), "body: {}", response.body);
+
+        let learning = Store::open(&db).unwrap().get(&id).unwrap();
+        assert_eq!(learning.title, "narrow");
+        assert_eq!(learning.rule, "old rule");
+        assert_eq!(
+            learning.scopes,
+            vec!["language:rust".parse().unwrap()],
+            "an invalid save must not widen the learning"
+        );
+    }
+}
+
+#[tokio::test]
+async fn detail_save_preserves_extra_exemplars_and_visible_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let (id, exemplar_ids) = {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("examples", "rule", "rationale");
+        learning.scopes = vec!["global".parse().unwrap()];
+        learning.exemplars = vec![
+            NewExemplar {
+                kind: ExemplarKind::Good,
+                language: Some("rust".into()),
+                snippet: "first good".into(),
+                note: Some("keep good metadata".into()),
+            },
+            NewExemplar {
+                kind: ExemplarKind::Good,
+                language: Some("elixir".into()),
+                snippet: "extra good".into(),
+                note: Some("keep extra good".into()),
+            },
+            NewExemplar {
+                kind: ExemplarKind::Bad,
+                language: Some("rust".into()),
+                snippet: "first bad".into(),
+                note: Some("keep bad metadata".into()),
+            },
+            NewExemplar {
+                kind: ExemplarKind::Bad,
+                language: None,
+                snippet: "extra bad".into(),
+                note: Some("keep extra bad".into()),
+            },
+        ];
+        let id = store.record(&learning).unwrap().id;
+        let exemplar_ids = store
+            .exemplars_of(&id)
+            .unwrap()
+            .into_iter()
+            .map(|exemplar| exemplar.id)
+            .collect::<Vec<_>>();
+        (id, exemplar_ids)
+    };
+
+    let app = start_app(&db, config());
+    let response = post_form(
+        &app,
+        &format!("/learnings/{id}"),
+        &[
+            ("title", "examples"),
+            ("rule", "updated rule"),
+            ("rationale", "rationale"),
+            ("scope", "global"),
+            ("good_snippet", "edited first good"),
+            ("bad_snippet", "edited first bad"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status, 303, "body: {}", response.body);
+
+    let exemplars = Store::open(&db).unwrap().exemplars_of(&id).unwrap();
+    assert_eq!(exemplars.len(), 4);
+    assert_eq!(
+        exemplars
+            .iter()
+            .map(|exemplar| exemplar.id.as_str())
+            .collect::<Vec<_>>(),
+        exemplar_ids.iter().map(String::as_str).collect::<Vec<_>>(),
+        "saving the visible pair must preserve child identity"
+    );
+    assert_eq!(exemplars[0].snippet, "edited first good");
+    assert_eq!(exemplars[0].language.as_deref(), Some("rust"));
+    assert_eq!(exemplars[0].note.as_deref(), Some("keep good metadata"));
+    assert_eq!(exemplars[1].snippet, "extra good");
+    assert_eq!(exemplars[1].language.as_deref(), Some("elixir"));
+    assert_eq!(exemplars[1].note.as_deref(), Some("keep extra good"));
+    assert_eq!(exemplars[2].snippet, "edited first bad");
+    assert_eq!(exemplars[2].language.as_deref(), Some("rust"));
+    assert_eq!(exemplars[2].note.as_deref(), Some("keep bad metadata"));
+    assert_eq!(exemplars[3].snippet, "extra bad");
+    assert_eq!(exemplars[3].note.as_deref(), Some("keep extra bad"));
+}
+
+#[tokio::test]
+async fn detail_save_and_activate_commits_fields_and_status_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("proposed", "old rule", "rationale");
+        learning.scopes = vec!["global".parse().unwrap()];
+        store.record(&learning).unwrap().id
+    };
+
+    let app = start_app(&db, config());
+    let response = post_form(
+        &app,
+        &format!("/learnings/{id}"),
+        &[
+            ("title", "activated"),
+            ("rule", "new rule"),
+            ("rationale", "new rationale"),
+            ("scope", "language:rust"),
+            ("action", "save_activate"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status, 303, "body: {}", response.body);
+
+    let learning = Store::open(&db).unwrap().get(&id).unwrap();
+    assert_eq!(learning.title, "activated");
+    assert_eq!(learning.rule, "new rule");
+    assert_eq!(learning.status, Status::Active);
+    assert_eq!(learning.scopes, vec!["language:rust".parse().unwrap()]);
+}
+
+#[tokio::test]
+async fn detail_activation_failure_rolls_back_the_entire_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        let mut learning = NewLearning::new("original", "old rule", "old rationale");
+        learning.scopes = vec!["language:rust".parse().unwrap()];
+        learning.exemplars = vec![NewExemplar {
+            kind: ExemplarKind::Good,
+            language: Some("rust".into()),
+            snippet: "old exemplar".into(),
+            note: Some("old note".into()),
+        }];
+        store.record(&learning).unwrap().id
+    };
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER force_activation_failure
+             BEFORE UPDATE OF status ON learnings
+             WHEN new.status = 'active'
+             BEGIN
+               SELECT RAISE(FAIL, 'forced activation failure');
+             END;",
+        )
+        .unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let response = post_form(
+        &app,
+        &format!("/learnings/{id}"),
+        &[
+            ("title", "changed"),
+            ("rule", "changed rule"),
+            ("rationale", "changed rationale"),
+            ("scope", "global"),
+            ("good_snippet", "changed exemplar"),
+            ("action", "save_activate"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status, 500, "body: {}", response.body);
+
+    let store = Store::open(&db).unwrap();
+    let learning = store.get(&id).unwrap();
+    assert_eq!(learning.title, "original");
+    assert_eq!(learning.rule, "old rule");
+    assert_eq!(learning.rationale, "old rationale");
+    assert_eq!(learning.status, Status::Proposed);
+    assert_eq!(learning.scopes, vec!["language:rust".parse().unwrap()]);
+    let exemplars = store.exemplars_of(&id).unwrap();
+    assert_eq!(exemplars.len(), 1);
+    assert_eq!(exemplars[0].snippet, "old exemplar");
+    assert_eq!(exemplars[0].note.as_deref(), Some("old note"));
 }
 
 #[tokio::test]

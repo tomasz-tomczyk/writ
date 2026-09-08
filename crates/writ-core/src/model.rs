@@ -307,21 +307,13 @@ pub struct LearningUpdate {
     pub matcher_kind: Option<MatcherKind>,
     /// A retrieval matcher.
     pub matcher: Option<String>,
-    /// The full replacement scope set. Empty means `global`.
+    /// The full replacement scope set. At least one scope is required.
     pub scopes: Vec<Scope>,
     /// The full replacement exemplar set.
     pub exemplars: Vec<NewExemplar>,
 }
 
 impl LearningUpdate {
-    pub(crate) fn effective_scopes(&self) -> Vec<Scope> {
-        if self.scopes.is_empty() {
-            vec![Scope::global()]
-        } else {
-            self.scopes.clone()
-        }
-    }
-
     pub(crate) fn validate(&self) -> Result<()> {
         for (field, value) in [
             ("title", &self.title),
@@ -343,7 +335,10 @@ impl LearningUpdate {
             }
             _ => {}
         }
-        let mut scopes = self.effective_scopes();
+        if self.scopes.is_empty() {
+            return Err(Error::validation("at least one scope is required"));
+        }
+        let mut scopes = self.scopes.clone();
         scopes.sort();
         let before = scopes.len();
         scopes.dedup();

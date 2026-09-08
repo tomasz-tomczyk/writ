@@ -3,7 +3,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use writ_core::{
-    Error, ExemplarKind, Finding, LearningUpdate, NewExemplar, Outcome, Scope, Status,
+    Error, Exemplar, ExemplarKind, Finding, LearningUpdate, NewExemplar, Outcome, Scope, Status,
 };
 
 use crate::ui::AppState;
@@ -112,11 +112,11 @@ pub fn render(state: &AppState, id: &str) -> Result<String, Error> {
         html.push_str("<label>Scopes</label>");
         for scope in &learning.scopes {
             html.push_str(&format!(
-                "<input type=\"text\" name=\"scope[]\" value=\"{}\">",
+                "<input type=\"text\" name=\"scope\" value=\"{}\">",
                 escape(&scope.to_string())
             ));
         }
-        html.push_str("<input type=\"text\" name=\"scope[]\" value=\"\" placeholder=\"global or language:rust\">");
+        html.push_str("<input type=\"text\" name=\"scope\" value=\"\" placeholder=\"global or language:rust\">");
         html.push_str("</div>");
 
         html.push_str("<div class=\"field\">");
@@ -211,7 +211,7 @@ fn render_finding_row(finding: &Finding) -> String {
     html
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 pub struct SaveForm {
     title: String,
     rule: String,
@@ -219,11 +219,35 @@ pub struct SaveForm {
     blocking: Option<String>,
     matcher_kind: Option<String>,
     matcher: Option<String>,
-    #[serde(default)]
     scope: Vec<String>,
     good_snippet: Option<String>,
     bad_snippet: Option<String>,
     action: Option<String>,
+}
+
+impl SaveForm {
+    /// `serde_urlencoded` cannot deserialize repeated keys into a `Vec`, so
+    /// keep the form as its native ordered key/value pairs and collect scopes
+    /// explicitly. This is also the shape browsers actually submit.
+    fn from_fields(fields: Vec<(String, String)>) -> Self {
+        let mut form = Self::default();
+        for (name, value) in fields {
+            match name.as_str() {
+                "title" => form.title = value,
+                "rule" => form.rule = value,
+                "rationale" => form.rationale = value,
+                "blocking" => form.blocking = Some(value),
+                "matcher_kind" => form.matcher_kind = Some(value),
+                "matcher" => form.matcher = Some(value),
+                "scope" => form.scope.push(value),
+                "good_snippet" => form.good_snippet = Some(value),
+                "bad_snippet" => form.bad_snippet = Some(value),
+                "action" => form.action = Some(value),
+                _ => {}
+            }
+        }
+        form
+    }
 }
 
 pub async fn get(
@@ -242,15 +266,14 @@ pub async fn post(
     Path(id): Path<String>,
     State(state): State<AppState>,
     headers: HeaderMap,
-    Form(form): Form<SaveForm>,
+    Form(fields): Form<Vec<(String, String)>>,
 ) -> Response {
+    let form = SaveForm::from_fields(fields);
     let result = with_store(&state, |store| {
-        let update = build_update(&form)?;
-        store.update_learning(&id, &update)?;
-        if form.action.as_deref() == Some("save_activate") {
-            store.set_status(&id, Status::Active)?;
-        }
-        Ok(())
+        let exemplars = store.exemplars_of(&id)?;
+        let update = build_update(&form, &exemplars)?;
+        let status = (form.action.as_deref() == Some("save_activate")).then_some(Status::Active);
+        store.update_learning_and_set_status(&id, &update, status)
     });
     match result {
         Ok(()) if layout::is_htmx(&headers) => match render(&state, &id) {
@@ -291,7 +314,7 @@ pub async fn archive(
     }
 }
 
-fn build_update(form: &SaveForm) -> Result<LearningUpdate, Error> {
+fn build_update(form: &SaveForm, current_exemplars: &[Exemplar]) -> Result<LearningUpdate, Error> {
     let matcher_kind = form
         .matcher_kind
         .as_deref()
@@ -312,27 +335,7 @@ fn build_update(form: &SaveForm) -> Result<LearningUpdate, Error> {
         .map(str::parse)
         .collect();
 
-    let mut exemplars = Vec::new();
-    if let Some(snippet) = form
-        .good_snippet
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-    {
-        exemplars.push(NewExemplar {
-            kind: ExemplarKind::Good,
-            language: None,
-            snippet: snippet.into(),
-            note: None,
-        });
-    }
-    if let Some(snippet) = form.bad_snippet.as_deref().filter(|s| !s.trim().is_empty()) {
-        exemplars.push(NewExemplar {
-            kind: ExemplarKind::Bad,
-            language: None,
-            snippet: snippet.into(),
-            note: None,
-        });
-    }
+    let exemplars = merge_visible_exemplars(form, current_exemplars);
 
     Ok(LearningUpdate {
         title: form.title.trim().into(),
@@ -344,6 +347,72 @@ fn build_update(form: &SaveForm) -> Result<LearningUpdate, Error> {
         scopes: scopes?,
         exemplars,
     })
+}
+
+/// Apply the two visible snippet fields without discarding hidden exemplars or
+/// their language/note metadata. Only the first exemplar of each kind is the
+/// visible member of the pair; later children round-trip unchanged.
+fn merge_visible_exemplars(form: &SaveForm, current: &[Exemplar]) -> Vec<NewExemplar> {
+    let mut saw_good = false;
+    let mut saw_bad = false;
+    let mut exemplars = Vec::with_capacity(current.len() + 2);
+
+    for exemplar in current {
+        let (submitted, first) = match exemplar.kind {
+            ExemplarKind::Good => (&form.good_snippet, !std::mem::replace(&mut saw_good, true)),
+            ExemplarKind::Bad => (&form.bad_snippet, !std::mem::replace(&mut saw_bad, true)),
+        };
+        if !first || submitted.is_none() {
+            exemplars.push(as_new_exemplar(exemplar));
+            continue;
+        }
+        if let Some(snippet) = submitted
+            .as_deref()
+            .filter(|snippet| !snippet.trim().is_empty())
+        {
+            let mut edited = as_new_exemplar(exemplar);
+            edited.snippet = snippet.to_string();
+            exemplars.push(edited);
+        }
+    }
+
+    if !saw_good
+        && let Some(snippet) = form
+            .good_snippet
+            .as_deref()
+            .filter(|snippet| !snippet.trim().is_empty())
+    {
+        exemplars.push(NewExemplar {
+            kind: ExemplarKind::Good,
+            language: None,
+            snippet: snippet.to_string(),
+            note: None,
+        });
+    }
+    if !saw_bad
+        && let Some(snippet) = form
+            .bad_snippet
+            .as_deref()
+            .filter(|snippet| !snippet.trim().is_empty())
+    {
+        exemplars.push(NewExemplar {
+            kind: ExemplarKind::Bad,
+            language: None,
+            snippet: snippet.to_string(),
+            note: None,
+        });
+    }
+
+    exemplars
+}
+
+fn as_new_exemplar(exemplar: &Exemplar) -> NewExemplar {
+    NewExemplar {
+        kind: exemplar.kind,
+        language: exemplar.language.clone(),
+        snippet: exemplar.snippet.clone(),
+        note: exemplar.note.clone(),
+    }
 }
 
 fn redirect(path: &str) -> Response {

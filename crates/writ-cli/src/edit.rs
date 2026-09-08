@@ -111,11 +111,8 @@ pub fn execute(args: &Args, db: &Path) -> Result<Learning> {
     }
 
     let update = build_update(args, &current, &current_exemplars)?;
-    store.update_learning(&args.id, &update)?;
-
-    if args.activate && current.status == Status::Proposed {
-        store.set_status(&args.id, Status::Active)?;
-    }
+    let status = (args.activate && current.status == Status::Proposed).then_some(Status::Active);
+    store.update_learning_and_set_status(&args.id, &update, status)?;
 
     store.get(&args.id)
 }
