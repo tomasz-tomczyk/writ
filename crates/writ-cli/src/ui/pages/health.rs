@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
-use writ_core::{Error, Learning, ListFilter, ScopeKind, Status};
+use writ_core::{Error, Learning, ListFilter, ScopeKind, Status, Store};
 
 use crate::ui::AppState;
 use crate::ui::pages::layout::{escape, ledger_empty, scope_chip, with_store};
 
 const UNUSED_DAYS: u32 = 90;
 
-/// The element every Health action swaps.
-const SWAP: &str = r##" hx-target="#health-body" hx-swap="outerHTML""##;
+/// Maintenance actions redraw the Collection shell's Needs-attention mode.
+const SWAP: &str = r##" hx-target="#collection-body" hx-swap="outerHTML""##;
 
 struct HealthRow {
     learning: Learning,
@@ -18,43 +18,14 @@ struct HealthRow {
 
 pub fn render(state: &AppState) -> Result<String, Error> {
     with_store(state, |store| {
-        let unused: Vec<Learning> = store.list(&ListFilter {
-            status: Some(Status::Active),
-            unused_days: Some(UNUSED_DAYS),
-            ..Default::default()
-        })?;
-        let never_applied: Vec<Learning> = store.list(&ListFilter {
-            status: Some(Status::Active),
-            never_applied: true,
-            ..Default::default()
-        })?;
-
-        let mut rows: HashMap<String, HealthRow> = HashMap::new();
-        for learning in unused {
-            rows.entry(learning.id.clone())
-                .or_insert_with(|| HealthRow {
-                    learning,
-                    unused: false,
-                    never_applied: false,
-                })
-                .unused = true;
-        }
-        for learning in never_applied {
-            rows.entry(learning.id.clone())
-                .or_insert_with(|| HealthRow {
-                    learning,
-                    unused: false,
-                    never_applied: false,
-                })
-                .never_applied = true;
-        }
+        let rows = attention_rows(store)?;
 
         let mut html = String::from(r#"<div id="health-body"><section class="health-ledger">"#);
 
         if rows.is_empty() {
             html.push_str(&ledger_empty(
-                "Health is clear",
-                "Every active rule has been reached and applied within the last 90 days.",
+                "Nothing needs attention",
+                "No active learning is stale or selected without findings under the current checks.",
             ));
             html.push_str("</section></div>");
             return Ok(html);
@@ -65,10 +36,10 @@ pub fn render(state: &AppState) -> Result<String, Error> {
 
         html.push_str(r#"<div class="table-shell"><table class="health collection">"#);
         html.push_str(
-            r#"<colgroup><col class="title"><col class="bucket"><col class="used"><col class="hits"><col class="actions"></colgroup>"#,
+            r#"<colgroup><col class="title"><col class="bucket"><col class="selections"><col class="used"><col class="hits"><col class="actions"></colgroup>"#,
         );
         html.push_str(
-            "<thead><tr><th scope=\"col\">Title</th><th scope=\"col\">Bucket</th><th scope=\"col\">Last selected</th><th scope=\"col\">Hits</th><th scope=\"col\"><span class=\"sr-only\">Actions</span></th></tr></thead><tbody>",
+            "<thead><tr><th scope=\"col\">Title</th><th scope=\"col\">Attention</th><th scope=\"col\">Selections</th><th scope=\"col\">Last selected</th><th scope=\"col\">Findings</th><th scope=\"col\"><span class=\"sr-only\">Actions</span></th></tr></thead><tbody>",
         );
         for row in ordered {
             let class = if row.unused && row.never_applied {
@@ -81,7 +52,7 @@ pub fn render(state: &AppState) -> Result<String, Error> {
             let learning = &row.learning;
             html.push_str(&format!("<tr class=\"{}\">", class));
             html.push_str(&format!(
-                "<td class=\"title-cell\"><a class=\"title-link\" href=\"/learnings/{}\">{}</a>",
+                "<td class=\"title-cell\"><a class=\"title-link\" href=\"/learnings/{}?from=needs-attention\">{}</a>",
                 escape(&learning.id),
                 escape(&learning.title)
             ));
@@ -103,6 +74,10 @@ pub fn render(state: &AppState) -> Result<String, Error> {
                 escape(bucket_label)
             ));
             html.push_str(&format!(
+                "<td class=\"numeric\">{}</td>",
+                learning.times_selected
+            ));
+            html.push_str(&format!(
                 "<td class=\"date\">{}</td>",
                 escape(learning.last_selected_at.as_deref().unwrap_or("—"))
             ));
@@ -116,11 +91,11 @@ pub fn render(state: &AppState) -> Result<String, Error> {
                 "<form method=\"post\" action=\"{archive}\" hx-post=\"{archive}\"{SWAP}><button type=\"submit\" class=\"btn danger\">Archive</button></form>"
             ));
             html.push_str(&format!(
-                "<a href=\"/health/{}/edit\" class=\"btn button\">Edit</a>",
+                "<a href=\"/learnings/{}?from=needs-attention\" class=\"btn button\">Edit</a>",
                 escape(&learning.id)
             ));
             html.push_str(&format!(
-                "<a href=\"/health/{}/keep\" hx-get=\"/health/{}/keep\"{SWAP} class=\"btn button keep\">Keep</a>",
+                "<a href=\"/health/{}/keep\" hx-get=\"/health/{}/keep\"{SWAP} class=\"btn button keep\">Keep active</a>",
                 escape(&learning.id),
                 escape(&learning.id)
             ));
@@ -129,6 +104,44 @@ pub fn render(state: &AppState) -> Result<String, Error> {
         html.push_str("</tbody></table></div></section></div>");
         Ok(html)
     })
+}
+
+pub fn count(state: &AppState) -> Result<usize, Error> {
+    with_store(state, |store| Ok(attention_rows(store)?.len()))
+}
+
+fn attention_rows(store: &mut Store) -> Result<HashMap<String, HealthRow>, Error> {
+    let unused: Vec<Learning> = store.list(&ListFilter {
+        status: Some(Status::Active),
+        unused_days: Some(UNUSED_DAYS),
+        ..Default::default()
+    })?;
+    let never_applied: Vec<Learning> = store.list(&ListFilter {
+        status: Some(Status::Active),
+        never_applied: true,
+        ..Default::default()
+    })?;
+
+    let mut rows: HashMap<String, HealthRow> = HashMap::new();
+    for learning in unused {
+        rows.entry(learning.id.clone())
+            .or_insert_with(|| HealthRow {
+                learning,
+                unused: false,
+                never_applied: false,
+            })
+            .unused = true;
+    }
+    for learning in never_applied {
+        rows.entry(learning.id.clone())
+            .or_insert_with(|| HealthRow {
+                learning,
+                unused: false,
+                never_applied: false,
+            })
+            .never_applied = true;
+    }
+    Ok(rows)
 }
 
 fn bucket_label(unused: bool, never_applied: bool) -> &'static str {

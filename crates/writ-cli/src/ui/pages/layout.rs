@@ -9,15 +9,14 @@ use crate::ui::UI_PROTOCOL_VERSION;
 
 /// Render a full HTML page inside the shared layout.
 pub fn render(state: &AppState, title: &str, body: &str) -> Response {
-    let badge = match inbox_badge(state) {
+    let badge = match review_badge(state) {
         Ok(badge) => badge,
         Err(error) => return error_response(error),
     };
     let store_path = escape(&state.db.display().to_string());
-    let inbox_current = current_page(title, "Inbox");
-    let collection_current = current_page(title, "Collection");
-    let health_current = current_page(title, "Health");
     let lede = page_lede(title);
+    let collection_current = current_page(title, "Collection");
+    let review_current = current_page(title, "Review");
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -47,13 +46,10 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
       <nav aria-label="Primary">
         <ul class="underline-nav">
           <li class="underline-nav__item">
-            <a href="/inbox" class="nav-link underline-nav__link"{inbox_current}>Inbox{badge}</a>
-          </li>
-          <li class="underline-nav__item">
             <a href="/collection" class="nav-link underline-nav__link"{collection_current}>Collection</a>
           </li>
           <li class="underline-nav__item">
-            <a href="/health" class="nav-link underline-nav__link"{health_current}>Health</a>
+            <a href="/collection?view=review" class="nav-link underline-nav__link"{review_current}>Review{badge}</a>
           </li>
         </ul>
       </nav>
@@ -75,10 +71,9 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
 </html>"#,
         theme_color = "#ffffff",
         title = title,
-        inbox_current = inbox_current,
-        collection_current = collection_current,
-        health_current = health_current,
         badge = badge,
+        collection_current = collection_current,
+        review_current = review_current,
         lede = lede,
         body = body,
         store_path = store_path,
@@ -97,9 +92,8 @@ fn current_page(title: &str, page: &str) -> &'static str {
 
 fn page_lede(title: &str) -> &'static str {
     match title {
-        "Inbox" => "Review proposed learnings before they enter an audit.",
-        "Collection" => "Browse the rules your agents have learned and where they apply.",
-        "Health" => "Find active learnings that may need maintenance.",
+        "Collection" => "Browse and maintain the rules your agents have learned.",
+        "Review" => "Approve or reject proposed learnings before they enter an audit.",
         "Detail" => "Edit this learning, its scope, and its supporting evidence.",
         _ => "",
     }
@@ -136,11 +130,11 @@ pub fn is_htmx(headers: &HeaderMap) -> bool {
     headers.contains_key("hx-request")
 }
 
-/// The navigation Inbox count.
+/// The navigation Review count.
 ///
 /// The element is always present, so an out-of-band swap has a target
 /// even when the count reaches zero. Empty content hides it in CSS.
-pub fn inbox_badge(state: &AppState) -> Result<String, Error> {
+pub fn review_badge(state: &AppState) -> Result<String, Error> {
     let count = count_proposed(state)?;
     let text = if count > 0 {
         count.to_string()
@@ -148,15 +142,15 @@ pub fn inbox_badge(state: &AppState) -> Result<String, Error> {
         String::new()
     };
     Ok(format!(
-        r#"<span class="badge counter" id="inbox-badge">{text}</span>"#
+        r#"<span class="badge counter" id="review-badge">{text}</span>"#
     ))
 }
 
 /// The same badge, marked for an out-of-band swap.
 ///
-/// A row that moves out of the Inbox must move the count with it. A stale
+/// A row that moves out of Review must move the count with it. A stale
 /// count is a small lie.
-pub fn inbox_badge_oob(state: &AppState) -> Result<String, Error> {
+pub fn review_badge_oob(state: &AppState) -> Result<String, Error> {
     let count = count_proposed(state)?;
     let text = if count > 0 {
         count.to_string()
@@ -164,37 +158,34 @@ pub fn inbox_badge_oob(state: &AppState) -> Result<String, Error> {
         String::new()
     };
     Ok(format!(
-        r#"<span class="badge counter" id="inbox-badge" hx-swap-oob="true">{text}</span>"#
+        r#"<span class="badge counter" id="review-badge" hx-swap-oob="true">{text}</span>"#
     ))
 }
 
-/// Count proposed learnings, or surface a real store/lock failure (P7).
 pub fn count_proposed(state: &AppState) -> Result<usize, Error> {
     with_store(state, |store| {
-        let rows = store.list(&ListFilter {
+        let filter = ListFilter {
             status: Some(Status::Proposed),
             ..Default::default()
-        })?;
-        Ok(rows.len())
+        };
+        Ok(store.list(&filter)?.len())
     })
 }
 
-/// Escape text for insertion into HTML.
+/// Escape text for an HTML text node or attribute value.
 pub fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-/// Turn a `writ-core` error into an HTTP response.
-pub fn error_response(error: Error) -> Response {
-    let status = match error {
-        Error::NotFound { .. } => StatusCode::NOT_FOUND,
-        Error::Validation { .. } => StatusCode::BAD_REQUEST,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    with_version((status, escape(&error.to_string())).into_response())
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn with_version(mut response: Response) -> Response {
@@ -205,19 +196,15 @@ fn with_version(mut response: Response) -> Response {
     response
 }
 
-/// Lock the shared store. A poisoned lock is reported, not papered over (P7).
 pub fn with_store<T, F>(state: &AppState, f: F) -> Result<T, Error>
 where
     F: FnOnce(&mut Store) -> Result<T, Error>,
 {
-    let mut store = state.store.lock().map_err(|_| Error::Command {
-        program: "writ ui".to_string(),
-        message: "store lock was poisoned".to_string(),
-    })?;
+    let mut store = Store::open(&state.db)?;
     f(&mut store)
 }
 
-/// Primer scope/project chip used across Collection, Inbox, and Health.
+/// Primer scope/project chip used across Collection, Review, and Health.
 pub fn scope_chip(scope: &Scope, class: &str) -> String {
     if scope.kind == ScopeKind::Global {
         return format!(r#"<span class="chip {class}" title="global">global</span>"#);
@@ -252,11 +239,21 @@ pub fn project_repo_name(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-/// Empty ledger panel shared by Collection / Inbox / Health.
+/// Empty ledger panel shared by Collection / Review / Health.
 pub fn ledger_empty(title: &str, body: &str) -> String {
     format!(
         r#"<div class="table-shell ledger-empty empty"><strong>{}</strong><span>{}</span></div>"#,
         escape(title),
         escape(body)
     )
+}
+
+/// A store or validation error as an HTTP response.
+pub fn error_response(error: Error) -> Response {
+    let status = match &error {
+        Error::NotFound { .. } => StatusCode::NOT_FOUND,
+        Error::Validation { .. } => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    with_version((status, escape(&error.to_string())).into_response())
 }

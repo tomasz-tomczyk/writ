@@ -8,22 +8,31 @@ use writ_core::{
 
 use crate::ui::AppState;
 use crate::ui::pages::layout::{error_response, with_store};
-use crate::ui::pages::{detail, health, inbox, layout};
+use crate::ui::pages::{collection, detail, layout};
 
 /// Answer an Inbox action.
 ///
 /// htmx gets the list fragment plus an out-of-band badge, so the row and
 /// the navigation count move together. Anything else gets the redirect a
 /// plain form POST expects, so the page still works without htmx.
-fn inbox_reply(state: &AppState, headers: &HeaderMap) -> Response {
+fn inbox_reply(state: &AppState, headers: &HeaderMap, notice: &str) -> Response {
     if !layout::is_htmx(headers) {
-        return redirect("/inbox");
+        return redirect("/collection?view=review");
     }
-    let body = match inbox::render(state) {
+    let body = match collection::render_with_notice(
+        state,
+        Some("review"),
+        None,
+        None,
+        None,
+        None,
+        &[],
+        Some(notice),
+    ) {
         Ok(body) => body,
         Err(error) => return error_response(error),
     };
-    let badge = match layout::inbox_badge_oob(state) {
+    let badge = match layout::review_badge_oob(state) {
         Ok(badge) => badge,
         Err(error) => return error_response(error),
     };
@@ -50,9 +59,9 @@ fn finding_reply(
 /// Answer a Health action without regressing the htmx fragment contract.
 fn health_reply(state: &AppState, headers: &HeaderMap) -> Response {
     if !layout::is_htmx(headers) {
-        return redirect("/health");
+        return redirect("/collection?view=needs-attention");
     }
-    match health::render(state) {
+    match collection::render(state, Some("needs-attention"), None, None, None, None, &[]) {
         Ok(body) => layout::fragment(body.as_str()),
         Err(error) => error_response(error),
     }
@@ -63,8 +72,13 @@ pub async fn approve(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    match with_store(&state, |store| store.set_status(&id, Status::Active)) {
-        Ok(()) => inbox_reply(&state, &headers),
+    let result = with_store(&state, |store| {
+        let title = store.get(&id)?.title;
+        store.set_status(&id, Status::Active)?;
+        Ok(title)
+    });
+    match result {
+        Ok(title) => inbox_reply(&state, &headers, &format!("Activated “{title}”")),
         Err(error) => error_response(error),
     }
 }
@@ -74,8 +88,17 @@ pub async fn reject_proposal(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    match with_store(&state, |store| store.set_status(&id, Status::Archived)) {
-        Ok(()) => inbox_reply(&state, &headers),
+    let result = with_store(&state, |store| {
+        let title = store.get(&id)?.title;
+        store.set_status(&id, Status::Archived)?;
+        Ok(title)
+    });
+    match result {
+        Ok(title) => inbox_reply(
+            &state,
+            &headers,
+            &format!("Archived proposal “{title}”; history preserved"),
+        ),
         Err(error) => error_response(error),
     }
 }
@@ -135,7 +158,7 @@ pub async fn health_edit(Path(id): Path<String>, State(state): State<AppState>) 
                 &state,
                 CounterMetric::HealthAction(HealthActionMetric::Edit),
             );
-            redirect(&format!("/learnings/{id}"))
+            redirect(&format!("/learnings/{id}?from=needs-attention"))
         }
         Err(error) => error_response(error),
     }

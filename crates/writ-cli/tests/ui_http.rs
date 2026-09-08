@@ -138,7 +138,7 @@ fn record_proposed(store: &mut Store, title: &str) {
 }
 
 #[tokio::test]
-async fn root_redirects_to_inbox_when_proposed_exist() {
+async fn root_redirects_to_review_when_proposals_exist() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
     {
@@ -150,19 +150,38 @@ async fn root_redirects_to_inbox_when_proposed_exist() {
     let response = get(&app, "/").await;
 
     assert_eq!(response.status, 302);
-    assert_eq!(response.headers["location"], "/inbox");
+    assert_eq!(response.headers["location"], "/collection?view=review");
 }
 
 #[tokio::test]
 async fn root_redirects_to_collection_when_inbox_empty() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
+    Store::open(&db).unwrap();
 
     let app = start_app(&db, config());
     let response = get(&app, "/").await;
 
     assert_eq!(response.status, 302);
     assert_eq!(response.headers["location"], "/collection");
+}
+
+#[tokio::test]
+async fn legacy_inbox_and_health_routes_redirect_to_collection_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+
+    let app = start_app(&db, config());
+    let inbox = get(&app, "/inbox").await;
+    let health = get(&app, "/health").await;
+
+    assert_eq!(inbox.status, 302);
+    assert_eq!(inbox.headers["location"], "/collection?view=review");
+    assert_eq!(health.status, 302);
+    assert_eq!(
+        health.headers["location"],
+        "/collection?view=needs-attention"
+    );
 }
 
 #[tokio::test]
@@ -178,7 +197,7 @@ async fn protocol_version_header_is_present() {
 }
 
 #[tokio::test]
-async fn layout_shows_nav_and_inbox_badge() {
+async fn layout_presents_collection_and_review_as_primary_nav() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
     {
@@ -188,12 +207,110 @@ async fn layout_shows_nav_and_inbox_badge() {
     }
 
     let app = start_app(&db, config());
-    let body = get(&app, "/inbox").await.body;
+    let collection = get(&app, "/collection").await.body;
+    let review = get(&app, "/collection?view=review").await.body;
 
-    assert!(body.contains("Inbox"), "{body}");
-    assert!(body.contains("Collection"), "{body}");
-    assert!(body.contains("Health"), "{body}");
-    assert!(body.contains(">2</span>"), "badge should be 2: {body}");
+    assert!(
+        collection.contains(r#"aria-label="Primary""#),
+        "{collection}"
+    );
+    assert!(collection.contains(r#">Collection</a>"#), "{collection}");
+    assert!(collection.contains(r#">Review"#), "{collection}");
+    assert!(
+        collection.contains(">2</span>"),
+        "review count should be 2: {collection}"
+    );
+    assert!(
+        collection.contains(r#"aria-current="page">Collection</a>"#),
+        "{collection}"
+    );
+    assert!(review.contains(r#"aria-current="page">Review"#), "{review}");
+    assert!(review.contains("<h1"), "{review}");
+    assert!(review.contains("Review"), "{review}");
+    assert!(!collection.contains(r#">Inbox</a>"#), "{collection}");
+    assert!(!collection.contains(r#">Health</a>"#), "{collection}");
+}
+
+#[tokio::test]
+async fn collection_filters_exclude_review_and_cover_ledger_states() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    {
+        let mut store = Store::open(&db).unwrap();
+        record_proposed(&mut store, "waiting proposal");
+        active_learning(&mut store, "active rule");
+        let archived = active_learning(&mut store, "archived evidence");
+        store.set_status(&archived, Status::Archived).unwrap();
+
+        let mut stale = NewLearning::new("stale rule", "rule", "rationale");
+        stale.status = Some(Status::Active);
+        stale.created_at = Some("2000-01-01 00:00:00".into());
+        store.record(&stale).unwrap();
+    }
+
+    let app = start_app(&db, config());
+    let active = get(&app, "/collection").await.body;
+    for (label, view) in [
+        ("Active", "active"),
+        ("Needs attention", "needs-attention"),
+        ("Archive", "archive"),
+        ("All", "all"),
+    ] {
+        assert!(
+            active.contains(&format!("/collection?view={view}")),
+            "missing {label} filter: {active}"
+        );
+    }
+    assert!(
+        !active.contains("ledger-mode\">Review")
+            && !active.contains("ledger-mode\" aria-current=\"true\">Review"),
+        "Review must not be a Collection filter: {active}"
+    );
+    assert!(active.contains("active rule"), "{active}");
+    assert!(!active.contains("waiting proposal"), "{active}");
+    assert!(!active.contains("archived evidence"), "{active}");
+
+    let review = get(&app, "/collection?view=review").await.body;
+    assert!(
+        !review.contains(r#"class="ledger-modes""#),
+        "Review page should not show Collection filters: {review}"
+    );
+    assert!(review.contains("waiting proposal"), "{review}");
+    assert!(!review.contains("active rule"), "{review}");
+
+    let attention = get(&app, "/collection?view=needs-attention").await.body;
+    assert!(attention.contains("stale rule"), "{attention}");
+    assert!(attention.contains("Not selected in 90 days"), "{attention}");
+
+    let archive = get(&app, "/collection?view=archive").await.body;
+    assert!(archive.contains("archived evidence"), "{archive}");
+    assert!(!archive.contains("active rule"), "{archive}");
+}
+
+#[tokio::test]
+async fn detail_uses_the_learning_title_and_returns_to_its_collection_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("learnings.db");
+    let id = {
+        let mut store = Store::open(&db).unwrap();
+        active_learning(&mut store, "Scope Rust changes")
+    };
+
+    let app = start_app(&db, config());
+    let body = get(&app, &format!("/learnings/{id}?from=needs-attention"))
+        .await
+        .body;
+
+    assert!(
+        body.contains("<title>Scope Rust changes · writ</title>"),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            r#"class="detail-back" href="/collection?view=needs-attention">Back to Needs attention</a>"#
+        ),
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -274,7 +391,7 @@ async fn inbox_lists_proposed_without_near_matches() {
     }
 
     let app = start_app(&db, config());
-    let body = get(&app, "/inbox").await.body;
+    let body = get(&app, "/collection?view=review").await.body;
 
     assert!(body.contains("prefer sd over sed"), "{body}");
     assert!(body.contains("prefer sd over sed everywhere"), "{body}");
@@ -309,7 +426,7 @@ async fn main_htmx_inbox_and_health_contracts_are_preserved() {
     };
 
     let app = start_app(&db, config());
-    let inbox = get(&app, "/inbox").await.body;
+    let inbox = get(&app, "/collection?view=review").await.body;
     assert!(
         inbox.contains(&format!(r#"hx-post="/inbox/{approve_id}/approve""#)),
         "{inbox}"
@@ -323,10 +440,11 @@ async fn main_htmx_inbox_and_health_contracts_are_preserved() {
     .await;
     assert_eq!(approved.status, 200);
     assert!(is_fragment(&approved.body), "{}", approved.body);
-    assert!(approved.body.contains(r#"id="inbox-list""#));
+    assert!(approved.body.contains(r#"id="collection-body""#));
     assert!(approved.body.contains("hx-swap-oob"));
+    assert!(approved.body.contains("Activated “approve over htmx”"));
 
-    let health = get(&app, "/health").await.body;
+    let health = get(&app, "/collection?view=needs-attention").await.body;
     assert!(
         health.contains(&format!(r#"hx-post="/health/{archive_id}/archive""#)),
         "{health}"
@@ -344,7 +462,7 @@ async fn main_htmx_inbox_and_health_contracts_are_preserved() {
     .await;
     assert_eq!(archived.status, 200);
     assert!(is_fragment(&archived.body), "{}", archived.body);
-    assert!(archived.body.contains(r#"id="health-body""#));
+    assert!(archived.body.contains(r#"id="collection-body""#));
     assert!(!archived.body.contains("archive over htmx"));
 }
 
@@ -442,7 +560,7 @@ async fn approve_activates_and_removes_from_inbox() {
     let learning = store.get(&id).unwrap();
     assert_eq!(learning.status, Status::Active);
 
-    let body = get(&app, "/inbox").await.body;
+    let body = get(&app, "/collection?view=review").await.body;
     assert!(!body.contains("activate me"), "{body}");
 }
 
@@ -605,7 +723,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
     }
 
     let app = start_app(&db, config());
-    let body = get(&app, "/collection?status=all&sort=title&dir=asc")
+    let body = get(&app, "/collection?view=all&sort=title&dir=asc")
         .await
         .body;
 
@@ -614,7 +732,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
         "controls should share a ledger wrapper with the table: {body}"
     );
     assert!(
-        body.contains(r#"class="filter filter-chip" aria-current="true""#),
+        body.contains(r#"class="ledger-mode" aria-current="true""#),
         "{body}"
     );
     assert!(
@@ -639,7 +757,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
     );
     assert!(
         body.contains(
-            r##"hx-get="/collection?status=all&amp;sort=title&amp;dir=asc" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
+            r##"hx-get="/collection?view=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="ledger-mode" aria-current="true""##
         ),
         "{body}"
     );
@@ -650,7 +768,7 @@ async fn collection_uses_attached_ledger_table_chrome() {
     assert!(body.contains(r#"aria-sort="ascending""#), "{body}");
     assert!(
         body.contains(
-            r##"hx-get="/collection?sort=title&amp;dir=desc&amp;status=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true""##
+            r##"hx-get="/collection?sort=title&amp;dir=desc&amp;view=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true""##
         ),
         "{body}"
     );
@@ -706,7 +824,7 @@ async fn empty_collection_has_no_record_or_new_learning_cta() {
 }
 
 #[tokio::test]
-async fn collection_defaults_to_all_including_archived() {
+async fn collection_all_view_includes_archived() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("learnings.db");
     let active_id = {
@@ -718,15 +836,15 @@ async fn collection_defaults_to_all_including_archived() {
     };
 
     let app = start_app(&db, config());
-    let body = get(&app, "/collection").await.body;
+    let body = get(&app, "/collection?view=all").await.body;
 
     assert!(body.contains(&active_id), "{body}");
     assert!(body.contains("now archived"), "{body}");
     assert!(
         body.contains(
-            r##"hx-get="/collection?status=all&amp;sort=title&amp;dir=asc" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="filter filter-chip" aria-current="true""##
+            r##"hx-get="/collection?view=all" hx-target="#collection-body" hx-swap="outerHTML" hx-push-url="true" class="ledger-mode" aria-current="true""##
         ),
-        "page load should highlight All like the github mockup: {body}"
+        "All view should highlight its filter: {body}"
     );
 }
 
@@ -945,7 +1063,10 @@ async fn detail_save_updates_rule_text() {
     )
     .await;
     assert_eq!(response.status, 303);
-    assert_eq!(response.headers["location"], format!("/learnings/{id}"));
+    assert_eq!(
+        response.headers["location"],
+        format!("/learnings/{id}?from=active")
+    );
 
     let store = Store::open(&db).unwrap();
     let learning = store.get(&id).unwrap();
@@ -1401,7 +1522,7 @@ async fn health_lists_unused_rules() {
     }
 
     let app = start_app(&db, config());
-    let body = get(&app, "/health").await.body;
+    let body = get(&app, "/collection?view=needs-attention").await.body;
 
     assert!(body.contains("old and unused"), "{body}");
     assert!(body.contains("Not selected in 90 days"), "{body}");
@@ -1418,7 +1539,7 @@ async fn health_lists_never_applied_rules() {
     }
 
     let app = start_app(&db, config());
-    let body = get(&app, "/health").await.body;
+    let body = get(&app, "/collection?view=needs-attention").await.body;
 
     assert!(body.contains("selected but silent"), "{body}");
     assert!(body.contains("Selected but never applied"), "{body}");
@@ -1437,7 +1558,7 @@ async fn health_marks_rows_in_both_buckets() {
     backdate_last_selected(&db, &id);
 
     let app = start_app(&db, config());
-    let body = get(&app, "/health").await.body;
+    let body = get(&app, "/collection?view=needs-attention").await.body;
 
     assert!(body.contains("in both buckets"), "{body}");
     assert!(body.contains("in-both"), "{body}");
@@ -1449,10 +1570,10 @@ async fn inbox_empty_state_shows_curation_copy() {
     let db = dir.path().join("learnings.db");
 
     let app = start_app(&db, config());
-    let body = get(&app, "/inbox").await.body;
+    let body = get(&app, "/collection?view=review").await.body;
 
-    assert!(body.contains("Inbox is empty"), "{body}");
-    assert!(body.contains("Every proposal is curated"), "{body}");
+    assert!(body.contains("Review is complete"), "{body}");
+    assert!(body.contains("Every proposal has been curated"), "{body}");
     assert!(
         body.contains(r#"class="table-shell ledger-empty empty""#),
         "empty inbox should use the shared ledger empty panel: {body}"
@@ -1465,9 +1586,9 @@ async fn health_empty_state_shows_clear_copy() {
     let db = dir.path().join("learnings.db");
 
     let app = start_app(&db, config());
-    let body = get(&app, "/health").await.body;
+    let body = get(&app, "/collection?view=needs-attention").await.body;
 
-    assert!(body.contains("Health is clear"), "{body}");
+    assert!(body.contains("Nothing needs attention"), "{body}");
     assert!(
         body.contains(r#"class="table-shell ledger-empty empty""#),
         "empty health should use the shared ledger empty panel: {body}"
@@ -1486,11 +1607,11 @@ async fn inbox_opens_learning_detail_from_proposal() {
     };
 
     let app = start_app(&db, config());
-    let body = get(&app, "/inbox").await.body;
+    let body = get(&app, "/collection?view=review").await.body;
 
     assert!(
         body.contains(&format!(
-            r#"class="proposal-open" href="/learnings/{id}" aria-label="Open open me""#
+            r#"class="proposal-open" href="/learnings/{id}?from=review" aria-label="Open open me""#
         )),
         "inbox proposals should open the learning detail: {body}"
     );
@@ -1515,7 +1636,7 @@ async fn inbox_uses_collection_style_chrome() {
     }
 
     let app = start_app(&db, config());
-    let body = get(&app, "/inbox").await.body;
+    let body = get(&app, "/collection?view=review").await.body;
 
     assert!(
         body.contains(r#"class="inbox-ledger""#),
@@ -1559,7 +1680,7 @@ async fn health_uses_collection_style_chrome() {
     }
 
     let app = start_app(&db, config());
-    let body = get(&app, "/health").await.body;
+    let body = get(&app, "/collection?view=needs-attention").await.body;
 
     assert!(
         body.contains(r#"class="health-ledger""#),
@@ -1567,7 +1688,7 @@ async fn health_uses_collection_style_chrome() {
     );
     assert!(
         body.contains(
-            r#"<colgroup><col class="title"><col class="bucket"><col class="used"><col class="hits"><col class="actions"></colgroup>"#
+            r#"<colgroup><col class="title"><col class="bucket"><col class="selections"><col class="used"><col class="hits"><col class="actions"></colgroup>"#
         ),
         "{body}"
     );
