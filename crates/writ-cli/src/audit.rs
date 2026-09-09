@@ -192,6 +192,7 @@ pub fn report(run: &Selection, dry_run: bool) -> serde_json::Value {
                 "rule": one.learning.rule,
                 "rationale": one.learning.rationale,
                 "blocking": one.learning.blocking,
+                "sides": one.learning.sides.as_str(),
                 "exemplars": one.exemplars,
             }))
             .collect::<Vec<_>>(),

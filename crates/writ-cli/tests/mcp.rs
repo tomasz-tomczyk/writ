@@ -453,6 +453,16 @@ fn the_server_initializes_and_lists_its_tools() {
     assert_eq!(tools.len(), 3);
     assert_eq!(tools[0]["name"], "writ_record");
     assert_eq!(tools[2]["name"], "writ_edit");
+    let record_props = &tools[0]["inputSchema"]["properties"];
+    assert!(
+        record_props.get("sides").is_some(),
+        "writ_record must teach sides: {record_props}"
+    );
+    let edit_props = &tools[2]["inputSchema"]["properties"];
+    assert!(
+        edit_props.get("sides").is_some(),
+        "writ_edit must teach sides: {edit_props}"
+    );
 
     let unknown = server.request("resources/list", &json!({}));
     assert_eq!(unknown["error"]["code"], -32601);

@@ -13,7 +13,9 @@ rule as an instruction, and the reason the rule exists. Name the failure
 the rule prevents: a rationale that says "it is cleaner" does not
 survive its first argument. For structural rules, also pass `matcher`
 and `matcher_kind`: prefer `ast_grep` when the scope includes a
-language, and use `regex` only as an escape hatch. Say the id back to
+language, and use `regex` only as an escape hatch. Pass `sides` as
+`added`, `removed`, or `both` (the default) when the rule should only
+fire on one half of the diff. Say the id back to
 the user afterwards.
 
 Do not record an instruction about only the task in hand. A learning

@@ -125,6 +125,64 @@ impl FromStr for MatcherKind {
     }
 }
 
+/// Which half of the diff a learning cares about.
+///
+/// Matchers and matcher-less selection both honour this. `both` is the
+/// default and preserves the historical "either added or removed" behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Sides {
+    /// Only added (`+`) content.
+    Added,
+    /// Only removed (`-`) content.
+    Removed,
+    /// Either half. The default.
+    #[default]
+    Both,
+}
+
+impl Sides {
+    /// The database spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Removed => "removed",
+            Self::Both => "both",
+        }
+    }
+
+    /// Whether this setting includes the added half of a diff.
+    pub fn includes_added(self) -> bool {
+        matches!(self, Self::Added | Self::Both)
+    }
+
+    /// Whether this setting includes the removed half of a diff.
+    pub fn includes_removed(self) -> bool {
+        matches!(self, Self::Removed | Self::Both)
+    }
+}
+
+impl FromStr for Sides {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        match text {
+            "added" => Ok(Self::Added),
+            "removed" => Ok(Self::Removed),
+            "both" => Ok(Self::Both),
+            other => Err(Error::validation(format!(
+                "unknown sides {other}. Use added, removed, or both"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for Sides {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Which side of the pair an exemplar shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -303,6 +361,8 @@ pub struct LearningUpdate {
     pub rationale: String,
     /// Whether breaking the rule stops the handoff.
     pub blocking: bool,
+    /// Which half of the diff the rule cares about.
+    pub sides: Sides,
     /// The dialect of `matcher`.
     pub matcher_kind: Option<MatcherKind>,
     /// A retrieval matcher.
@@ -423,6 +483,9 @@ pub struct NewLearning {
     /// Whether breaking the rule stops the handoff. Blocking is the default.
     #[serde(default = "blocking_default")]
     pub blocking: bool,
+    /// Which half of the diff the rule cares about. `both` is the default.
+    #[serde(default)]
+    pub sides: Sides,
     /// The dialect of `matcher`.
     #[serde(default)]
     pub matcher_kind: Option<MatcherKind>,
@@ -471,6 +534,7 @@ impl NewLearning {
             rationale: rationale.into(),
             scopes: Vec::new(),
             blocking: true,
+            sides: Sides::Both,
             matcher_kind: None,
             matcher: None,
             exemplars: Vec::new(),
@@ -586,6 +650,8 @@ pub struct Learning {
     pub rationale: String,
     /// Whether breaking it stops the handoff.
     pub blocking: bool,
+    /// Which half of the diff the rule cares about.
+    pub sides: Sides,
     /// The dialect of `matcher`.
     pub matcher_kind: Option<MatcherKind>,
     /// The retrieval matcher.
@@ -762,5 +828,27 @@ mod tests {
         learning.scopes = vec!["language:rust".parse().unwrap(); 2];
         let error = learning.validate().unwrap_err();
         assert!(error.to_string().contains("twice"), "{error}");
+    }
+
+    #[test]
+    fn sides_defaults_to_both() {
+        let learning = NewLearning::new("t", "r", "why");
+        assert_eq!(learning.sides, Sides::Both);
+    }
+
+    #[test]
+    fn sides_parses_added_removed_and_both() {
+        assert_eq!("added".parse::<Sides>().unwrap(), Sides::Added);
+        assert_eq!("removed".parse::<Sides>().unwrap(), Sides::Removed);
+        assert_eq!("both".parse::<Sides>().unwrap(), Sides::Both);
+    }
+
+    #[test]
+    fn an_unknown_sides_value_names_the_three_that_work() {
+        let error: Error = "either".parse::<Sides>().unwrap_err();
+        assert!(
+            error.to_string().contains("added, removed, or both"),
+            "{error}"
+        );
     }
 }

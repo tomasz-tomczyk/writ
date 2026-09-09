@@ -5,7 +5,7 @@ use std::path::Path;
 
 use writ_core::{
     Config, CounterMetric, Error, ExemplarKind, LanguageMetric, MatcherKind, NewExemplar,
-    NewLearning, RecordSourceMetric, RecordStatusMetric, Recorded, Result, Scope, ScopeKind,
+    NewLearning, RecordSourceMetric, RecordStatusMetric, Recorded, Result, Scope, ScopeKind, Sides,
     SourceKind, Status, Store, TelemetryBatch, parse_jsonl,
 };
 
@@ -87,6 +87,14 @@ pub struct Args {
     )]
     matcher_kind: Option<String>,
 
+    /// Which half of the diff the rule cares about: added, removed, or both
+    #[arg(
+        long,
+        value_name = "SIDES",
+        conflicts_with_all = ["json", "reinforce"],
+    )]
+    sides: Option<String>,
+
     /// proposed or active. Default proposed
     #[arg(long, value_name = "STATUS", conflicts_with = "activate")]
     status: Option<String>,
@@ -161,6 +169,12 @@ pub fn execute_with_telemetry(
         );
         learning.scopes = args.scopes()?;
         learning.blocking = !args.advisory;
+        learning.sides = args
+            .sides
+            .as_deref()
+            .map(str::parse::<Sides>)
+            .transpose()?
+            .unwrap_or(Sides::Both);
         learning.matcher = args.matcher.clone();
         learning.matcher_kind = args
             .matcher_kind

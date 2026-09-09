@@ -48,6 +48,7 @@ writ record --title T --rule R --rationale WHY --scope language:rust --activate
 writ audit
 writ list --never-applied
 writ edit ID --matcher PATTERN --matcher-kind ast_grep
+writ edit ID --sides added
 writ archive ID
 writ ui
 ```

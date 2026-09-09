@@ -102,6 +102,9 @@ fn detail(learning: &Learning, exemplars: &[Exemplar]) -> String {
             "advisory"
         }
     ));
+    if learning.sides != writ_core::Sides::Both {
+        text.push_str(&format!("sides: {}\n", learning.sides));
+    }
     text.push_str(&format!("scopes: {scopes}\n"));
     text.push_str(&format!("rule: {}\n", learning.rule));
     text.push_str(&format!("why: {}\n", learning.rationale));

@@ -794,6 +794,7 @@ fn record_and_list_advertise_every_documented_flag() {
         "--example",
         "--matcher",
         "--matcher-kind",
+        "--sides",
         "--status",
         "--activate",
         "--json",
@@ -2201,6 +2202,44 @@ fn an_ast_grep_matcher_hits_a_shape_removed_from_the_working_tree() {
 }
 
 #[test]
+fn sides_added_drops_an_ast_grep_removal_only_hit() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(
+        root.join("a.ex"),
+        "defmodule A do\n  @spec value() :: integer()\n  def value, do: 1\nend\n",
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add spec"]);
+
+    let learning = sandbox.record(&[
+        "--scope",
+        "language:elixir",
+        "--matcher",
+        "@spec $A",
+        "--matcher-kind",
+        "ast_grep",
+        "--sides",
+        "added",
+        "--activate",
+    ]);
+    std::fs::write(
+        root.join("a.ex"),
+        "defmodule A do\n  def value, do: 1\nend\n",
+    )
+    .unwrap();
+
+    let output = audit_with_ast_grep(&sandbox, &root, &[]);
+    output.assert_code(0);
+    assert!(
+        !output.stdout.contains(&learning),
+        "sides=added must ignore a pre-image-only hit: {}",
+        output.stdout
+    );
+}
+
+#[test]
 fn an_ast_grep_miss_on_an_added_file_stays_a_miss_without_a_pre_image() {
     let sandbox = Sandbox::new();
     let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
@@ -2344,6 +2383,107 @@ fn a_regex_matcher_reads_added_and_removed_lines() {
     )
     .unwrap();
     assert!(audit_ids(&sandbox, &root, &[]).contains(&learning));
+}
+
+#[test]
+fn sides_added_ignores_a_removal_only_regex_hit() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(root.join("a.rs"), "fn main() { unwrap_me(); }\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "two"]);
+
+    let learning = sandbox.record(&[
+        "--matcher",
+        "unwrap_me",
+        "--matcher-kind",
+        "regex",
+        "--sides",
+        "added",
+        "--activate",
+    ]);
+    // Pure removal: the shape is only on the removed half.
+    std::fs::write(root.join("a.rs"), "fn main() { }\n").unwrap();
+    assert!(
+        !audit_ids(&sandbox, &root, &[]).contains(&learning),
+        "sides=added must drop a removal-only hit"
+    );
+}
+
+#[test]
+fn sides_removed_ignores_an_addition_only_regex_hit() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(root.join("a.rs"), "fn main() { }\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "two"]);
+
+    let learning = sandbox.record(&[
+        "--matcher",
+        "unwrap_me",
+        "--matcher-kind",
+        "regex",
+        "--sides",
+        "removed",
+        "--activate",
+    ]);
+    std::fs::write(root.join("a.rs"), "fn main() { unwrap_me(); }\n").unwrap();
+    assert!(
+        !audit_ids(&sandbox, &root, &[]).contains(&learning),
+        "sides=removed must drop an addition-only hit"
+    );
+}
+
+#[test]
+fn sides_is_stored_and_editable() {
+    let sandbox = Sandbox::new();
+    sandbox.record(&["--sides", "added", "--activate"]);
+    assert_eq!(sandbox.learnings()[0]["sides"], "added");
+
+    let id = sandbox.learnings()[0]["id"].as_str().unwrap().to_string();
+    sandbox
+        .run(&["edit", &id, "--sides", "removed"])
+        .assert_code(0);
+    assert_eq!(sandbox.learnings()[0]["sides"], "removed");
+}
+
+#[test]
+fn sides_added_without_a_matcher_drops_a_removal_only_diff() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(root.join("a.rs"), "fn keep_me() {}\nfn main() {}\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "two"]);
+
+    let learning = sandbox.record(&["--sides", "added", "--activate"]);
+    // Pure deletion: one line gone, nothing added.
+    std::fs::write(root.join("a.rs"), "fn main() {}\n").unwrap();
+    assert!(
+        !audit_ids(&sandbox, &root, &[]).contains(&learning),
+        "a matcher-less sides=added rule must not burn budget on a pure deletion"
+    );
+}
+
+#[test]
+fn an_unknown_sides_value_is_a_usage_error() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&[
+        "record",
+        "--title",
+        "t",
+        "--rule",
+        "r",
+        "--rationale",
+        "why",
+        "--sides",
+        "either",
+    ]);
+    output.assert_code(2);
+    assert!(
+        output.stderr.contains("added, removed, or both"),
+        "{}",
+        output.stderr
+    );
 }
 
 #[test]
@@ -3031,6 +3171,7 @@ fn audit_show_archive_and_edit_advertise_every_documented_flag() {
         "--scope",
         "--advisory",
         "--blocking",
+        "--sides",
         "--matcher",
         "--matcher-kind",
         "--clear-matcher",

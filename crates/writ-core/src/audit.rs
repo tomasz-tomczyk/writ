@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diff::Diff;
 use crate::error::{Error, Result};
-use crate::model::{Exemplar, ExemplarKind, Learning};
+use crate::model::{Exemplar, ExemplarKind, Learning, Sides};
 use crate::repo::RepoIdentity;
 
 /// What one audit is looking at.
@@ -124,6 +124,9 @@ pub fn rule_block(position: usize, selected: &Selected) -> String {
             "advisory"
         }
     ));
+    if selected.learning.sides != Sides::Both {
+        block.push_str(&format!("sides: {}\n", selected.learning.sides));
+    }
     let scopes = selected
         .learning
         .scopes
@@ -327,7 +330,7 @@ pub struct Ingested {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{SourceKind, Status};
+    use crate::model::{Scope, SourceKind, Status};
 
     fn learning(id: &str, blocking: bool) -> Learning {
         Learning {
@@ -339,6 +342,7 @@ mod tests {
             rule: "r".into(),
             rationale: "why".into(),
             blocking,
+            sides: Sides::Both,
             matcher_kind: None,
             matcher: None,
             source_kind: SourceKind::Manual,
@@ -352,7 +356,7 @@ mod tests {
             times_applied: 0,
             last_applied_at: None,
             last_verified: None,
-            scopes: vec![crate::model::Scope::global()],
+            scopes: vec![Scope::global()],
         }
     }
 
@@ -405,6 +409,33 @@ mod tests {
         ];
         rank(&mut candidates);
         assert_eq!(candidates[0].learning.id, "b");
+    }
+
+    #[test]
+    fn rule_block_names_sides_only_when_not_both() {
+        let both = Selected {
+            learning: learning("a", true),
+            exemplars: vec![],
+        };
+        let both_block = rule_block(1, &both);
+        assert!(
+            !both_block.contains("sides:"),
+            "both costs no prompt budget: {both_block}"
+        );
+
+        let mut added = learning("b", true);
+        added.sides = Sides::Added;
+        let added_block = rule_block(
+            1,
+            &Selected {
+                learning: added,
+                exemplars: vec![],
+            },
+        );
+        assert!(
+            added_block.contains("sides: added\n"),
+            "narrow sides must reach the reviewer: {added_block}"
+        );
     }
 
     #[test]
