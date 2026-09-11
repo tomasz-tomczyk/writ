@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use writ_core::{
     AuditScope, BucketMetric, Budget, Config, CounterMetric, Diff, Error, FindingOutcomeMetric,
     GateResultMetric, Ingested, LanguageMetric, MatcherResultMetric, Outcome, Result, Selected,
-    Store, TelemetryBatch, parse_findings, rank, render_pointer, render_prompt,
+    Store, TelemetryBatch, diff_digest, parse_findings, rank, render_pointer, render_prompt,
 };
 
 use crate::git;
@@ -27,6 +27,14 @@ use crate::output::AuditFormat;
 /// It is deliberately the **same width** as a UUID, because a preview
 /// that is five bytes short of the real prompt is not a preview.
 const DRY_RUN_ID: &str = "dry-run-nothing-recorded-no-audit-id";
+
+/// What a gate over an already-covered diff prints where an audit id
+/// would be. Spec section 9.2.
+///
+/// Like [`DRY_RUN_ID`] it is deliberately not a UUID — no row was
+/// written and nothing can be ingested against it — and deliberately the
+/// same width, so a caller rendering either sees the same shape.
+const COVERED_ID: &str = "already-covered-no-new-audit-id-here";
 
 /// Every flag in the `writ audit` row of spec section 5.
 #[derive(Debug, clap::Args)]
@@ -263,6 +271,7 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
         identity: repo.identity,
         diff,
         diff_range: range,
+        diff_digest: diff_digest(&text),
     };
     let budget = Budget {
         max_rules: args.max_rules.unwrap_or(config.audit.max_rules),
@@ -270,6 +279,30 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     };
 
     let mut store = Store::open(db)?;
+
+    // A gate over a diff that was already audited and answered stops
+    // here, before the selection costs anything and before an `audits`
+    // row or a counter moves. Spec section 9.2, **The gate does not
+    // re-nag a diff it already covered**.
+    //
+    // Gates only. A human running `writ audit` by hand is asking for an
+    // audit and gets one; the spec says *a gate* passes, not every
+    // caller. `--dry-run` is a preview of what a gate would select, so it
+    // is not short-circuited either.
+    if args.hook.is_some() && !args.dry_run && store.covered(&scope.identity, &scope.diff_digest)? {
+        return Ok(Selection {
+            audit_id: COVERED_ID.to_string(),
+            scope,
+            considered: 0,
+            selected: Vec::new(),
+            notices: vec![
+                "writ: this diff was already audited and answered. Nothing new to review."
+                    .to_string(),
+            ],
+            telemetry,
+        });
+    }
+
     let mut candidates = store.candidates(&scope)?;
     let considered = candidates.len();
     let mut notices = Vec::new();

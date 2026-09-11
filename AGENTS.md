@@ -167,9 +167,58 @@ has no data. That shipped once. `render_prompt` and its golden file are
 where it is now pinned.
 
 The retry cap is the host's own signal, never a count writ keeps. writ
-sees each audit fresh and cannot tell one turn from the next, so an
-agent that reports `ignored` would loop forever. Claude Code and Codex
-send `stop_hook_active`, and Cursor sends `loop_count`.
+cannot tell one turn from the next, so an agent that reports `ignored`
+would loop forever. Claude Code and Codex send `stop_hook_active`, and
+Cursor sends `loop_count`.
+
+**Check the cap before selecting, not after.** It used to sit after
+`audit::select`, so a turn the cap was about to let stop still rendered
+the prompt, opened an `audits` row, and moved `times_selected` for every
+rule it then discarded — rules credited with an appearance no reviewer
+saw. Nothing forces the old order: the payload is already read.
+
+## The gate does not re-nag a diff it already covered
+
+**The cap bounds one stop-cycle, and nothing bounds the next.**
+`stop_hook_active` is set only while the host is continuing a turn it
+already continued, and the next user message clears it. So an unchanged
+diff that was audited and answered used to be selected again on the very
+next turn, and again after that. Measured: one unchanged `diff_range`
+blocked at 12:03:18, passed capped at 12:04:03, and would have blocked
+again on any following turn.
+
+`audits.diff_digest` (schema 4) is a hash of the **diff text**, and
+`audits.ingested_at` is stamped when findings come back. A gate passes
+when an earlier audit in the same repo carries the same digest *and* was
+ingested against. Both halves matter:
+
+- the digest alone would let any audit disarm the gate, rewarding the
+  agent that ignored the pointer with silence;
+- `findings` cannot stand in for `ingested_at`, because it is a count
+  and an honest clean report ingests zero. Reading `findings = 0` as
+  "never answered" re-nags precisely the agent that did the work.
+
+Touch one byte and the digest changes, so the gate returns on its own.
+A rule activated after the fact is the one case it does not notice; that
+is accepted, because keying on the collection too would re-nag every
+turn a rule is edited.
+
+Digest the diff, never the prompt. The prompt carries the rendered
+rules, so a `max_chars` change would re-nag a diff nobody touched.
+
+The check is for **gates**, not every caller: `writ audit` by hand still
+audits. The ingest moment is untouched — a `blocking` finding still
+`open` still refuses the handoff.
+
+## Two surfaces, one gate
+
+`writ install` and the `writ@writ` plugin are two delivery paths for one
+fact, and **exactly one may be live**. A test pins their text identical
+(P8), which is what made carrying both invisible: two identical gates
+fire per turn, the pointer lands in the transcript twice, and
+`times_selected` moves twice for one gate. `writ install claude-code`
+reads `enabledPlugins` in the settings file it is about to edit and
+writes nothing when the plugin is enabled. `--force` overrides.
 
 Exit codes under `--hook` are the host's protocol, not the table in spec
 section 5.7. `--hook claude-code` exits 2 to block, which that table

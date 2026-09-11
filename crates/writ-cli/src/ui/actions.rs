@@ -349,6 +349,7 @@ mod tests {
                         identity: RepoIdentity::Remote("private repository".into()),
                         diff: Diff::parse("--- a/private.rs\n+++ b/private.rs\n+private line\n"),
                         diff_range: "private branch".into(),
+                        diff_digest: "private digest".into(),
                     },
                     1,
                     &[Selected {

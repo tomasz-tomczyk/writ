@@ -17,6 +17,7 @@ use crate::model::{
     Exemplar, ExemplarKind, Finding, Learning, LearningUpdate, ListFilter, MatcherKind,
     NewExemplar, NewLearning, Recorded, Scope, ScopeKind, Sides, SourceKind, Status,
 };
+use crate::repo::RepoIdentity;
 
 // Paths the current `candidates()` call is evaluating against.
 //
@@ -492,6 +493,38 @@ impl Store {
         Ok(selected)
     }
 
+    /// Whether this exact diff was already audited **and answered** in
+    /// this repository. Spec section 9.2, **The gate does not re-nag a
+    /// diff it already covered**.
+    ///
+    /// Both halves of the condition are load-bearing. Keying on the
+    /// digest alone would let any audit at all disarm the gate, so an
+    /// agent that ignored the pointer would be rewarded with silence —
+    /// the failure *Ingest only happens if the prompt asks for it* exists
+    /// to prevent. Requiring `ingested_at` gives "covered" the meaning a
+    /// reader expects: someone looked at this diff against these rules
+    /// and said what they found.
+    ///
+    /// Rows written before schema 4 carry a NULL digest and so cover
+    /// nothing, which is the honest reading of a diff nobody hashed.
+    ///
+    /// A rule activated after the fact is the one change this does not
+    /// notice. That is accepted: keying on the collection as well would
+    /// re-nag every turn a rule is edited.
+    pub fn covered(&self, identity: &RepoIdentity, digest: &str) -> Result<bool> {
+        let covered = self.conn.query_row(
+            "SELECT EXISTS (
+               SELECT 1 FROM audits
+                WHERE diff_digest = ?1
+                  AND repo IS ?2
+                  AND ingested_at IS NOT NULL
+             )",
+            params![digest, identity.value()],
+            |row| row.get(0),
+        )?;
+        Ok(covered)
+    }
+
     /// Open an `audits` row, stamp the rules it sent, and return its id.
     /// Spec section 7.1 step 4.
     ///
@@ -514,8 +547,8 @@ impl Store {
         let prompt = render_prompt(&id, scope, selected);
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO audits (id, repo, diff_range, considered, sent, prompt)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO audits (id, repo, diff_range, considered, sent, prompt, diff_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 &id,
                 scope.identity.value(),
@@ -523,6 +556,7 @@ impl Store {
                 considered as i64,
                 selected.len() as i64,
                 &prompt,
+                &scope.diff_digest,
             ],
         )?;
         for one in selected {
@@ -629,8 +663,14 @@ impl Store {
                 [&finding.learning_id],
             )?;
         }
+        // `ingested_at` is what [`Store::covered`] reads, and it is a
+        // separate column from `findings` on purpose: `findings` is a
+        // count, and an agent that checked the diff and honestly found
+        // nothing ingests zero. Section 9.2.
         tx.execute(
-            "UPDATE audits SET findings = ?1 WHERE id = ?2",
+            "UPDATE audits
+                SET findings = ?1, ingested_at = datetime('now')
+              WHERE id = ?2",
             params![input.findings.len() as i64, &input.audit_id],
         )?;
         tx.commit()?;
@@ -1150,6 +1190,7 @@ mod tests {
             identity: RepoIdentity::Remote("github.com/owner/repo".into()),
             diff: Diff::parse(diff),
             diff_range: "HEAD".into(),
+            diff_digest: "test digest".into(),
         }
     }
 
@@ -1311,6 +1352,106 @@ mod tests {
         assert_eq!(learning.title, "old");
         assert_eq!(learning.rule, "keep");
         assert_eq!(learning.sides, Sides::Both);
+    }
+
+    /// Schema 4 keeps the audits that predate the digest, unlike schema
+    /// 3. The columns are nullable, so nothing has to be invented for a
+    /// row whose diff nobody hashed — and a NULL digest covers nothing,
+    /// which is the honest reading of it.
+    #[test]
+    fn migrating_to_schema_four_keeps_audits_and_covers_nothing_with_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learnings.db");
+        let audit = new_id();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE writ_migrations (
+                   version    INTEGER PRIMARY KEY,
+                   applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+                 );",
+            )
+            .unwrap();
+            for sql in [
+                include_str!("migrations/0001_initial.sql"),
+                include_str!("migrations/0002_learning_sides.sql"),
+                include_str!("migrations/0003_audit_prompt.sql"),
+            ] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO writ_migrations (version) VALUES (1), (2), (3)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO audits (id, repo, diff_range, considered, sent, prompt)
+                 VALUES (?1, 'github.com/o/r', 'HEAD', 3, 1, 'the document')",
+                [&audit],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(count(&store, "audits"), 1, "the old audit survives");
+
+        let identity = RepoIdentity::Remote("github.com/o/r".into());
+        assert!(
+            !store.covered(&identity, "any digest at all").unwrap(),
+            "a row with no digest must cover nothing"
+        );
+    }
+
+    /// Both halves of the coverage condition, at the store.
+    #[test]
+    fn coverage_needs_the_same_digest_in_the_same_repo_and_an_ingest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("learnings.db")).unwrap();
+        let learning = active(&mut store, "a title", &["global"]);
+        let identity = RepoIdentity::Remote("github.com/o/r".into());
+        let scope = AuditScope {
+            identity: identity.clone(),
+            diff: Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n"),
+            diff_range: "HEAD".into(),
+            diff_digest: "the digest".into(),
+        };
+        let selected = vec![Selected {
+            learning: store.get(&learning).unwrap(),
+            exemplars: Vec::new(),
+        }];
+        let audit = store.start_audit(&scope, 1, &selected).unwrap();
+
+        assert!(
+            !store.covered(&identity, "the digest").unwrap(),
+            "an audit nobody answered covers nothing"
+        );
+
+        store
+            .ingest(&FindingsInput {
+                audit_id: audit,
+                findings: Vec::new(),
+            })
+            .unwrap();
+
+        assert!(
+            store.covered(&identity, "the digest").unwrap(),
+            "a clean report is still an answer"
+        );
+        assert!(
+            !store.covered(&identity, "another digest").unwrap(),
+            "a different diff is not covered"
+        );
+        assert!(
+            !store
+                .covered(
+                    &RepoIdentity::Remote("github.com/o/other".into()),
+                    "the digest"
+                )
+                .unwrap(),
+            "another repository is not covered"
+        );
     }
 
     /// Schema 3 drops the audits that predate the prompt column rather
@@ -2516,6 +2657,7 @@ mod tests {
             identity: RepoIdentity::Remote("github.com/other/thing".into()),
             diff: Diff::parse(DIFF),
             diff_range: "HEAD".into(),
+            diff_digest: "test digest".into(),
         };
         assert!(
             selected_titles(&store, &elsewhere).is_empty(),

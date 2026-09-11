@@ -49,8 +49,22 @@ it sends to a `Stop` hook that already fired for this turn, and writ
 reads it: on the second pass the gate lets the turn stop.
 
 Without that cap an agent that reports `ignored` produces the same
-finding on the next audit, forever, because writ sees each audit fresh
-and cannot tell one turn from the next.
+finding on the next audit, forever, because writ cannot tell one turn
+from the next.
+
+The cap bounds one stop-cycle only: your next message clears
+`stop_hook_active`. What stops the gate re-nagging an unchanged diff
+across turns is `audits.diff_digest` — once a diff has been audited and
+the findings ingested, the gate passes on it until the diff changes.
+
+## Do not also run `writ install claude-code`
+
+This plugin already registers both gates. Installing them into
+`~/.claude/settings.json` as well runs two identical gates per turn:
+the pointer lands in your transcript twice and every rule is counted
+twice for one audit. `writ install` detects the enabled plugin and
+declines, but an install that predates that check leaves entries behind
+— delete the `writ audit` hooks from `settings.json` if you have both.
 
 ## What each host can enforce
 

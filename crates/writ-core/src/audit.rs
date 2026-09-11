@@ -20,6 +20,33 @@ pub struct AuditScope {
     pub diff: Diff,
     /// The range as the caller named it, for the `audits` row.
     pub diff_range: String,
+    /// [`diff_digest`] of the diff text this scope was built from.
+    pub diff_digest: String,
+}
+
+/// Hash the diff text a gate is about to audit. Spec section 9.2, **The
+/// gate does not re-nag a diff it already covered**.
+///
+/// Over the **diff text alone**, never the prompt. The prompt carries
+/// the rendered rules, so a `max_chars` change or an edit to an
+/// unrelated rule would alter it and re-nag a diff nobody touched.
+///
+/// The output has to stay stable across builds, because it is compared
+/// against rows written by an older binary. That rules out
+/// `std::hash::DefaultHasher`, whose algorithm std explicitly reserves
+/// the right to change between releases.
+pub fn diff_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::new(), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 /// How many characters and rules one prompt may carry. Spec section 10.

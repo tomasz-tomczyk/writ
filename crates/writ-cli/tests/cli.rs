@@ -3572,6 +3572,151 @@ fn a_capped_turn_opens_no_audit_row_and_moves_no_counter() {
     }
 }
 
+/// The gate does not re-nag a diff it already covered. Section 9.2.
+///
+/// `stop_hook_active` bounds one stop-cycle and the next user message
+/// clears it, so an unchanged diff that was audited and answered was
+/// selected again on the very next turn, and again after that, forever.
+/// The digest is what keys the state the range could not.
+#[test]
+fn an_answered_diff_does_not_block_the_next_turn() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let id = sandbox.learnings()[0]["id"].as_str().unwrap().to_string();
+
+    let first = hook(&sandbox, &root, "claude-code", "{}");
+    first.assert_code(2);
+    let audit_id = first
+        .stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("audit-id: "))
+        .expect("the pointer names the audit")
+        .to_string();
+
+    sandbox
+        .pipe(
+            &["audit", "--ingest"],
+            &format!(r#"{{"audit_id":"{audit_id}","findings":[{{"learning_id":"{id}","outcome":"fixed"}}]}}"#),
+        )
+        .assert_code(0);
+
+    // A fresh turn: no retry signal, the same unchanged diff.
+    let second = hook(&sandbox, &root, "claude-code", "{}");
+    second.assert_code(0);
+    assert!(second.stdout.is_empty(), "{}", second.stdout);
+
+    let conn = rusqlite::Connection::open(sandbox.db()).unwrap();
+    let audits: i64 = conn
+        .query_row("SELECT COUNT(*) FROM audits", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(audits, 1, "a covered diff opens no second audits row");
+    let selected: i64 = conn
+        .query_row("SELECT times_selected FROM learnings", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(selected, 1, "a covered diff moves no counter");
+}
+
+/// Touch one byte and the gate comes back on its own. Section 9.2.
+#[test]
+fn changing_the_diff_brings_the_gate_back() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let id = sandbox.learnings()[0]["id"].as_str().unwrap().to_string();
+
+    let first = hook(&sandbox, &root, "claude-code", "{}");
+    first.assert_code(2);
+    let audit_id = first
+        .stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("audit-id: "))
+        .expect("the pointer names the audit")
+        .to_string();
+    sandbox
+        .pipe(
+            &["audit", "--ingest"],
+            &format!(r#"{{"audit_id":"{audit_id}","findings":[{{"learning_id":"{id}","outcome":"fixed"}}]}}"#),
+        )
+        .assert_code(0);
+
+    std::fs::write(root.join("a.rs"), "fn main() { let x = 2; }\n").unwrap();
+
+    hook(&sandbox, &root, "claude-code", "{}").assert_code(2);
+}
+
+/// An audit nobody answered must not disarm the gate. Section 9.2.
+///
+/// Keying on the digest alone would reward the agent that ignored the
+/// pointer with silence, which is the failure *Ingest only happens if the
+/// prompt asks for it* was written to prevent.
+#[test]
+fn an_unanswered_audit_does_not_cover_the_diff() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    hook(&sandbox, &root, "claude-code", "{}").assert_code(2);
+    hook(&sandbox, &root, "claude-code", "{}").assert_code(2);
+}
+
+/// A clean report is coverage. Section 9.2.
+///
+/// `findings` is a count, so an agent that checked the diff and honestly
+/// found nothing ingests zero. Reading that as "never answered" would
+/// re-nag precisely the agent that did the work.
+#[test]
+fn a_clean_report_covers_the_diff_too() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let first = hook(&sandbox, &root, "claude-code", "{}");
+    first.assert_code(2);
+    let audit_id = first
+        .stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("audit-id: "))
+        .expect("the pointer names the audit")
+        .to_string();
+
+    sandbox
+        .pipe(
+            &["audit", "--ingest"],
+            &format!(r#"{{"audit_id":"{audit_id}","findings":[]}}"#),
+        )
+        .assert_code(0);
+
+    hook(&sandbox, &root, "claude-code", "{}").assert_code(0);
+}
+
+/// A human running `writ audit` by hand still gets an audit. Section 9.2
+/// says *a gate* passes when the diff is covered, not every caller.
+#[test]
+fn the_coverage_pass_is_the_gates_alone() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let id = sandbox.learnings()[0]["id"].as_str().unwrap().to_string();
+
+    let first = hook(&sandbox, &root, "claude-code", "{}");
+    first.assert_code(2);
+    let audit_id = first
+        .stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("audit-id: "))
+        .expect("the pointer names the audit")
+        .to_string();
+    sandbox
+        .pipe(
+            &["audit", "--ingest"],
+            &format!(r#"{{"audit_id":"{audit_id}","findings":[{{"learning_id":"{id}","outcome":"fixed"}}]}}"#),
+        )
+        .assert_code(0);
+
+    let by_hand = audit_json(&sandbox, &root, &[]);
+    assert_ne!(
+        by_hand["audit_id"].as_str().unwrap(),
+        audit_id,
+        "a hand-run audit is a new audit"
+    );
+}
+
 #[test]
 fn cursor_stops_blocking_at_the_loop_limit() {
     let sandbox = Sandbox::new();
