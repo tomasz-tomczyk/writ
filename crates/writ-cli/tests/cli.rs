@@ -3274,7 +3274,7 @@ fn hook(sandbox: &Sandbox, root: &Path, host: &str, stdin: &str) -> Output {
 }
 
 #[test]
-fn the_claude_code_hook_blocks_with_exit_two_and_findings_on_stderr() {
+fn the_claude_code_hook_blocks_with_exit_two_and_a_pointer_on_stderr() {
     let sandbox = Sandbox::new();
     let root = gated_repo(&sandbox, true);
 
@@ -3282,7 +3282,167 @@ fn the_claude_code_hook_blocks_with_exit_two_and_findings_on_stderr() {
 
     output.assert_code(2);
     assert!(output.stdout.is_empty(), "stdout: {}", output.stdout);
-    assert!(output.stderr.contains("prefer sd"), "{}", output.stderr);
+    assert!(output.stderr.contains("writ_audit"), "{}", output.stderr);
+    assert!(output.stderr.contains("audit-id: "), "{}", output.stderr);
+}
+
+/// Section 9.2. The whole point of the pointer: the host renders a Stop
+/// hook's stderr into the transcript verbatim, so the diff must not be
+/// there. It reaches the agent through the tool result instead, which the
+/// host collapses.
+#[test]
+fn the_gate_never_puts_the_diff_in_the_host_protocol() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let claude = hook(&sandbox, &root, "claude-code", "{}");
+    assert!(!claude.stderr.contains("```diff"), "{}", claude.stderr);
+    assert!(!claude.stderr.contains("prefer sd"), "{}", claude.stderr);
+
+    let codex = hook(&sandbox, &root, "codex", "{}");
+    assert!(!codex.stdout.contains("```diff"), "{}", codex.stdout);
+
+    let cursor = hook(&sandbox, &root, "cursor", "{}");
+    assert!(!cursor.stdout.contains("```diff"), "{}", cursor.stdout);
+}
+
+/// Adapters parse this text too, so it is asserted byte for byte beside
+/// the prompt it points at.
+#[test]
+fn the_pointer_is_asserted_byte_for_byte() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let output = hook(&sandbox, &root, "claude-code", "{}");
+    output.assert_code(2);
+
+    let audit_id = audit_id_of(&output.stderr);
+    let actual = output.stderr.replace(&audit_id, "<AUDIT>");
+    assert_eq!(
+        actual,
+        include_str!("golden/audit_pointer.txt"),
+        "the pointer is a contract"
+    );
+}
+
+/// The audit-id a pointer or a prompt printed.
+fn audit_id_of(text: &str) -> String {
+    text.lines()
+        .find_map(|line| line.strip_prefix("audit-id: "))
+        .expect("an audit-id line")
+        .to_string()
+}
+
+/// `--fetch` hands back the prompt the gate recorded, diff and all. The
+/// gate's stderr stays small; this is where the payload lives.
+#[test]
+fn fetch_returns_the_prompt_the_gate_recorded() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let gate = hook(&sandbox, &root, "claude-code", "{}");
+    gate.assert_code(2);
+    let audit_id = audit_id_of(&gate.stderr);
+
+    let fetched = sandbox.run_at(&root, &["audit", "--fetch", &audit_id]);
+
+    fetched.assert_code(0);
+    assert!(fetched.stdout.contains("```diff"), "{}", fetched.stdout);
+    assert!(fetched.stdout.contains("prefer sd"), "{}", fetched.stdout);
+    assert!(
+        fetched.stdout.contains(&format!("audit-id: {audit_id}")),
+        "{}",
+        fetched.stdout
+    );
+}
+
+/// The prompt is recorded for every audit, not only a gated one, so
+/// `--fetch` answers for a plain `writ audit` too.
+#[test]
+fn fetch_answers_for_an_audit_run_by_hand() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    sandbox.record(&["--activate"]);
+    std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+
+    let emitted = sandbox.run_at(&root, &["audit", "--format", "prompt"]);
+    emitted.assert_code(0);
+    let audit_id = audit_id_of(&emitted.stdout);
+
+    let fetched = sandbox.run_at(&root, &["audit", "--fetch", &audit_id]);
+
+    fetched.assert_code(0);
+    assert_eq!(fetched.stdout, emitted.stdout, "a fetch is not a re-render");
+}
+
+/// `times_selected` moves at emit and nowhere else. A fetch is a read of
+/// what emit already recorded, so fetching twice must not make a rule look
+/// as though it reached three reviewers.
+#[test]
+fn fetch_does_not_move_times_selected() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let gate = hook(&sandbox, &root, "claude-code", "{}");
+    gate.assert_code(2);
+    let audit_id = audit_id_of(&gate.stderr);
+    let after_gate = times_selected(&sandbox);
+
+    sandbox
+        .run_at(&root, &["audit", "--fetch", &audit_id])
+        .assert_code(0);
+    sandbox
+        .run_at(&root, &["audit", "--fetch", &audit_id])
+        .assert_code(0);
+
+    assert_eq!(times_selected(&sandbox), after_gate);
+}
+
+/// `times_selected` on the one learning `gated_repo` recorded.
+fn times_selected(sandbox: &Sandbox) -> i64 {
+    sandbox.learnings()[0]["times_selected"]
+        .as_i64()
+        .expect("a count")
+}
+
+/// P7: an id that names no audit is `not found`, not a usage error and
+/// not an empty document.
+#[test]
+fn fetch_of_an_unknown_audit_exits_five() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let output = sandbox.run_at(&root, &["audit", "--fetch", "no-such-audit"]);
+
+    output.assert_code(5);
+}
+
+/// A dry run records no `audits` row, so there is nothing to fetch. It
+/// must say `not found` rather than hand back some other audit's prompt.
+#[test]
+fn fetch_of_a_dry_run_exits_five() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let dry = sandbox.run_at(&root, &["audit", "--dry-run"]);
+    dry.assert_code(0);
+
+    let output = sandbox.run_at(&root, &["audit", "--fetch", &audit_id_of(&dry.stdout)]);
+
+    output.assert_code(5);
+}
+
+/// A fetch reads a row. It needs no diff and no repository, so it works
+/// from anywhere the database is reachable.
+#[test]
+fn fetch_needs_neither_a_diff_nor_a_repository() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let gate = hook(&sandbox, &root, "claude-code", "{}");
+    gate.assert_code(2);
+    let audit_id = audit_id_of(&gate.stderr);
+
+    let output = sandbox.run_at(sandbox.dir.path(), &["audit", "--fetch", &audit_id]);
+
+    output.assert_code(0);
+    assert!(output.stdout.contains("prefer sd"), "{}", output.stdout);
 }
 
 #[test]
@@ -3296,7 +3456,7 @@ fn the_codex_hook_blocks_on_stdout_with_exit_zero() {
     let body: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
     assert_eq!(body["decision"], "block");
     assert!(
-        body["reason"].as_str().unwrap().contains("prefer sd"),
+        body["reason"].as_str().unwrap().contains("writ_audit"),
         "{body}"
     );
 }
@@ -3314,7 +3474,7 @@ fn the_cursor_hook_submits_a_followup_message() {
         body["followup_message"]
             .as_str()
             .unwrap()
-            .contains("prefer sd"),
+            .contains("writ_audit"),
         "{body}"
     );
     assert!(body.get("decision").is_none(), "{body}");
@@ -3332,7 +3492,7 @@ fn an_advisory_selection_still_sends_the_agent_back() {
 
     let claude = hook(&sandbox, &root, "claude-code", "{}");
     claude.assert_code(2);
-    assert!(claude.stderr.contains("prefer sd"), "{}", claude.stderr);
+    assert!(claude.stderr.contains("writ_audit"), "{}", claude.stderr);
 
     let cursor = hook(&sandbox, &root, "cursor", "{}");
     cursor.assert_code(0);
@@ -3509,7 +3669,7 @@ fn assert_blocked(host: &str, output: &Output) {
     match host {
         "claude-code" => {
             output.assert_code(2);
-            assert!(output.stderr.contains("prefer sd"), "{}", output.stderr);
+            assert!(output.stderr.contains("writ_audit"), "{}", output.stderr);
         }
         "codex" => {
             output.assert_code(0);
@@ -3567,7 +3727,7 @@ fn an_unreadable_hook_payload_still_blocks() {
     let output = hook(&sandbox, &root, "claude-code", "not json");
 
     output.assert_code(2);
-    assert!(output.stderr.contains("prefer sd"), "{}", output.stderr);
+    assert!(output.stderr.contains("writ_audit"), "{}", output.stderr);
 }
 
 /// An unknown host is a usage error, not a silent pass.

@@ -24,7 +24,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use serde_json::{Value, json};
 use writ_core::{
-    CommandMetric, Config, CounterMetric, Paths, Result, SurfaceMetric, TelemetryBatch,
+    CommandMetric, Config, CounterMetric, Paths, Result, Store, SurfaceMetric, TelemetryBatch,
 };
 
 use crate::audit;
@@ -199,6 +199,15 @@ const AUDIT_ARGS: &[ToolArg] = &[
         flag: "max-chars",
         kind: Kind::Number,
         about: "Override the configured cap on the characters of rule text one audit sends",
+    },
+    ToolArg {
+        name: "fetch",
+        flag: "fetch",
+        kind: Kind::Text,
+        about: "An audit id a gate handed you. Returns the document that audit sent: \
+                the diff, the learnings that apply to it, and how to report back. \
+                This is what a Stop hook's pointer asks for, and it is a read: it \
+                opens no audit and moves no counter",
     },
     ToolArg {
         name: "findings",
@@ -548,7 +557,7 @@ impl Server {
         };
 
         match self.dispatch(tool, &argv, stdin.as_deref()) {
-            Ok(value) => success(&value),
+            Ok(Answer { value, text }) => success(&value, text.as_deref()),
             Err(message) => failure(&message),
         }
     }
@@ -559,7 +568,7 @@ impl Server {
         tool: &Tool,
         argv: &[String],
         stdin: Option<&str>,
-    ) -> std::result::Result<Value, String> {
+    ) -> std::result::Result<Answer, String> {
         match tool.command {
             "record" => {
                 let line = RecordLine::try_parse_from(argv).map_err(usage)?;
@@ -567,7 +576,9 @@ impl Server {
                     record::execute_with_telemetry(&line.inner, &self.db, &self.config)
                         .map_err(cause)?;
                 self.observe(batch, CommandMetric::Record);
-                Ok(serde_json::to_value(&written).expect("Recorded serializes"))
+                Ok(Answer::json(
+                    serde_json::to_value(&written).expect("Recorded serializes"),
+                ))
             }
             "audit" => {
                 let line = AuditLine::try_parse_from(argv).map_err(usage)?;
@@ -575,7 +586,20 @@ impl Server {
                     let (written, batch) =
                         audit::ingest_with_telemetry(findings, &self.db).map_err(cause)?;
                     self.observe(batch, CommandMetric::Audit);
-                    return Ok(serde_json::to_value(&written).expect("Ingested serializes"));
+                    return Ok(Answer::json(
+                        serde_json::to_value(&written).expect("Ingested serializes"),
+                    ));
+                }
+                // A fetch is a read of one row, so it takes neither the
+                // selection path nor a telemetry counter for one.
+                if let Some(id) = &line.inner.fetch {
+                    let prompt = Store::open(&self.db)
+                        .and_then(|store| store.audit_prompt(id))
+                        .map_err(cause)?;
+                    return Ok(Answer::text(
+                        json!({ "audit_id": id, "prompt": &prompt }),
+                        prompt,
+                    ));
                 }
                 let mut run = audit::select(&line.inner, &self.db, &self.config).map_err(cause)?;
                 let mut report = audit::report(&run, line.inner.dry_run);
@@ -583,13 +607,15 @@ impl Server {
                     report["notices"] = json!(run.notices);
                 }
                 self.observe(std::mem::take(&mut run.telemetry), CommandMetric::Audit);
-                Ok(report)
+                Ok(Answer::json(report))
             }
             "edit" => {
                 let line = EditLine::try_parse_from(argv).map_err(usage)?;
                 let learning = edit::execute(&line.inner, &self.db).map_err(cause)?;
                 self.observe(TelemetryBatch::default(), CommandMetric::Edit);
-                Ok(serde_json::to_value(&learning).expect("Learning serializes"))
+                Ok(Answer::json(
+                    serde_json::to_value(&learning).expect("Learning serializes"),
+                ))
             }
             other => Err(format!("no such command {other}")),
         }
@@ -620,9 +646,39 @@ fn cause(error: writ_core::Error) -> String {
     format!("writ: {error} (exit {})", crate::exit_code(&error))
 }
 
-fn success(value: &Value) -> Value {
+/// What one tool call produced.
+///
+/// `text` exists for the one answer that is a document rather than a
+/// record. `writ_audit`'s fetch returns the audit prompt, and handing a
+/// model a JSON-escaped 100 KB diff to unescape is a worse answer than
+/// handing it the document. `structuredContent` still carries the object,
+/// so a caller that wants fields keeps them.
+struct Answer {
+    value: Value,
+    text: Option<String>,
+}
+
+impl Answer {
+    /// An answer whose text is its JSON.
+    fn json(value: Value) -> Self {
+        Self { value, text: None }
+    }
+
+    /// An answer whose text is a document.
+    fn text(value: Value, text: String) -> Self {
+        Self {
+            value,
+            text: Some(text),
+        }
+    }
+}
+
+fn success(value: &Value, text: Option<&str>) -> Value {
     json!({
-        "content": [{ "type": "text", "text": value.to_string() }],
+        "content": [{
+            "type": "text",
+            "text": text.map_or_else(|| value.to_string(), str::to_string),
+        }],
         "structuredContent": value,
     })
 }

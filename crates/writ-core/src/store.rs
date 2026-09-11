@@ -5,7 +5,8 @@ use std::path::Path;
 use rusqlite::{Connection, Row, Transaction, functions::FunctionFlags, params};
 
 use crate::audit::{
-    AuditScope, Budget, Candidate, FindingsInput, Ingested, Outcome, Outcomes, Selected, rule_block,
+    AuditScope, Budget, Candidate, FindingsInput, Ingested, Outcome, Outcomes, Selected,
+    render_prompt, rule_block,
 };
 use crate::error::{Error, Result};
 use crate::fts;
@@ -505,22 +506,23 @@ impl Store {
     /// [`Store::ingest`]. `updated_at` is never named. Invariant 7.
     pub fn start_audit(
         &mut self,
-        repo: &str,
-        diff_range: &str,
+        scope: &AuditScope,
         considered: usize,
         selected: &[Selected],
     ) -> Result<String> {
         let id = new_id();
+        let prompt = render_prompt(&id, scope, selected);
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO audits (id, repo, diff_range, considered, sent)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO audits (id, repo, diff_range, considered, sent, prompt)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 &id,
-                repo,
-                diff_range,
+                scope.identity.value(),
+                &scope.diff_range,
                 considered as i64,
-                selected.len() as i64
+                selected.len() as i64,
+                &prompt,
             ],
         )?;
         for one in selected {
@@ -534,6 +536,25 @@ impl Store {
         }
         tx.commit()?;
         Ok(id)
+    }
+
+    /// The prompt this audit sent. Spec section 9.2, **The gate points, it
+    /// does not paste**.
+    ///
+    /// A gate emits a pointer, and the agent fetches the document with
+    /// this. The row is the source: re-selecting would open a second
+    /// `audits` row and move `times_selected` again for one gate, which is
+    /// exactly the conflation the two counter pairs exist to avoid.
+    ///
+    /// The column is `NOT NULL`, so the only miss is an id that names no
+    /// row. A dry run is one: it records nothing, and its placeholder is
+    /// not an id.
+    pub fn audit_prompt(&self, id: &str) -> Result<String> {
+        self.conn
+            .query_row("SELECT prompt FROM audits WHERE id = ?1", [id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|_| Error::NoSuchAudit { id: id.to_string() })
     }
 
     /// Write the findings a host reported. Spec section 7.1 step 5.
@@ -1290,6 +1311,72 @@ mod tests {
         assert_eq!(learning.title, "old");
         assert_eq!(learning.rule, "keep");
         assert_eq!(learning.sides, Sides::Both);
+    }
+
+    /// Schema 3 drops the audits that predate the prompt column rather
+    /// than backfilling them with a value that is not true. Their
+    /// findings go with them: `findings` cascades from `audits`, and a
+    /// finding without its audit is a report about nothing.
+    #[test]
+    fn migrating_to_schema_three_drops_audits_that_have_no_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learnings.db");
+        let learning = new_id();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE writ_migrations (
+                   version    INTEGER PRIMARY KEY,
+                   applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+                 );",
+            )
+            .unwrap();
+            conn.execute_batch(include_str!("migrations/0001_initial.sql"))
+                .unwrap();
+            conn.execute_batch(include_str!("migrations/0002_learning_sides.sql"))
+                .unwrap();
+            conn.execute("INSERT INTO writ_migrations (version) VALUES (1), (2)", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO learnings (id, title, rule, rationale, source_kind)
+                 VALUES (?1, 'old', 'keep', 'why', 'manual')",
+                [&learning],
+            )
+            .unwrap();
+            let audit = new_id();
+            conn.execute(
+                "INSERT INTO audits (id, repo, diff_range, considered, sent)
+                 VALUES (?1, 'repo', 'HEAD', 3, 1)",
+                [&audit],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO findings (id, audit_id, learning_id, detail)
+                 VALUES (?1, ?2, ?3, 'stale')",
+                [&new_id(), &audit, &learning],
+            )
+            .unwrap();
+        }
+
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(count(&store, "audits"), 0, "the promptless audit is gone");
+        assert_eq!(count(&store, "findings"), 0, "its findings went with it");
+        assert_eq!(count(&store, "learnings"), 1, "the collection is kept");
+
+        // And the rebuilt table records a prompt for every new audit.
+        let fresh = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        assert!(store.audit_prompt(&fresh).unwrap().contains("# writ audit"));
+    }
+
+    fn count(store: &Store, table: &str) -> i64 {
+        store
+            .conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
     }
 
     #[test]
@@ -2566,9 +2653,7 @@ mod tests {
     fn ingesting_writes_a_finding_and_moves_the_counters() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "rule", &["global"]);
-        let audit = store
-            .start_audit("github.com/owner/repo", "HEAD", 1, &[])
-            .unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
         let before = store.get(&id).unwrap();
         assert_eq!(before.times_applied, 0);
         assert_eq!(before.last_applied_at, None);
@@ -2605,7 +2690,7 @@ mod tests {
         learning.blocking = false;
         learning.status = Some(Status::Active);
         let id = store.record(&learning).unwrap().id;
-        let audit = store.start_audit("repo", "HEAD", 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
         let written = store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -2639,9 +2724,7 @@ mod tests {
     fn an_ingested_outcome_is_stored_and_ranks_the_learning_down() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "rule", &["global"]);
-        let audit = store
-            .start_audit("github.com/owner/repo", "HEAD", 1, &[])
-            .unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
         store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -2667,7 +2750,7 @@ mod tests {
     fn ingest_refuses_to_set_rejected() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "rule", &["global"]);
-        let audit = store.start_audit("repo", "HEAD", 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
         let error = store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -2689,7 +2772,7 @@ mod tests {
     fn findings_of_returns_rows_for_a_learning() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "t", &["global"]);
-        let audit = store.start_audit("repo", "HEAD", 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
         store
             .ingest(&FindingsInput {
                 audit_id: audit.clone(),
@@ -2718,7 +2801,7 @@ mod tests {
     fn reject_finding_sets_outcome_rejected() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "t", &["global"]);
-        let audit = store.start_audit("repo", "HEAD", 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
         store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -2754,9 +2837,7 @@ mod tests {
     fn a_rejected_finding_ranks_the_learning_to_the_bottom() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "rule", &["global"]);
-        let audit = store
-            .start_audit("github.com/owner/repo", "HEAD", 1, &[])
-            .unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
         store
             .conn
             .execute(
@@ -2790,9 +2871,7 @@ mod tests {
             .unwrap();
         assert_eq!(selected.len(), 1);
         let chosen = selected[0].learning.id.clone();
-        store
-            .start_audit("github.com/owner/repo", "HEAD", 2, &selected)
-            .unwrap();
+        store.start_audit(&scope_for(DIFF), 2, &selected).unwrap();
 
         let other = if chosen == sent { held } else { sent };
         let stamped = store.get(&chosen).unwrap();

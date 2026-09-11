@@ -230,6 +230,58 @@ pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) 
     out
 }
 
+/// What a gate emits in the host's protocol. Spec section 9.2, **The gate
+/// points, it does not paste**.
+///
+/// The prompt carries the whole diff, and a host renders a Stop hook's
+/// block verbatim into the transcript. On a long-lived branch that is
+/// 100 KB of diff in front of the developer after every turn, for a
+/// document written for the agent. So the gate emits this instead: the
+/// audit id, and the two ways to fetch the document behind it.
+///
+/// Both paths are named for the same reason [`render_prompt`] names both:
+/// writ cannot see whether the host has MCP, and a pointer whose only path
+/// is a tool the host does not serve is a gate that blocks forever.
+///
+/// The count is here and the rules are not. It is the one number that
+/// tells the agent the fetch is worth making, and it is two characters
+/// whether the collection holds fifty learnings or a thousand, so P3 still
+/// holds.
+pub fn render_pointer(audit_id: &str, sent: usize) -> String {
+    let (count, subject, verb) = if sent == 1 {
+        ("1 learning", "it", "applies")
+    } else {
+        // A gate never emits a pointer for nothing: `gates()` is false
+        // when the selection is empty, so this branch is the plural one.
+        ("learnings", "them", "apply")
+    };
+    let count = if sent == 1 {
+        count.to_string()
+    } else {
+        format!("{sent} {count}")
+    };
+    let mut out = String::from("# writ audit\n\n");
+    out.push_str(&format!(
+        "{count} {verb} to this diff. Fetch {subject}, check the diff against \
+         {subject}, and report every violation you find.\n\n"
+    ));
+    out.push_str(&format!("audit-id: {audit_id}\n"));
+    out.push_str("\n## Fetch\n\n");
+    out.push_str(
+        "- Call the `writ_audit` tool with a `fetch` argument set to the \
+         audit-id above, when MCP is available. This is the normal path.\n",
+    );
+    out.push_str(&format!(
+        "- Otherwise run `writ audit --fetch {audit_id}`.\n"
+    ));
+    out.push_str(
+        "\nWhat comes back carries the diff, the learnings, and how to report \
+         the findings. The audit is not finished until those findings reach \
+         writ.\n",
+    );
+    out
+}
+
 /// The outcome a finding carries. Spec section 7.5.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

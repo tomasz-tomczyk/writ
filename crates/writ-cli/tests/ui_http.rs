@@ -361,7 +361,7 @@ fn select_learning(store: &mut Store, learning_id: &str) {
         exemplars,
     }];
     let audit_id = store
-        .start_audit("repo", "HEAD", selected.len(), &selected)
+        .start_audit(&audit_scope(), selected.len(), &selected)
         .unwrap();
     store
         .ingest(&writ_core::FindingsInput {
@@ -600,7 +600,7 @@ fn finding_with_path(
         exemplars,
     }];
     let audit_id = store
-        .start_audit("repo", "HEAD", selected.len(), &selected)
+        .start_audit(&audit_scope(), selected.len(), &selected)
         .unwrap();
     store
         .ingest(&writ_core::FindingsInput {
@@ -1888,4 +1888,14 @@ async fn same_origin_post_succeeds_and_get_cannot_mutate() {
     let store = Store::open(&db).unwrap();
     assert_eq!(store.get(&same_origin_id).unwrap().status, Status::Active);
     assert_eq!(store.get(&get_id).unwrap().status, Status::Proposed);
+}
+
+/// The scope an `audits` row is opened against in these fixtures. The UI
+/// never reads it back, so any well-formed diff does.
+fn audit_scope() -> writ_core::AuditScope {
+    writ_core::AuditScope {
+        identity: writ_core::RepoIdentity::Remote("repo".into()),
+        diff: writ_core::Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n"),
+        diff_range: "HEAD".into(),
+    }
 }
