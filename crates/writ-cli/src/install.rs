@@ -443,6 +443,37 @@ fn gate_command(host: &str, event: GateEvent) -> String {
     }
 }
 
+/// The plugin entry that registers the same two gates this function
+/// writes. Spec section 9.3.
+const PLUGIN_KEY: &str = "writ@writ";
+
+/// True when the Claude Code plugin is enabled in this same document.
+///
+/// The plugin and `writ install` are two delivery paths for one fact,
+/// and exactly one may be live. A test pins their text identical (P8),
+/// which is precisely what makes the duplicate invisible: both surfaces
+/// emit the same command, so a machine carrying both runs two gates per
+/// turn and nothing looks wrong. The pointer lands in the transcript
+/// twice, two `audits` rows open for one moment, and `times_selected`
+/// moves twice for one gate — the section 6 counter conflation, arriving
+/// through configuration rather than through code.
+///
+/// [`is_writ_hook`] already settles this *within* the file. This is the
+/// idempotence *across* the two surfaces, and it costs one key in a
+/// document the command has already parsed.
+///
+/// Codex shares this merge and has no such key, so the check is a no-op
+/// there rather than a reason to thread the host through every merge
+/// signature.
+fn plugin_gates_here(document: &Map<String, Value>) -> bool {
+    document
+        .get("enabledPlugins")
+        .and_then(Value::as_object)
+        .and_then(|plugins| plugins.get(PLUGIN_KEY))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// True when this hook entry already runs writ's audit.
 ///
 /// The test is the command, not an exact match on the whole entry, so a
@@ -459,6 +490,26 @@ fn is_writ_hook(entry: &Value) -> bool {
 fn merge_stop_groups(existing: Option<&str>, force: bool, events: &[GateEvent]) -> Result<Merge> {
     let original = existing.unwrap_or_default().to_string();
     let mut document = document(existing, "the settings file")?;
+
+    // Settled before anything is written: the gates are already live
+    // through the plugin, and writing them here too would fire both.
+    if plugin_gates_here(&document) && !force {
+        return Ok(Merge {
+            changed: false,
+            text: original,
+            note: Some(format!(
+                "the `{PLUGIN_KEY}` plugin is enabled and already registers \
+                 the {} {}. Writing them here too would run the gate twice \
+                 per turn. Left alone. Pass --force to write them anyway",
+                events
+                    .iter()
+                    .map(|event| event.key())
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                if events.len() == 1 { "gate" } else { "gates" },
+            )),
+        });
+    }
 
     let hooks = document
         .entry("hooks".to_string())
