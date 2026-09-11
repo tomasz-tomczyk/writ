@@ -292,6 +292,62 @@ fn ingesting_findings_through_mcp_matches_the_ingest_flag() {
     assert_eq!(through_mcp["unfixed_blocking"], 0);
 }
 
+/// The other half of the gate. Spec section 9.2, **The gate points, it
+/// does not paste**.
+///
+/// A Stop hook emits an audit id and nothing else, so this is the call
+/// that has to hand the agent the diff and the rules. If it did not, the
+/// gate would block a turn and give the agent nothing to act on.
+#[test]
+fn the_audit_tool_fetches_the_prompt_a_gate_recorded() {
+    let home = Sandbox::new();
+    let repo = home.repo();
+    home.record_json(&[
+        "--title",
+        "t",
+        "--rule",
+        "r",
+        "--rationale",
+        "why",
+        "--activate",
+    ]);
+    let report = home.audit_json::<&str>(&repo, &[]);
+    let audit_id = report["audit_id"].as_str().unwrap().to_string();
+
+    let mut server = home.server_at(&repo);
+    let raw = server.call_raw("writ_audit", &json!({ "fetch": audit_id }));
+    server.close();
+
+    assert!(raw.get("isError").is_none(), "{raw}");
+    assert_eq!(raw["structuredContent"]["audit_id"], audit_id.as_str());
+    // The document reaches the model as text, not as a JSON-escaped
+    // string it has to unescape a 100 KB diff out of.
+    let text = raw["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("# writ audit\n"), "{text}");
+    assert!(text.contains("```diff"), "{text}");
+    assert!(text.contains(&format!("audit-id: {audit_id}")), "{text}");
+}
+
+/// P7 through the tool surface: an id that names no audit is a tool
+/// error the agent can read, not an empty document it would audit against.
+#[test]
+fn fetching_an_unknown_audit_is_a_tool_error() {
+    let home = Sandbox::new();
+    let repo = home.repo();
+    let mut server = home.server_at(&repo);
+    let raw = server.call_raw("writ_audit", &json!({ "fetch": "no-such-audit" }));
+    server.close();
+
+    assert_eq!(raw["isError"], true, "{raw}");
+    assert!(
+        raw["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no-such-audit"),
+        "{raw}"
+    );
+}
+
 /// The loop closes. Spec section 7.1 steps 4 and 5.
 ///
 /// This is the test the shipped behaviour did not have. The prompt used to

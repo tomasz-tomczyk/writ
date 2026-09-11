@@ -251,7 +251,7 @@ pub fn ledger_empty(title: &str, body: &str) -> String {
 /// A store or validation error as an HTTP response.
 pub fn error_response(error: Error) -> Response {
     let status = match &error {
-        Error::NotFound { .. } => StatusCode::NOT_FOUND,
+        Error::NotFound { .. } | Error::NoSuchAudit { .. } => StatusCode::NOT_FOUND,
         Error::Validation { .. } => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };

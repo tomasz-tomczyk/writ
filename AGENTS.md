@@ -127,6 +127,36 @@ The diff in a prompt is **not** bounded by `max_rules` or `max_chars`,
 which bound rule text. A long branch renders a large prompt every turn.
 That cost is accepted: a large prompt beats a gate that audits nothing.
 
+## The gate points, it does not paste
+
+What `--hook` emits is a **pointer** — the audit id and the two ways to
+fetch what is behind it — never the prompt. Every host renders a blocked
+turn's message into the transcript verbatim, so pasting a prompt that
+carries the whole diff puts 100 KB of a long branch in front of the
+developer after every turn, for a document written for the agent.
+
+The prompt is recorded on the `audits` row at emit and read back by
+`writ audit --fetch ID`, or by the `writ_audit` tool's `fetch` argument,
+which is the path the pointer names first and the one the transcript
+collapses. Both are named because writ cannot see whether the host
+serves MCP, and a pointer whose only path is a tool the host does not
+serve is a gate that blocks forever.
+
+**A fetch re-reads. It never re-selects.** Re-selecting would open a
+second `audits` row and move `times_selected` again for one gate, which
+is exactly the conflation the two counter pairs exist to prevent.
+
+`audits.prompt` is `NOT NULL`. There is no audit without a prompt, so no
+read path has to decide what a missing one means. Schema 3 rebuilt the
+table and dropped the rows that predate the column rather than
+backfilling them with `''`, which `--fetch` would have handed an agent
+as a document. Their findings cascaded with them.
+
+The cost of recording the prompt is that the diff is now in the database
+as well as in the turn. On a long branch that is real growth, and P4
+means it is never reclaimed by pruning. `render_pointer` and its golden
+file pin the emitted text, beside `render_prompt` and its own.
+
 **Ingest only happens if the prompt asks for it.** The hook process
 exits when it has printed. A reply the agent leaves in the conversation
 reaches nothing, so the prompt has to name a return path — the

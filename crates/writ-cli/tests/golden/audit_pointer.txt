@@ -1,0 +1,12 @@
+# writ audit
+
+1 learning applies to this diff. Fetch it, check the diff against it, and report every violation you find.
+
+audit-id: <AUDIT>
+
+## Fetch
+
+- Call the `writ_audit` tool with a `fetch` argument set to the audit-id above, when MCP is available. This is the normal path.
+- Otherwise run `writ audit --fetch <AUDIT>`.
+
+What comes back carries the diff, the learnings, and how to report the findings. The audit is not finished until those findings reach writ.
