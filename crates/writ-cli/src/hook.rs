@@ -105,6 +105,27 @@ pub fn run(
 ) -> Result<(ExitCode, TelemetryBatch)> {
     let retry = Retry::parse(&read_payload());
 
+    // Before the selection, not after it. The cap is about to let this
+    // turn stop, so selecting first would render the whole prompt, open
+    // an `audits` row, and move `times_selected` for every rule the next
+    // line discards — rules credited with an appearance no reviewer ever
+    // saw, which is exactly the section 6 counter conflation. Nothing
+    // forces the old order: the payload is already read.
+    //
+    // The count of what still applies goes with it. Naming it needed the
+    // selection this return exists to avoid, and it was the less
+    // important half of the sentence.
+    if retry.spent(host, args.loop_limit) {
+        eprintln!(
+            "writ: the retry cap is reached. Letting the turn stop without \
+             auditing it again."
+        );
+        return Ok((
+            ExitCode::SUCCESS,
+            gate_telemetry(host, GateResultMetric::RetryCapped),
+        ));
+    }
+
     let mut run = match audit::select(args, db, config) {
         Ok(run) => run,
         // A turn that touched no code, or a session outside a repository,
@@ -131,18 +152,6 @@ pub fn run(
             .extend(gate_counters(host, GateResultMetric::Pass));
         return Ok((ExitCode::SUCCESS, run.telemetry));
     }
-    if retry.spent(host, args.loop_limit) {
-        eprintln!(
-            "writ: {} learning(s) still apply, and the retry cap is reached. \
-             Letting the turn stop.",
-            run.selected.len()
-        );
-        run.telemetry
-            .counters
-            .extend(gate_counters(host, GateResultMetric::RetryCapped));
-        return Ok((ExitCode::SUCCESS, run.telemetry));
-    }
-
     let code = emit(host, &run);
     run.telemetry
         .counters

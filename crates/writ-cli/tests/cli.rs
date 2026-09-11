@@ -3537,6 +3537,41 @@ fn stop_hook_active_stops_the_second_block() {
     }
 }
 
+/// A capped turn must cost nothing. Spec section 9.2.
+///
+/// The retry check sat *after* `audit::select`, so a turn the cap was
+/// about to let stop still rendered the whole prompt, still opened an
+/// `audits` row, and still moved `times_selected` for every rule it then
+/// threw away — 101 KB built to be discarded, and rules credited with an
+/// appearance no reviewer ever saw. That is the section 6 conflation:
+/// `times_selected` means "put in front of a reviewer", and these never
+/// were. A cap that costs a full selection is a cap in name only.
+#[test]
+fn a_capped_turn_opens_no_audit_row_and_moves_no_counter() {
+    for host in ["claude-code", "codex"] {
+        let sandbox = Sandbox::new();
+        let root = gated_repo(&sandbox, true);
+
+        let output = hook(&sandbox, &root, host, r#"{"stop_hook_active": true}"#);
+        output.assert_code(0);
+
+        let conn = rusqlite::Connection::open(sandbox.db()).unwrap();
+        let audits: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audits", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(audits, 0, "{host} opened an audits row for a capped turn");
+
+        let selected: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(times_selected), 0) FROM learnings",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(selected, 0, "{host} moved times_selected for a capped turn");
+    }
+}
+
 #[test]
 fn cursor_stops_blocking_at_the_loop_limit() {
     let sandbox = Sandbox::new();
