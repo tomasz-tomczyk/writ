@@ -126,9 +126,13 @@ pub enum Edit {
     OpencodeMcp,
     /// Codex's `[mcp_servers.writ]` table in TOML.
     CodexMcp,
-    /// A `Stop` event holding matcher groups, which Claude Code and
-    /// Codex share.
-    StopGroups,
+    /// Stop-shaped events holding matcher groups, which Claude Code and
+    /// Codex share. One variant carries every moment the host gates, so
+    /// both land in one merge and one backup of the one file they share.
+    StopGroups {
+        /// The moments to gate, in the order they are written.
+        events: &'static [GateEvent],
+    },
     /// Cursor's flat `stop` array, plus the `version` the file needs.
     CursorStop,
 }
@@ -188,7 +192,9 @@ pub fn plan(host: Host, project: bool, roots: &Roots) -> Result<Plan> {
             step(
                 root.join(".claude").join("settings.json"),
                 Role::Gate,
-                Edit::StopGroups,
+                Edit::StopGroups {
+                    events: &[GateEvent::Turn, GateEvent::Subagent],
+                },
             ),
         ],
         (Host::ClaudeCode, true) => vec![
@@ -200,7 +206,9 @@ pub fn plan(host: Host, project: bool, roots: &Roots) -> Result<Plan> {
             step(
                 root.join(".claude").join("settings.json"),
                 Role::Gate,
-                Edit::StopGroups,
+                Edit::StopGroups {
+                    events: &[GateEvent::Turn, GateEvent::Subagent],
+                },
             ),
         ],
         // Codex reads config.toml and hooks.json from the same layer.
@@ -215,7 +223,9 @@ pub fn plan(host: Host, project: bool, roots: &Roots) -> Result<Plan> {
             step(
                 root.join(".codex").join("hooks.json"),
                 Role::Gate,
-                Edit::StopGroups,
+                Edit::StopGroups {
+                    events: &[GateEvent::Turn],
+                },
             ),
         ],
         (Host::Cursor, _) => vec![
@@ -302,7 +312,7 @@ impl Edit {
                 json!({ "type": "local", "command": ["writ", "mcp"], "enabled": true }),
             ),
             Self::CodexMcp => merge_codex_toml(existing, force),
-            Self::StopGroups => merge_stop_groups(existing, force),
+            Self::StopGroups { events } => merge_stop_groups(existing, force, events),
             Self::CursorStop => merge_cursor_stop(existing, force),
         }
     }
@@ -376,9 +386,61 @@ fn merge_named(existing: Option<&str>, force: bool, path: &[&str], value: Value)
     })
 }
 
+/// Which moment a gate entry sits at. They audit different ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateEvent {
+    /// The end of a turn. The agent may have committed, so the range
+    /// has to reach back to the branch point.
+    Turn,
+    /// The end of one subagent. Nothing is committed yet, so the
+    /// working tree is exactly that subagent's own work.
+    Subagent,
+}
+
+impl GateEvent {
+    /// The key this event goes under in a matcher-group document.
+    ///
+    /// Cursor is not here: its `stop` is a flat array under a lower-case
+    /// key, and `merge_cursor_stop` owns that shape.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Turn => "Stop",
+            Self::Subagent => "SubagentStop",
+        }
+    }
+}
+
 /// The command a gate hook runs, per host protocol. Section 9.2.
-fn gate_command(host: &str) -> String {
-    format!("writ audit --hook {host}")
+///
+/// The turn's gate resolves a branch point first. Left at writ's own
+/// default the range is the working tree against HEAD, which is empty
+/// for any agent that commits as it goes — and those are the agents
+/// most worth gating. `merge-base` against the remote's default branch
+/// is the closest a hook can get to "what this branch changed" without
+/// writ keeping state it has no way to key.
+///
+/// The subagent's gate keeps the default on purpose. A subagent has not
+/// committed, so the working tree is its own work; the branch point
+/// would hand a read-only subagent every violation its parent had
+/// already committed and ask it to fix them.
+///
+/// Every clause is POSIX `sh`. It degrades to the plain command outside
+/// a repository, and `git` never reads stdin, so the host's payload
+/// still reaches writ.
+fn gate_command(host: &str, event: GateEvent) -> String {
+    let audit = format!("writ audit --hook {host}");
+    match event {
+        GateEvent::Subagent => audit,
+        GateEvent::Turn => format!(
+            "base=\"\"; \
+             for r in \"$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)\" \
+             origin/main origin/master; do \
+             [ -n \"$r\" ] || continue; \
+             base=$(git merge-base HEAD \"$r\" 2>/dev/null) && [ -n \"$base\" ] && break; \
+             done; \
+             if [ -n \"$base\" ]; then {audit} --diff \"$base\"; else {audit}; fi"
+        ),
+    }
 }
 
 /// True when this hook entry already runs writ's audit.
@@ -394,7 +456,7 @@ fn is_writ_hook(entry: &Value) -> bool {
 
 /// Merge a `Stop` matcher group. Claude Code and Codex share this shape:
 /// an event name holds groups, and each group holds handlers.
-fn merge_stop_groups(existing: Option<&str>, force: bool) -> Result<Merge> {
+fn merge_stop_groups(existing: Option<&str>, force: bool, events: &[GateEvent]) -> Result<Merge> {
     let original = existing.unwrap_or_default().to_string();
     let mut document = document(existing, "the settings file")?;
 
@@ -405,51 +467,61 @@ fn merge_stop_groups(existing: Option<&str>, force: bool) -> Result<Merge> {
         .ok_or_else(|| Error::Validation {
             message: "`hooks` is not an object. Refusing to replace it".to_string(),
         })?;
-    let stop = hooks
-        .entry("Stop".to_string())
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .ok_or_else(|| Error::Validation {
-            message: "`hooks.Stop` is not an array. Refusing to replace it".to_string(),
-        })?;
+    // Each event is settled on its own. An install that predates the
+    // subagent gate has a writ entry under `Stop` and none under
+    // `SubagentStop`; refusing the whole file because one of the two is
+    // already there would leave subagents ungated forever.
+    let mut settled = Vec::new();
+    for event in events {
+        let key = event.key();
+        let group = hooks
+            .entry(key.to_string())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| Error::Validation {
+                message: format!("`hooks.{key}` is not an array. Refusing to replace it"),
+            })?;
 
-    let existing_group = stop.iter().position(|group| {
-        group
-            .get("hooks")
-            .and_then(Value::as_array)
-            .is_some_and(|handlers| handlers.iter().any(is_writ_hook))
-    });
+        let present = group.iter().position(|entry| {
+            entry
+                .get("hooks")
+                .and_then(Value::as_array)
+                .is_some_and(|handlers| handlers.iter().any(is_writ_hook))
+        });
 
-    if let Some(index) = existing_group {
-        if !force {
-            return Ok(Merge::unchanged(
-                original,
-                Some(
-                    "a Stop hook already runs `writ audit`. Left alone. Pass --force to replace it"
-                        .to_string(),
-                ),
-            ));
+        if let Some(index) = present {
+            if !force {
+                settled.push(key);
+                continue;
+            }
+            group.remove(index);
         }
-        stop.remove(index);
+
+        // The host is not known to this function, so it writes a
+        // placeholder and the caller substitutes. Keeping one
+        // placeholder is simpler than threading the host through every
+        // merge signature, and the substitution is asserted in a test.
+        group.push(json!({
+            "hooks": [{
+                "type": "command",
+                "command": gate_command(HOST_PLACEHOLDER, *event),
+                "timeout": 60
+            }]
+        }));
     }
 
-    // The host is not known to this function, so it writes a placeholder
-    // and the caller substitutes. Keeping one placeholder is simpler than
-    // threading the host through every merge signature, and the
-    // substitution is asserted in a test.
-    stop.push(json!({
-        "hooks": [{
-            "type": "command",
-            "command": gate_command(HOST_PLACEHOLDER),
-            "timeout": 60
-        }]
-    }));
-
     let text = render(&document)?;
+    let note = (settled.len() == events.len()).then(|| {
+        let which = match settled.as_slice() {
+            [one] => format!("a {one} hook already runs"),
+            many => format!("the {} hooks already run", many.join(" and ")),
+        };
+        format!("{which} `writ audit`. Left alone. Pass --force to replace it")
+    });
     Ok(Merge {
         changed: text != original,
         text,
-        note: None,
+        note,
     })
 }
 
@@ -496,7 +568,7 @@ fn merge_cursor_stop(existing: Option<&str>, force: bool) -> Result<Merge> {
     // `loop_limit` is Cursor's own retry cap and it defaults to 5, which
     // is the number section 9.2 names. Writing it makes the cap visible
     // in the file rather than implied by a default.
-    stop.push(json!({ "command": gate_command("cursor"), "loop_limit": 5 }));
+    stop.push(json!({ "command": gate_command("cursor", GateEvent::Turn), "loop_limit": 5 }));
 
     let text = render(&document)?;
     Ok(Merge {
@@ -607,9 +679,11 @@ const HOST_PLACEHOLDER: &str = "{host}";
 
 /// Put the real host into a merged document.
 fn substitute_host(text: &str, host: Host) -> String {
+    // Scoped to the flag rather than the bare token: `{host}` on its own
+    // could appear in something the reader wrote.
     text.replace(
-        &gate_command(HOST_PLACEHOLDER),
-        &gate_command(host.as_str()),
+        &format!("--hook {HOST_PLACEHOLDER}"),
+        &format!("--hook {}", host.as_str()),
     )
 }
 
@@ -638,7 +712,8 @@ pub struct Report {
     pub outcome: Outcome,
     /// What the reader needs to know.
     pub note: Option<String>,
-    /// The merged file, when `--print` asked to see it.
+    /// The lines `--print` would add, with a little context. Not the
+    /// whole file: see [`excerpt`].
     pub preview: Option<String>,
 }
 
@@ -663,7 +738,7 @@ pub fn execute(plan: &Plan, print: bool, force: bool) -> Result<Vec<Report>> {
             } else {
                 settled
             };
-            (outcome, Some(text))
+            (outcome, Some(excerpt(existing.as_deref(), &text)))
         } else if !changed {
             (settled, None)
         } else {
@@ -684,6 +759,76 @@ pub fn execute(plan: &Plan, print: bool, force: bool) -> Result<Vec<Report>> {
         });
     }
     Ok(reports)
+}
+
+/// Lines of context `excerpt` keeps either side of the change.
+const EXCERPT_CONTEXT: usize = 2;
+
+/// `text` as this module would have written it, for comparison only.
+///
+/// Nothing is written from this, and a file that is not a JSON object —
+/// `config.toml`, or anything malformed — comes back untouched.
+fn normalize(text: &str) -> String {
+    serde_json::from_str::<Map<String, Value>>(text)
+        .ok()
+        .and_then(|document| render(&document).ok())
+        .unwrap_or_else(|| text.to_string())
+}
+
+/// The window of `merged` that differs from `existing`.
+///
+/// `--print` answers "what would you put in my file". The file itself is
+/// not the answer: `~/.claude.json` runs to thousands of lines, and
+/// reprinting it to preview a four-line insertion buries the entry and
+/// spills unrelated content onto the terminal.
+///
+/// Trimming the common prefix and suffix is enough because the documents
+/// are rendered from the same serializer with `preserve_order`, so an
+/// added key moves nothing around it. The comparison runs against the
+/// re-serialized original rather than its bytes, so a file that merely
+/// indents differently still yields a one-entry window instead of the
+/// whole document. A genuine whole-file reshuffle widens the window back
+/// to the whole file, which is the honest answer when it happens.
+///
+/// A new file has no prefix to trim, so it is shown whole. An unchanged
+/// file yields the empty string, and the note says why nothing moved.
+fn excerpt(existing: Option<&str>, merged: &str) -> String {
+    let Some(existing) = existing else {
+        return merged.to_string();
+    };
+    // Both sides, or the unchanged case compares a canonical document
+    // against the raw bytes it came from and calls every line a change.
+    let existing = normalize(existing);
+    let merged = normalize(merged);
+
+    let old: Vec<&str> = existing.lines().collect();
+    let new: Vec<&str> = merged.lines().collect();
+
+    let ceiling = old.len().min(new.len());
+    let head = (0..ceiling).take_while(|&i| old[i] == new[i]).count();
+    let tail = (0..ceiling - head)
+        .take_while(|&i| old[old.len() - 1 - i] == new[new.len() - 1 - i])
+        .count();
+
+    if head == new.len() && tail == 0 && old.len() == new.len() {
+        return String::new();
+    }
+
+    let from = head.saturating_sub(EXCERPT_CONTEXT);
+    let to = (new.len() - tail + EXCERPT_CONTEXT).min(new.len());
+
+    let mut out = String::new();
+    if from > 0 {
+        out.push_str("...\n");
+    }
+    for line in &new[from..to] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    if to < new.len() {
+        out.push_str("...\n");
+    }
+    out
 }
 
 fn read(path: &Path) -> Result<Option<String>> {
@@ -885,6 +1030,11 @@ mod tests {
         assert_eq!(value["mcpServers"]["writ"]["command"], json!("writ"));
     }
 
+    /// Claude Code's gate: the turn and each subagent.
+    const BOTH_MOMENTS: Edit = Edit::StopGroups {
+        events: &[GateEvent::Turn, GateEvent::Subagent],
+    };
+
     #[test]
     fn a_settings_file_keeps_every_other_hook_event() {
         let existing = r#"{
@@ -894,21 +1044,23 @@ mod tests {
             "Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]
           }
         }"#;
-        let value = merged(Edit::StopGroups, Some(existing));
+        let value = merged(BOTH_MOMENTS, Some(existing));
         assert_eq!(value["permissions"]["allow"], json!(["Bash"]));
         assert!(value["hooks"]["PreToolUse"].is_array());
         let stop = value["hooks"]["Stop"].as_array().expect("array");
         assert_eq!(stop.len(), 2);
         assert_eq!(stop[0]["hooks"][0]["command"], json!("say done"));
-        assert_eq!(
-            stop[1]["hooks"][0]["command"],
-            json!("writ audit --hook {host}")
+        assert!(
+            stop[1]["hooks"][0]["command"]
+                .as_str()
+                .expect("command")
+                .contains("writ audit --hook {host}")
         );
     }
 
     #[test]
     fn the_host_name_reaches_the_written_command() {
-        let merge = Edit::StopGroups.apply(None, false).expect("merge");
+        let merge = BOTH_MOMENTS.apply(None, false).expect("merge");
         let text = substitute_host(&merge.text, Host::Codex);
         assert!(text.contains("writ audit --hook codex"), "{text}");
         assert!(!text.contains(HOST_PLACEHOLDER), "{text}");
@@ -916,8 +1068,8 @@ mod tests {
 
     #[test]
     fn a_stop_hook_that_already_runs_writ_is_not_duplicated() {
-        let first = Edit::StopGroups.apply(None, false).expect("first");
-        let second = Edit::StopGroups
+        let first = BOTH_MOMENTS.apply(None, false).expect("first");
+        let second = BOTH_MOMENTS
             .apply(Some(&first.text), false)
             .expect("second");
         assert!(!second.changed);
@@ -931,7 +1083,12 @@ mod tests {
         let stop = value["hooks"]["stop"].as_array().expect("array");
         assert_eq!(stop.len(), 2);
         assert_eq!(stop[0]["command"], json!("./audit.sh"));
-        assert_eq!(stop[1]["command"], json!("writ audit --hook cursor"));
+        assert!(
+            stop[1]["command"]
+                .as_str()
+                .expect("command")
+                .contains("writ audit --hook cursor")
+        );
         assert_eq!(stop[1]["loop_limit"], json!(5));
         assert_eq!(value["version"], json!(1));
     }

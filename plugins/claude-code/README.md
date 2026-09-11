@@ -4,9 +4,16 @@ This plugin gives Claude Code two things: a way to write a learning
 down, and a gate that makes reading them back not optional.
 
 - **`/record`** binds to `writ record --activate`.
-- **A `Stop` hook** runs `writ audit --hook claude-code` on the diff the
-  agent just wrote. Any learning that applies, blocking or advisory,
-  sends the agent back with it before the turn hands over.
+- **A `Stop` hook** audits everything the branch changed, resolving a
+  `merge-base` against the remote's default branch first. Left at writ's
+  default the range is the working tree against HEAD, which is empty for
+  any agent that commits as it goes.
+- **A `SubagentStop` hook** audits the working tree alone. A subagent has
+  not committed, so that is exactly its own work; the branch point would
+  hand a read-only subagent every violation its parent had committed.
+
+Any learning that applies, blocking or advisory, sends the agent back
+with it before the turn hands over.
 
 The binary must be on `PATH`. Install it with
 `cargo install --path crates/writ-cli`, which installs a binary named

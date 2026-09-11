@@ -5,6 +5,17 @@
         "hooks": [
           {
             "type": "command",
+            "command": "base=\"\"; for r in \"$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)\" origin/main origin/master; do [ -n \"$r\" ] || continue; base=$(git merge-base HEAD \"$r\" 2>/dev/null) && [ -n \"$base\" ] && break; done; if [ -n \"$base\" ]; then writ audit --hook claude-code --diff \"$base\"; else writ audit --hook claude-code; fi",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "writ audit --hook claude-code",
             "timeout": 60
           }
