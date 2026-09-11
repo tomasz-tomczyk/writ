@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use writ_cli::install::{Host, Outcome, Roots, execute, plan, render_report};
+use writ_cli::install::{Host, Outcome, Role, Roots, execute, plan, render_report};
 
 /// A home directory and a repository, both temporary.
 struct Sandbox {
@@ -536,4 +536,71 @@ fn the_claude_code_plugin_ships_the_same_gate_the_installer_writes() {
             "the plugin and `writ install` disagree about {event}"
         );
     }
+}
+
+/// The plugin and `writ install` are two delivery paths, and exactly one
+/// may be live. Spec section 9.3.
+///
+/// Pinning their text is what made this invisible. Both surfaces emit the
+/// identical command, so a machine carrying both runs two identical gates
+/// per turn and nothing looks wrong: the pointer lands in the transcript
+/// twice, two `audits` rows open for one moment, and `times_selected`
+/// moves twice for one gate. That is the section 6 counter conflation
+/// arriving through configuration instead of through code.
+///
+/// `is_writ_hook` already settles this *within* the file. What was
+/// missing is idempotence *across* the two surfaces.
+#[test]
+fn the_enabled_plugin_stops_the_installer_writing_a_second_gate() {
+    let sandbox = sandbox();
+    let home = sandbox.roots.home.clone().expect("home");
+    let settings = home.join(".claude").join("settings.json");
+    write(&settings, r#"{"enabledPlugins":{"writ@writ":true}}"#);
+
+    let plan = plan(Host::ClaudeCode, false, &sandbox.roots).expect("plan");
+    let reports = execute(&plan, false, false).expect("execute");
+
+    assert!(
+        gate_commands(&settings, "Stop").is_empty(),
+        "the plugin already registers the turn gate"
+    );
+    assert!(
+        gate_commands(&settings, "SubagentStop").is_empty(),
+        "the plugin already registers the subagent gate"
+    );
+
+    let note = reports
+        .iter()
+        .find(|report| matches!(report.role, Role::Gate))
+        .and_then(|report| report.note.clone())
+        .expect("the gate line carries a note");
+    assert!(note.contains("writ@writ"), "{note}");
+    assert!(note.contains("--force"), "{note}");
+}
+
+/// A reader who disabled the plugin's hooks is not writ's to overrule.
+#[test]
+fn force_writes_the_gate_even_with_the_plugin_enabled() {
+    let sandbox = sandbox();
+    let home = sandbox.roots.home.clone().expect("home");
+    let settings = home.join(".claude").join("settings.json");
+    write(&settings, r#"{"enabledPlugins":{"writ@writ":true}}"#);
+
+    install(&sandbox.roots, Host::ClaudeCode, false, true);
+
+    assert_eq!(gate_commands(&settings, "Stop").len(), 1);
+    assert_eq!(gate_commands(&settings, "SubagentStop").len(), 1);
+}
+
+/// A plugin entry that is present but switched off is not a live gate.
+#[test]
+fn a_disabled_plugin_entry_does_not_stop_the_installer() {
+    let sandbox = sandbox();
+    let home = sandbox.roots.home.clone().expect("home");
+    let settings = home.join(".claude").join("settings.json");
+    write(&settings, r#"{"enabledPlugins":{"writ@writ":false}}"#);
+
+    install(&sandbox.roots, Host::ClaudeCode, false, false);
+
+    assert_eq!(gate_commands(&settings, "Stop").len(), 1);
 }
