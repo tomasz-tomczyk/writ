@@ -82,12 +82,23 @@ happen.
 the same verdict in each host's own gate protocol, so a turn that
 touched code the learnings cover does not hand over unreviewed.
 
-| Host | Gate |
-| --- | --- |
-| Claude Code | `Stop` hook |
-| Codex CLI | `Stop` hook |
-| Cursor | `stop` hook |
-| OpenCode | **none — it cannot enforce one** |
+| Host | Gate | Subagents |
+| --- | --- | --- |
+| Claude Code | `Stop` hook | `SubagentStop` hook |
+| Codex CLI | `Stop` hook | no such event |
+| Cursor | `stop` hook | no such event |
+| OpenCode | **none — it cannot enforce one** | — |
+
+The turn's gate audits everything the branch changed, resolving a
+`merge-base` against the remote's default branch first. Left at the
+`--diff` default — the working tree against HEAD — it would see an
+empty diff and pass for any agent that commits as it goes. The subagent
+gate keeps that default on purpose: a subagent has not committed, so the
+working tree is exactly its own work.
+
+`writ install <host>` writes all of this. It merges rather than
+replaces, backs up first, and `--print` shows the entry it would add
+rather than reprinting your configuration file.
 
 **OpenCode cannot enforce a gate.** Every one of its plugin hooks
 returns `Promise<void>`, so nothing there can block a turn or inject a

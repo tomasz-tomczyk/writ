@@ -98,6 +98,35 @@ It decides whether an unfixed violation stops the work. A Stop hook runs
 nothing for `blocking` to gate on. Gating hook entry on it would select
 advisory learnings, count them, and drop them unread.
 
+## What the gate audits
+
+**`--diff` defaults to the working tree against HEAD, and a gate must
+not take that default.** An agent that commits as it goes leaves a clean
+tree when the hook fires, so the gate sees an empty diff and passes.
+That silently disabled the gate for 34 of the ledger's first 53 audits.
+`considered = 0` on most `audits` rows is the symptom. Spec section 9.2,
+**What the gate audits**.
+
+The range belongs to the moment, not to the binary, so the hook command
+carries it and writ's default is unchanged.
+
+| Hook | Range | Why |
+| --- | --- | --- |
+| `Stop` | `merge-base` against the remote's default branch | The agent may have committed |
+| `SubagentStop` | the default: working tree against HEAD | A subagent has not committed, so the tree is its own work |
+
+Do not give the subagent hook the branch point. It would hand a
+read-only subagent every violation its parent had already committed.
+
+Only Claude Code has `SubagentStop`; Codex and Cursor have no such
+event. Its payload carries `agent_type`, and using it to skip read-only
+agents is tempting and wrong — a hand-maintained list of agent names
+drifts, which is P8.
+
+The diff in a prompt is **not** bounded by `max_rules` or `max_chars`,
+which bound rule text. A long branch renders a large prompt every turn.
+That cost is accepted: a large prompt beats a gate that audits nothing.
+
 **Ingest only happens if the prompt asks for it.** The hook process
 exits when it has printed. A reply the agent leaves in the conversation
 reaches nothing, so the prompt has to name a return path — the
@@ -150,7 +179,9 @@ wt remove                   # remove the worktree; delete the branch if merged
 crates/writ-core/   storage, selection, budget.
                     Knows nothing about a terminal, socket, or HTTP.
 crates/writ-cli/    the `writ` binary. The only crate that does I/O.
-plugins/claude-code/  the /record skill and the Stop hook.
+plugins/claude-code/  the /record skill and the gate hooks. It carries
+                    its own copy of what `writ install` writes, so a
+                    test pins the two together. P8.
 ```
 
 ## Invariants
@@ -177,7 +208,8 @@ These are decisions, not preferences. Breaking one is a spec violation.
    Selection cost is therefore not bounded by the diff alone; it is
    bounded by how many active learnings survive the filter. If you
    improve that, say so. Do not write a test that implies it is already
-   true.
+   true. The **diff** in a prompt is not bounded at all: see *What the
+   gate audits*.
 6. **Fail honestly.** Every error names its real cause and exits with
    its own code. Never hang on stdin. See spec P7.
 7. **Never set `updated_at` by hand in a write.** A database trigger

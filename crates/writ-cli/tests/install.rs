@@ -162,18 +162,29 @@ fn a_settings_file_full_of_other_hooks_keeps_all_of_them() {
     assert_eq!(after["model"], json!("opus"));
     assert_eq!(after["permissions"], original["permissions"]);
     for event in events {
+        // SubagentStop is a gate now, so it is expected to change. Every
+        // other event in the file has to come back byte for byte.
+        if event == "SubagentStop" {
+            continue;
+        }
         assert_eq!(
             after["hooks"][event], original["hooks"][event],
             "{event} was changed"
         );
     }
+    let subagent = after["hooks"]["SubagentStop"]
+        .as_array()
+        .expect("SubagentStop array");
+    assert_eq!(subagent.len(), 2, "the other tool's entry was replaced");
+    assert_eq!(
+        subagent[0]["hooks"][0]["command"],
+        json!("SubagentStop.sh"),
+        "the other tool's entry must come first and survive"
+    );
     let stop = after["hooks"]["Stop"].as_array().expect("Stop array");
     assert_eq!(stop.len(), 2, "the other tool's Stop entry was replaced");
     assert_eq!(stop[0]["hooks"][0]["command"], json!("somebody-else.sh"));
-    assert_eq!(
-        stop[1]["hooks"][0]["command"],
-        json!("writ audit --hook claude-code")
-    );
+    assert_eq!(gate_commands(&settings, "Stop").len(), 1);
 }
 
 #[test]
@@ -196,7 +207,7 @@ fn cursors_existing_stop_entry_from_another_tool_survives() {
     let stop = after["hooks"]["stop"].as_array().expect("stop array");
     assert_eq!(stop.len(), 2);
     assert_eq!(stop[0]["command"], json!("./audit.sh"));
-    assert_eq!(stop[1]["command"], json!("writ audit --hook cursor"));
+    assert_eq!(gate_commands(&hooks, "stop").len(), 1);
 }
 
 #[test]
@@ -205,11 +216,9 @@ fn codex_gets_its_own_protocol_and_not_claude_codes() {
     let home = sandbox.roots.home.clone().expect("home");
     install(&sandbox.roots, Host::Codex, false, false);
 
-    let hooks = read_json(&home.join(".codex").join("hooks.json"));
-    assert_eq!(
-        hooks["hooks"]["Stop"][0]["hooks"][0]["command"],
-        json!("writ audit --hook codex")
-    );
+    let gate = gate_commands(&home.join(".codex").join("hooks.json"), "Stop").remove(0);
+    assert!(gate.contains("writ audit --hook codex"), "{gate}");
+    assert!(!gate.contains("claude-code"), "{gate}");
 
     let text = std::fs::read_to_string(home.join(".codex").join("config.toml")).expect("read");
     let table: toml::Table = toml::from_str(&text).expect("valid TOML");
@@ -339,5 +348,192 @@ fn every_host_names_the_instructions_file_it_reads() {
         let reports = execute(&plan, true, false).expect("print");
         let rendered = render_report(&plan, &reports, true);
         assert!(rendered.contains(file), "{host:?}: {rendered}");
+    }
+}
+
+/// `--print` shows the entry, not the file the entry lands in.
+///
+/// `~/.claude/settings.json` and `~/.claude.json` are live configuration
+/// files, and the second runs to thousands of lines. Reprinting the whole
+/// document to preview a four-line insertion buries the one thing the
+/// reader asked to see, and puts unrelated private content on a terminal
+/// that did not ask for it.
+#[test]
+fn print_shows_the_entry_not_the_whole_file() {
+    let sandbox = sandbox();
+    let home = sandbox.roots.home.clone().expect("home");
+    let settings = home.join(".claude").join("settings.json");
+    let far_away: Vec<String> = (0..200).map(|i| format!("Bash(unrelated-{i}:*)")).collect();
+    write(
+        &settings,
+        &serde_json::to_string(&serde_json::json!({
+            "permissions": { "allow": far_away },
+            "model": "opus",
+        }))
+        .expect("fixture"),
+    );
+
+    let plan = plan(Host::ClaudeCode, false, &sandbox.roots).expect("plan");
+    let reports = execute(&plan, true, false).expect("print");
+    let rendered = render_report(&plan, &reports, true);
+
+    assert!(
+        rendered.contains("writ audit --hook claude-code"),
+        "the entry itself has to be shown: {rendered}"
+    );
+    assert!(
+        !rendered.contains("unrelated-0"),
+        "untouched content must stay out of the preview: {rendered}"
+    );
+    assert!(
+        rendered.contains("..."),
+        "the elision has to be visible, or the preview reads as the whole file: {rendered}"
+    );
+}
+
+/// The writ commands one event of one hooks file runs.
+///
+/// Handles both shapes: matcher groups holding handlers, which Claude
+/// Code and Codex use, and Cursor's flat array of scripts.
+fn gate_commands(settings: &Path, event: &str) -> Vec<String> {
+    let Some(entries) = read_json(settings)["hooks"][event].as_array().cloned() else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .flat_map(|entry| match entry["hooks"].as_array() {
+            Some(handlers) => handlers.clone(),
+            None => vec![entry.clone()],
+        })
+        .filter_map(|hook| hook["command"].as_str().map(str::to_string))
+        .filter(|command| command.contains("writ audit"))
+        .collect()
+}
+
+/// Claude Code gates subagents as well as the turn.
+///
+/// A subagent writes to the same tree the parent will be judged on, so
+/// leaving it ungated only defers the finding to the end of the turn —
+/// by which point the agent that wrote the violation is gone and the
+/// parent, which has less context on it, has to fix it.
+#[test]
+fn claude_code_gates_the_subagent_stop_too() {
+    let sandbox = sandbox();
+    let home = sandbox.roots.home.clone().expect("home");
+    install(&sandbox.roots, Host::ClaudeCode, false, false);
+    let settings = home.join(".claude").join("settings.json");
+
+    assert_eq!(gate_commands(&settings, "Stop").len(), 1);
+    assert_eq!(gate_commands(&settings, "SubagentStop").len(), 1);
+}
+
+/// The two moments audit different ranges, and that is the point.
+///
+/// An agent that commits as it goes leaves a clean tree at `Stop`, so
+/// the turn's gate has to reach back to the branch point or it audits
+/// nothing. A subagent has not committed, so its gate wants the working
+/// tree alone: the branch point would hand a read-only subagent every
+/// violation its parent had already committed.
+#[test]
+fn the_turn_gate_reaches_the_branch_point_and_the_subagent_gate_does_not() {
+    let sandbox = sandbox();
+    let home = sandbox.roots.home.clone().expect("home");
+    install(&sandbox.roots, Host::ClaudeCode, false, false);
+    let settings = home.join(".claude").join("settings.json");
+
+    let turn = gate_commands(&settings, "Stop").remove(0);
+    assert!(turn.contains("merge-base"), "{turn}");
+    assert!(turn.contains("--diff"), "{turn}");
+    assert!(turn.contains("--hook claude-code"), "{turn}");
+
+    let subagent = gate_commands(&settings, "SubagentStop").remove(0);
+    assert_eq!(subagent, "writ audit --hook claude-code");
+}
+
+/// An install that predates the subagent gate gains it without `--force`.
+///
+/// The turn's gate is already there and must be left exactly as it is,
+/// including any edit the reader made to it. Refusing the whole file
+/// because one of the two events is settled would leave subagents
+/// ungated on every machine that installed writ before this.
+#[test]
+fn an_existing_turn_gate_still_gains_the_subagent_gate() {
+    let sandbox = sandbox();
+    let home = sandbox.roots.home.clone().expect("home");
+    let settings = home.join(".claude").join("settings.json");
+    write(
+        &settings,
+        r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"writ audit --hook claude-code --my-own-edit"}]}]}}"#,
+    );
+
+    install(&sandbox.roots, Host::ClaudeCode, false, false);
+
+    assert_eq!(
+        gate_commands(&settings, "Stop"),
+        vec!["writ audit --hook claude-code --my-own-edit".to_string()],
+        "the reader's own gate must survive untouched"
+    );
+    assert_eq!(gate_commands(&settings, "SubagentStop").len(), 1);
+}
+
+/// Only Claude Code has a subagent-stop event. Section 9.2.
+#[test]
+fn codex_gets_the_turn_gate_and_no_subagent_gate() {
+    let sandbox = sandbox();
+    let home = sandbox.roots.home.clone().expect("home");
+    install(&sandbox.roots, Host::Codex, false, false);
+    let hooks = home.join(".codex").join("hooks.json");
+
+    assert_eq!(gate_commands(&hooks, "Stop").len(), 1);
+    assert!(gate_commands(&hooks, "SubagentStop").is_empty());
+}
+
+/// Every host's turn gate has the same empty-diff problem. Cursor and
+/// Codex agents commit as they go too.
+#[test]
+fn every_host_turn_gate_reaches_the_branch_point() {
+    for (host, file, event) in [
+        (Host::ClaudeCode, vec![".claude", "settings.json"], "Stop"),
+        (Host::Codex, vec![".codex", "hooks.json"], "Stop"),
+        (Host::Cursor, vec![".cursor", "hooks.json"], "stop"),
+    ] {
+        let sandbox = sandbox();
+        let home = sandbox.roots.home.clone().expect("home");
+        install(&sandbox.roots, host, false, false);
+        let path = file.iter().fold(home, |acc, part| acc.join(part));
+
+        let command = gate_commands(&path, event).remove(0);
+        assert!(command.contains("merge-base"), "{host:?}: {command}");
+        assert!(
+            command.contains(&format!("--hook {}", host.as_str())),
+            "{host:?}: {command}"
+        );
+    }
+}
+
+/// The shipped plugin gates exactly what `writ install` gates.
+///
+/// P8. The plugin carries its own copy of the hook configuration, so a
+/// reader who installs through `/plugin install` and a reader who runs
+/// `writ install` must end up with the same gate. Nothing but a test
+/// keeps those two files in step.
+#[test]
+fn the_claude_code_plugin_ships_the_same_gate_the_installer_writes() {
+    let plugin = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugins/claude-code/hooks/hooks.json")
+        .canonicalize()
+        .expect("the plugin hooks file");
+
+    let sandbox = sandbox();
+    let home = sandbox.roots.home.clone().expect("home");
+    install(&sandbox.roots, Host::ClaudeCode, false, false);
+    let settings = home.join(".claude").join("settings.json");
+
+    for event in ["Stop", "SubagentStop"] {
+        assert_eq!(
+            gate_commands(&plugin, event),
+            gate_commands(&settings, event),
+            "the plugin and `writ install` disagree about {event}"
+        );
     }
 }
