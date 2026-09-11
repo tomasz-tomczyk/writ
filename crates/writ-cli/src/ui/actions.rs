@@ -260,8 +260,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use writ_core::{
-        Config, FindingsInput, IncomingFinding, NewLearning, Outcome, Selected, Store,
-        TelemetryStore,
+        AuditScope, Config, Diff, FindingsInput, IncomingFinding, NewLearning, Outcome,
+        RepoIdentity, Selected, Store, TelemetryStore,
     };
 
     use super::*;
@@ -345,8 +345,11 @@ mod tests {
             let learning = store.get(&learning_id).unwrap();
             let audit_id = store
                 .start_audit(
-                    "private repository",
-                    "private branch",
+                    &AuditScope {
+                        identity: RepoIdentity::Remote("private repository".into()),
+                        diff: Diff::parse("--- a/private.rs\n+++ b/private.rs\n+private line\n"),
+                        diff_range: "private branch".into(),
+                    },
                     1,
                     &[Selected {
                         learning,

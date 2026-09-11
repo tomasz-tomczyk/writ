@@ -60,10 +60,29 @@ when the findings come back, not whether the agent reviews at all.
 
 | Host | Gate | What `writ audit --hook` emits |
 | --- | --- | --- |
-| Claude Code | `Stop` hook | exit 2, the findings on stderr |
+| Claude Code | `Stop` hook | exit 2, the pointer on stderr |
 | Codex CLI | `Stop` hook | `{"decision":"block","reason":...}`, exit 0 |
 | Cursor | `stop` hook | `{"followup_message":...}`, exit 0 |
 | OpenCode | **none** | — |
+
+## The gate points, it does not paste
+
+What each protocol carries is a **pointer**: the audit id, and the two
+ways to fetch the document behind it. Not the document. Claude Code
+renders a blocked `Stop` hook's stderr into the transcript verbatim, and
+an audit prompt carries the whole diff, so pasting it puts the branch's
+full diff in front of you after every turn — for a document written for
+the agent.
+
+The agent fetches it by calling `writ_audit` with a `fetch` argument set
+to that audit id, which returns the diff, the learnings and the
+report-back instructions as a tool result the transcript collapses.
+`writ audit --fetch AUDIT_ID` prints the same document, and the pointer
+names it too, because writ cannot see whether the host serves MCP.
+
+A fetch is a read. It opens no `audits` row and moves no
+`times_selected`, because emitting the pointer already did both, and
+fetching twice must not make one gate look like two.
 
 **OpenCode cannot enforce a gate.** Every one of its plugin hooks
 returns `Promise<void>`, and `session.idle` reaches only the

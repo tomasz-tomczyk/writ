@@ -170,27 +170,34 @@ fn gate_telemetry(host: Host, result: GateResultMetric) -> TelemetryBatch {
 }
 
 /// Write the block in the host's protocol and return its exit code.
+///
+/// What it writes is the **pointer**, not the prompt. Spec section 9.2,
+/// **The gate points, it does not paste**. Every host renders its block
+/// message into the transcript verbatim, so pasting a prompt that carries
+/// the whole diff puts 100 KB of a long branch in front of the developer
+/// after every turn. The pointer is three lines; the document behind it
+/// reaches the agent through `writ_audit`, which the host collapses.
 fn emit(host: Host, run: &Selection) -> ExitCode {
-    let prompt = run.prompt();
+    let pointer = run.pointer();
     match host {
         // Claude Code feeds a Stop hook's stderr back to the model when
         // the hook exits 2. stdout stays empty, because on exit 2 it is
         // not read at all.
         Host::ClaudeCode => {
-            eprint!("{prompt}");
+            eprint!("{pointer}");
             ExitCode::from(2)
         }
         Host::Codex => {
             write_json(&serde_json::json!({
                 "decision": "block",
-                "reason": prompt,
+                "reason": pointer,
             }));
             ExitCode::SUCCESS
         }
         // Cursor differs in kind, not only in shape: it does not stop the
         // stop, it submits a follow-up user turn.
         Host::Cursor => {
-            write_json(&serde_json::json!({ "followup_message": prompt }));
+            write_json(&serde_json::json!({ "followup_message": pointer }));
             ExitCode::SUCCESS
         }
     }

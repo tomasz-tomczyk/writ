@@ -46,6 +46,7 @@ cargo install --path crates/writ-cli
 ```
 writ record --title T --rule R --rationale WHY --scope language:rust --activate
 writ audit
+writ audit --fetch AUDIT_ID
 writ list --never-applied
 writ edit ID --matcher PATTERN --matcher-kind ast_grep
 writ edit ID --sides added
@@ -58,6 +59,8 @@ writ ui
    `proposed`, so a forgotten flag fails safe.
 2. **`writ audit`** reads the diff you have not committed, selects the
    learnings that apply to it, and prints them for a reviewing agent.
+   `--fetch` prints what an earlier audit sent, by its id, which is how
+   an agent picks up what a gate pointed at.
 3. **`writ list`** reads the collection back. `--unused-days` and
    `--never-applied` find the rules that are not earning their place.
 4. **`writ edit ID`** mutates an existing learning. Omitted fields stay
@@ -81,6 +84,22 @@ happen.
 `writ audit --hook HOST` is what makes the review not optional. It emits
 the same verdict in each host's own gate protocol, so a turn that
 touched code the learnings cover does not hand over unreviewed.
+
+**The gate points, it does not paste.** Every host renders a blocked
+turn's message into the transcript verbatim, and an audit prompt carries
+the whole diff — 100 KB of it on a long-lived branch, in front of you
+after every turn, for a document written for the agent. So the gate
+emits the audit id and how to fetch what is behind it:
+
+```
+writ audit --fetch AUDIT_ID
+```
+
+The agent normally takes the other path and calls `writ_audit` with a
+`fetch` argument, which returns the same document as a tool result the
+host collapses. Both are named, because writ cannot see whether the host
+serves MCP. A fetch is a read: it opens no audit row and moves no
+counter, because emitting the pointer already did both.
 
 | Host | Gate | Subagents |
 | --- | --- | --- |

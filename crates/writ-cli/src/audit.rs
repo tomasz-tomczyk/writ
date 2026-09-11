@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use writ_core::{
     AuditScope, BucketMetric, Budget, Config, CounterMetric, Diff, Error, FindingOutcomeMetric,
     GateResultMetric, Ingested, LanguageMetric, MatcherResultMetric, Outcome, Result, Selected,
-    Store, TelemetryBatch, parse_findings, rank, render_prompt,
+    Store, TelemetryBatch, parse_findings, rank, render_pointer, render_prompt,
 };
 
 use crate::git;
@@ -42,6 +42,19 @@ pub struct Args {
     /// Read findings JSON on stdin, write rows, update counters
     #[arg(long)]
     pub ingest: bool,
+
+    /// Print the prompt an earlier audit sent, by its audit id
+    ///
+    /// This is the other half of the gate: `--hook` emits a pointer, and
+    /// the agent fetches the document with this. It is a read. No audit
+    /// row is opened and no counter moves, because emit already did both.
+    /// Spec section 9.2.
+    #[arg(
+        long,
+        value_name = "AUDIT_ID",
+        conflicts_with_all = ["ingest", "hook", "diff", "dry_run", "max_rules", "max_chars"],
+    )]
+    pub fetch: Option<String>,
 
     /// The most learnings one prompt may carry
     #[arg(long = "max-rules", value_name = "N", conflicts_with = "ingest")]
@@ -115,6 +128,12 @@ impl Selection {
     pub fn prompt(&self) -> String {
         render_prompt(&self.audit_id, &self.scope, &self.selected)
     }
+
+    /// The short document a gate emits in the host's protocol, naming the
+    /// audit and the two ways to fetch [`Selection::prompt`].
+    pub fn pointer(&self) -> String {
+        render_pointer(&self.audit_id, self.selected.len())
+    }
 }
 
 /// Run the command and return the process exit code.
@@ -122,10 +141,29 @@ pub fn run(args: &Args, db: &Path, config: &Config) -> Result<(ExitCode, Telemet
     if args.ingest {
         return ingest(args, db);
     }
+    if let Some(id) = &args.fetch {
+        return fetch(id, db);
+    }
     if let Some(host) = args.hook {
         return hook::run(host, args, db, config);
     }
     emit(args, db, config)
+}
+
+/// Print the prompt an audit already sent. Spec section 9.2.
+///
+/// It re-reads rather than re-renders. Re-selecting would open a second
+/// `audits` row and move `times_selected` again for one gate, which would
+/// make a rule that reached one reviewer look as though it reached two —
+/// and the ratio between the two counter pairs is the whole signal.
+///
+/// It needs no diff and no repository, so an agent can fetch from
+/// wherever the gate left it.
+pub fn fetch(id: &str, db: &Path) -> Result<(ExitCode, TelemetryBatch)> {
+    let prompt = Store::open(db)?.audit_prompt(id)?;
+    let stdout = std::io::stdout();
+    let _ = write!(stdout.lock(), "{prompt}");
+    Ok((ExitCode::SUCCESS, TelemetryBatch::default()))
 }
 
 /// Steps 1 to 4: scope, select, budget, emit.
@@ -283,12 +321,7 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     let audit_id = if args.dry_run {
         DRY_RUN_ID.to_string()
     } else {
-        store.start_audit(
-            scope.identity.value(),
-            &scope.diff_range,
-            considered,
-            &selected,
-        )?
+        store.start_audit(&scope, considered, &selected)?
     };
 
     if scope.identity.is_fallback() {

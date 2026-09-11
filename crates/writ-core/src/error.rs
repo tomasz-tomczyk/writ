@@ -70,6 +70,15 @@ pub enum Error {
         id: String,
     },
 
+    /// No `audits` row carries this id. P7 keeps it apart from
+    /// [`Error::NotFound`]: a caller who fetched a dry run must not be
+    /// told a learning is missing.
+    #[error("no audit has id {id}")]
+    NoSuchAudit {
+        /// The id the caller asked for.
+        id: String,
+    },
+
     /// `writ audit` ran somewhere git does not manage.
     ///
     /// It has its own code because P7 forbids reporting a wrong working

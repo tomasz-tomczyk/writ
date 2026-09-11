@@ -251,7 +251,7 @@ pub fn fail(error: &Error, db: Option<&Path>) -> ExitCode {
 pub fn exit_code(error: &Error) -> u8 {
     match error {
         Error::BadJson { .. } => 4,
-        Error::NotFound { .. } => 5,
+        Error::NotFound { .. } | Error::NoSuchAudit { .. } => 5,
         Error::NotAGitRepository { .. } => 6,
         Error::EmptyDiff { .. } => 7,
         Error::Sqlite(_) | Error::CreateDirectory { .. } | Error::Storage { .. } => 8,
