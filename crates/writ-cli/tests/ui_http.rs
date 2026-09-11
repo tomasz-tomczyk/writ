@@ -1897,5 +1897,6 @@ fn audit_scope() -> writ_core::AuditScope {
         identity: writ_core::RepoIdentity::Remote("repo".into()),
         diff: writ_core::Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n"),
         diff_range: "HEAD".into(),
+        diff_digest: "test digest".into(),
     }
 }
