@@ -170,6 +170,58 @@ pub async fn unreject_finding(
     }
 }
 
+/// Settle an open finding as fixed. The developer's half of
+/// `writ audit --resolve`.
+pub async fn settle_fixed(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    settle(id, Outcome::Fixed, state, headers).await
+}
+
+/// Settle a finding as ignored: the violation stands and is being left.
+pub async fn settle_ignored(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    settle(id, Outcome::Ignored, state, headers).await
+}
+
+async fn settle(id: String, outcome: Outcome, state: AppState, headers: HeaderMap) -> Response {
+    let result = with_store(&state, |store| {
+        let finding = store.finding(&id)?;
+        let learning_id = finding.learning_id;
+        let changed = finding.outcome != outcome;
+        if changed {
+            store.resolve_finding(&id, outcome)?;
+        }
+        Ok((learning_id, changed))
+    });
+    match result {
+        Ok((learning_id, changed)) => {
+            let message = if changed {
+                observe_ui(
+                    &state,
+                    CounterMetric::FindingOutcome(match outcome {
+                        Outcome::Fixed => FindingOutcomeMetric::Fixed,
+                        _ => FindingOutcomeMetric::Ignored,
+                    }),
+                );
+                match outcome {
+                    Outcome::Fixed => "Marked fixed.",
+                    _ => "Marked ignored.",
+                }
+            } else {
+                "Already settled that way."
+            };
+            finding_reply(&state, &headers, &id, &learning_id, message)
+        }
+        Err(error) => error_response(error),
+    }
+}
+
 pub async fn health_archive(
     Path(id): Path<String>,
     State(state): State<AppState>,

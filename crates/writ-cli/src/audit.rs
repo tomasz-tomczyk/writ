@@ -18,7 +18,7 @@ use writ_core::{
 use crate::git;
 use crate::hook::{self, Host};
 use crate::matcher::{Verdict, evaluate};
-use crate::output::AuditFormat;
+use crate::output::{AuditFormat, ResolveOutcome};
 
 /// What a dry run prints where an audit id would be.
 ///
@@ -63,6 +63,26 @@ pub struct Args {
         conflicts_with_all = ["ingest", "hook", "diff", "dry_run", "max_rules", "max_chars"],
     )]
     pub fetch: Option<String>,
+
+    /// Settle a finding an earlier audit left open, by its finding id
+    ///
+    /// Ingest writes an outcome once. A finding reported `open` — the
+    /// agent could not settle it without the developer — had no way to
+    /// become `fixed` once they had, and a blocking learning refuses the
+    /// handoff on `open`, so the question stayed unanswered. This answers
+    /// it. It is a write of one column: the application was already
+    /// counted at ingest.
+    #[arg(
+        long,
+        value_name = "FINDING_ID",
+        requires = "outcome",
+        conflicts_with_all = ["ingest", "hook", "fetch", "diff", "dry_run", "max_rules", "max_chars"],
+    )]
+    pub resolve: Option<String>,
+
+    /// What `--resolve` settles the finding to: fixed or ignored
+    #[arg(long, value_name = "OUTCOME", requires = "resolve")]
+    pub outcome: Option<ResolveOutcome>,
 
     /// The most learnings one prompt may carry
     #[arg(long = "max-rules", value_name = "N", conflicts_with = "ingest")]
@@ -152,10 +172,38 @@ pub fn run(args: &Args, db: &Path, config: &Config) -> Result<(ExitCode, Telemet
     if let Some(id) = &args.fetch {
         return fetch(id, db);
     }
+    if let Some(id) = &args.resolve {
+        // `requires` in the arg definition makes the None unreachable,
+        // but P7 says name the cause rather than unwrap into a panic.
+        let Some(outcome) = args.outcome else {
+            return Err(Error::Validation {
+                message: "--resolve needs --outcome fixed or --outcome ignored".to_string(),
+            });
+        };
+        return resolve(id, outcome, db);
+    }
     if let Some(host) = args.hook {
         return hook::run(host, args, db, config);
     }
     emit(args, db, config)
+}
+
+/// Settle a finding a later conversation resolved.
+///
+/// It prints the finding id and where it landed, so a caller piping this
+/// can see the write happened without opening the UI.
+pub fn resolve(id: &str, outcome: ResolveOutcome, db: &Path) -> Result<(ExitCode, TelemetryBatch)> {
+    Store::open(db)?.resolve_finding(id, outcome.outcome())?;
+    let stdout = std::io::stdout();
+    let _ = writeln!(stdout.lock(), "writ: finding {id} is now {outcome}");
+    let mut telemetry = TelemetryBatch::default();
+    telemetry
+        .counters
+        .push(CounterMetric::FindingOutcome(match outcome {
+            ResolveOutcome::Fixed => FindingOutcomeMetric::Fixed,
+            ResolveOutcome::Ignored => FindingOutcomeMetric::Ignored,
+        }));
+    Ok((ExitCode::SUCCESS, telemetry))
 }
 
 /// Print the prompt an audit already sent. Spec section 9.2.

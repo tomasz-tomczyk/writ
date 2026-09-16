@@ -47,6 +47,7 @@ cargo install --path crates/writ-cli
 writ record --title T --rule R --rationale WHY --scope language:rust --activate
 writ audit
 writ audit --fetch AUDIT_ID
+writ audit --resolve FINDING_ID --outcome fixed
 writ list --never-applied
 writ edit ID --matcher PATTERN --matcher-kind ast_grep
 writ edit ID --sides added
@@ -60,7 +61,13 @@ writ ui
 2. **`writ audit`** reads the diff you have not committed, selects the
    learnings that apply to it, and prints them for a reviewing agent.
    `--fetch` prints what an earlier audit sent, by its id, which is how
-   an agent picks up what a gate pointed at.
+   an agent picks up what a gate pointed at. `--resolve FINDING_ID
+   --outcome fixed` settles a finding afterwards: an audit writes each
+   outcome once, so a finding reported `open` — the agent could not
+   decide without you — needs this to become `fixed` once you have
+   decided together. Until it does, a blocking learning keeps refusing
+   the handoff. `rejected` is not accepted here; that is yours to set,
+   in the UI.
 3. **`writ list`** reads the collection back. `--unused-days` and
    `--never-applied` find the rules that are not earning their place.
 4. **`writ edit ID`** mutates an existing learning. Omitted fields stay

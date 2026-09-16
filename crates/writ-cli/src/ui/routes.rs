@@ -29,6 +29,8 @@ pub fn router(state: AppState) -> Router {
         .route("/learnings/{id}/archive", post(detail::archive))
         .route("/findings/{id}/reject", post(actions::reject_finding))
         .route("/findings/{id}/unreject", post(actions::unreject_finding))
+        .route("/findings/{id}/fixed", post(actions::settle_fixed))
+        .route("/findings/{id}/ignored", post(actions::settle_ignored))
         .route("/findings/{id}/open", post(actions::open_editor))
         .route("/assets/{*path}", get(assets))
         .layer(middleware::from_fn(require_same_origin))

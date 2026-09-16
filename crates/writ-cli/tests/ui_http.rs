@@ -583,6 +583,52 @@ async fn main_htmx_detail_collection_contracts_are_preserved() {
         undone.body
     );
 
+    // An open finding can be settled later, which is the answer to a
+    // finding the agent reported `open` because it needed the developer.
+    let settled = htmx(
+        &app,
+        Method::POST,
+        &format!("/findings/{finding_id}/fixed"),
+        None,
+    )
+    .await;
+    assert_eq!(settled.status, 200);
+    assert!(settled.body.contains("Marked fixed"), "{}", settled.body);
+    assert!(
+        settled
+            .body
+            .contains(r#"<span class="tally" data-filter="fixed" data-count="1""#),
+        "{}",
+        settled.body
+    );
+    // A finding never offers the state it already holds.
+    assert!(
+        !settled
+            .body
+            .contains(&format!("/findings/{finding_id}/fixed\"")),
+        "{}",
+        settled.body
+    );
+    assert!(
+        settled
+            .body
+            .contains(&format!("/findings/{finding_id}/ignored")),
+        "{}",
+        settled.body
+    );
+
+    // Back to open is not a settle action; it is the undo, and that only
+    // exists on a rejection. So re-settle to ignored and check the tally.
+    let ignored = htmx(
+        &app,
+        Method::POST,
+        &format!("/findings/{finding_id}/ignored"),
+        None,
+    )
+    .await;
+    assert_eq!(ignored.status, 200);
+    assert!(ignored.body.contains("Marked ignored"), "{}", ignored.body);
+
     // Undoing again is harmless and says so rather than failing.
     let again = htmx(
         &app,

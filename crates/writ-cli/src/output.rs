@@ -48,6 +48,53 @@ pub enum AuditFormat {
     Text,
 }
 
+/// What `--resolve` may settle a finding to.
+///
+/// `rejected` is absent on purpose: section 7.5 gives it to the developer
+/// alone, and the UI is their path. `open` is absent because settling is
+/// what this does — a finding that stays open needs no command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveOutcome {
+    /// The finding was corrected.
+    Fixed,
+    /// The finding was left as it stands.
+    Ignored,
+}
+
+impl ResolveOutcome {
+    /// The core value this settles to.
+    pub fn outcome(self) -> writ_core::Outcome {
+        match self {
+            Self::Fixed => writ_core::Outcome::Fixed,
+            Self::Ignored => writ_core::Outcome::Ignored,
+        }
+    }
+}
+
+impl FromStr for ResolveOutcome {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        match text {
+            "fixed" => Ok(Self::Fixed),
+            "ignored" => Ok(Self::Ignored),
+            "rejected" => {
+                Err("only a developer rejects a finding. Use the collection UI".to_string())
+            }
+            other => Err(format!("unknown outcome {other}. Use fixed or ignored")),
+        }
+    }
+}
+
+impl fmt::Display for ResolveOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Fixed => "fixed",
+            Self::Ignored => "ignored",
+        })
+    }
+}
+
 impl FromStr for AuditFormat {
     type Err = String;
 

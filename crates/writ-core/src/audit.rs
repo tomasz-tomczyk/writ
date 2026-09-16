@@ -182,13 +182,10 @@ pub fn rule_block(position: usize, selected: &Selected) -> String {
 /// It carries the diff, then the selected rules, then what to do about
 /// each one and how to send that decision back.
 ///
-/// **It asks the agent to act.** It used to open with "Do not rewrite the
-/// tree", on the reasoning that writ reports and the developer decides.
-/// That reasoning was wrong for the gate: a learning exists to change what
-/// the agent writes, so a prompt forbidding the change asks the agent to
-/// read a rule and then ignore it. The instruction that survives is the
-/// ordering, not a prohibition — report the decision first, because the
-/// hook exits when it has printed, then carry it out.
+/// **It asks the agent to act.** A learning exists to change what the
+/// agent writes, so the prompt asks for the change and fixes only the
+/// order: report the decision first, because the hook process exits when
+/// it has printed, then carry it out.
 ///
 /// **It names a return path, not only a JSON shape.** An earlier version
 /// ended with "reply with this JSON", and a reply in the conversation
@@ -239,12 +236,10 @@ pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) 
     out.push_str("\n## Report back\n\n");
     // The agent is asked for a decision, not an observation. It reports
     // before it acts, so `fixed` is a commitment to correct the finding in
-    // this turn and never a claim that the tree is already clean. The old
-    // wording named the three values without saying when each applied, and
-    // the example carried `open`, so an agent copying the template produced
-    // `open` every time: the ledger's first 20 findings are 18 `open` and 2
-    // `ignored`, with no `fixed` at all. That left `acceptance` with nothing
-    // to read, because `open` weighs nothing in it.
+    // this turn and never a claim that the tree is already clean. Each
+    // value has to say when it applies: naming the three without that, and
+    // showing `open` in the example, yields `open` on every finding, and
+    // `open` weighs nothing in `Outcomes::acceptance`.
     out.push_str(
         "Decide what you will do about each learning the diff breaks, then \
          send that decision to writ before you act on it. A reply left in \
@@ -469,13 +464,9 @@ mod tests {
     }
 
     /// The prompt has to say *when* each outcome applies, not merely name
-    /// the three values.
-    ///
-    /// The first wording named them and carried `"outcome":"open"` in the
-    /// example, so an agent copying the template reported `open` every
-    /// time. The ledger's first twenty findings came back 18 `open` and 2
-    /// `ignored` with no `fixed` at all, which left `Outcomes::acceptance`
-    /// nothing to read: `open` weighs nothing in it.
+    /// the three values, and the example must carry a decision rather than
+    /// a default. An agent copies the template it is shown, and `open`
+    /// weighs nothing in `Outcomes::acceptance`.
     #[test]
     fn the_prompt_asks_for_a_decision_on_every_finding() {
         let scope = AuditScope {
