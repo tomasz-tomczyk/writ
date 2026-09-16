@@ -262,6 +262,31 @@ fn render_findings(findings: &[Finding]) -> String {
     html
 }
 
+/// Which settle buttons a finding offers, given where it already is.
+///
+/// A finding never offers the state it is in: "Mark fixed" on something
+/// already `fixed` is a control that does nothing, which is the silent
+/// no-op P7 forbids.
+fn settle_actions(outcome: Outcome) -> Vec<(&'static str, &'static str, &'static str)> {
+    let fixed = (
+        "fixed",
+        "Mark fixed",
+        "The violation was corrected. This is the answer to a finding left open.",
+    );
+    let ignored = (
+        "ignored",
+        "Mark ignored",
+        "The violation stands and you are leaving it. A blocking learning still refuses the handoff.",
+    );
+    match outcome {
+        Outcome::Open => vec![fixed, ignored],
+        Outcome::Fixed => vec![ignored],
+        Outcome::Ignored => vec![fixed],
+        // Rejected never reaches here: it offers the undo instead.
+        Outcome::Rejected => Vec::new(),
+    }
+}
+
 fn render_finding_row(finding: &Finding) -> String {
     let id = escape(&finding.id);
     let outcome = finding.outcome;
@@ -324,6 +349,15 @@ fn render_finding_row(finding: &Finding) -> String {
             r##"<form method="post" action="{unreject}" hx-post="{unreject}" hx-target="#findings" hx-swap="outerHTML"><button class="f-act f-act-undo" type="submit" title="Undo the rejection. The finding returns to open, not to what it carried before.">Undo rejection</button></form>"##
         ));
     } else {
+        // An open finding is a question the agent could not settle alone.
+        // These are the answer, and they are the developer's half of the
+        // same thing `writ audit --resolve` gives the agent.
+        for (to, label, hint) in settle_actions(outcome) {
+            let settle = format!("/findings/{id}/{to}");
+            html.push_str(&format!(
+                r##"<form method="post" action="{settle}" hx-post="{settle}" hx-target="#findings" hx-swap="outerHTML"><button class="f-act f-act-settle" type="submit" title="{hint}">{label}</button></form>"##
+            ));
+        }
         let reject = format!("/findings/{id}/reject");
         html.push_str(&format!(
             r##"<form method="post" action="{reject}" hx-post="{reject}" hx-target="#findings" hx-swap="outerHTML"><button class="f-act f-act-reject" type="submit" data-confirm="Confirm reject" title="This finding was wrong. Rejecting it demotes this rule in every future selection.">Reject</button></form>"##

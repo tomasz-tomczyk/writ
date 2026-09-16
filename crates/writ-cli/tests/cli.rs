@@ -3355,6 +3355,83 @@ fn fetch_returns_the_prompt_the_gate_recorded() {
     );
 }
 
+/// A finding the agent could not settle alone can be settled later.
+///
+/// Ingest writes an outcome once, so without this an `open` finding stays
+/// open, and a blocking learning refuses the handoff on `open` forever.
+#[test]
+fn resolve_settles_a_finding_left_open() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    let learning_id = sandbox.record(&["--activate"]);
+    std::fs::write(root.join("a.rs"), "let x = 1;\n").unwrap();
+
+    let audit = sandbox.run_at(&root, &["audit", "--format", "json"]);
+    audit.assert_code(0);
+    let audit_id = serde_json::from_str::<serde_json::Value>(&audit.stdout).unwrap()["audit_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let findings = serde_json::json!({
+        "audit_id": audit_id,
+        "findings": [{
+            "learning_id": learning_id,
+            "detail": "needs the developer",
+            "outcome": "open",
+        }],
+    });
+    // Exit 1: the learning is blocking and the finding is `open`, so ingest
+    // refuses the handoff. This is the state `--resolve` exists to leave.
+    sandbox
+        .pipe(&["audit", "--ingest"], &findings.to_string())
+        .assert_code(1);
+    let finding_id = writ_core::Store::open(&sandbox.db())
+        .unwrap()
+        .findings_of(&learning_id)
+        .unwrap()[0]
+        .id
+        .clone();
+
+    let resolved = sandbox.run(&["audit", "--resolve", &finding_id, "--outcome", "fixed"]);
+
+    resolved.assert_code(0);
+    assert!(
+        resolved.stdout.contains("is now fixed"),
+        "{}",
+        resolved.stdout
+    );
+    assert_eq!(
+        writ_core::Store::open(&sandbox.db())
+            .unwrap()
+            .findings_of(&learning_id)
+            .unwrap()[0]
+            .outcome,
+        writ_core::Outcome::Fixed
+    );
+}
+
+/// `rejected` is the developer's word. The CLI will not write it.
+#[test]
+fn resolve_refuses_rejected() {
+    let sandbox = Sandbox::new();
+    let failed = sandbox.run(&["audit", "--resolve", "any-id", "--outcome", "rejected"]);
+    assert_ne!(failed.code, 0, "{}", failed.stderr);
+    assert!(
+        failed.stderr.contains("only a developer rejects"),
+        "{}",
+        failed.stderr
+    );
+}
+
+/// `--resolve` without `--outcome` is a usage error, not a guess.
+#[test]
+fn resolve_without_an_outcome_is_a_usage_error() {
+    let sandbox = Sandbox::new();
+    let failed = sandbox.run(&["audit", "--resolve", "any-id"]);
+    assert_ne!(failed.code, 0, "{}", failed.stderr);
+}
+
 /// The prompt is recorded for every audit, not only a gated one, so
 /// `--fetch` answers for a plain `writ audit` too.
 #[test]

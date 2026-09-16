@@ -1534,6 +1534,12 @@ button.f-path:focus-visible {
   background: var(--danger-subtle);
 }
 
+.f-row .f-act-settle:hover {
+  color: var(--ok);
+  border-color: rgba(31, 136, 61, 0.5);
+  background: var(--ok-subtle);
+}
+
 .f-row .f-act-undo:hover {
   color: var(--accent);
   border-color: var(--accent-muted);

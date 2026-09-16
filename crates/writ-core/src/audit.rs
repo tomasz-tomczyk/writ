@@ -179,9 +179,13 @@ pub fn rule_block(position: usize, selected: &Selected) -> String {
 
 /// The prompt `--format prompt` prints. Spec section 7.1 step 4.
 ///
-/// It carries the diff, then the selected rules, then how to send the
-/// findings back. It never asks the host to rewrite the tree: writ
-/// reports, the developer decides.
+/// It carries the diff, then the selected rules, then what to do about
+/// each one and how to send that decision back.
+///
+/// **It asks the agent to act.** A learning exists to change what the
+/// agent writes, so the prompt asks for the change and fixes only the
+/// order: report the decision first, because the hook process exits when
+/// it has printed, then carry it out.
 ///
 /// **It names a return path, not only a JSON shape.** An earlier version
 /// ended with "reply with this JSON", and a reply in the conversation
@@ -230,8 +234,15 @@ pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) 
     }
 
     out.push_str("\n## Report back\n\n");
+    // The agent is asked for a decision, not an observation. It reports
+    // before it acts, so `fixed` is a commitment to correct the finding in
+    // this turn and never a claim that the tree is already clean. Each
+    // value has to say when it applies: naming the three without that, and
+    // showing `open` in the example, yields `open` on every finding, and
+    // `open` weighs nothing in `Outcomes::acceptance`.
     out.push_str(
-        "Do not rewrite the tree. Send the findings to writ. A reply left in \
+        "Decide what you will do about each learning the diff breaks, then \
+         send that decision to writ before you act on it. A reply left in \
          the conversation reaches nothing, because the audit has already \
          exited.\n\n",
     );
@@ -244,15 +255,28 @@ pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) 
     out.push_str(
         "{\"audit_id\":\"AUDIT\",\"findings\":[{\"learning_id\":\"ID\",\
          \"path\":\"PATH\",\"line\":1,\"detail\":\"WHAT IS WRONG\",\
-         \"outcome\":\"open\"}]}\n",
+         \"outcome\":\"fixed\"}]}\n",
     );
     out.push_str(
-        "\nUse the audit-id above, verbatim. `outcome` is `open`, `fixed` or \
-         `ignored`.\n",
+        "\nUse the audit-id above, verbatim. `outcome` is what you have \
+         decided to do, not a guess at what the code already is:\n\n",
     );
     out.push_str(
-        "An empty findings array is the right answer when the diff breaks no \
-         rule, and it still has to be sent.\n",
+        "- `fixed` \u{2014} you are correcting this before you hand back. \
+         Report first, then make the change.\n",
+    );
+    out.push_str(
+        "- `ignored` \u{2014} you are leaving it as it stands. Say why in \
+         `detail`. A blocking learning still refuses the handoff.\n",
+    );
+    out.push_str(
+        "- `open` \u{2014} you cannot settle it without the developer. It \
+         blocks a blocking learning, so use it when you mean to ask, not as \
+         a default.\n",
+    );
+    out.push_str(
+        "\nPick one for every finding. An empty findings array is the right \
+         answer when the diff breaks no rule, and it still has to be sent.\n",
     );
     out
 }
@@ -437,6 +461,44 @@ mod tests {
             last_verified: None,
             scopes: vec![Scope::global()],
         }
+    }
+
+    /// The prompt has to say *when* each outcome applies, not merely name
+    /// the three values, and the example must carry a decision rather than
+    /// a default. An agent copies the template it is shown, and `open`
+    /// weighs nothing in `Outcomes::acceptance`.
+    #[test]
+    fn the_prompt_asks_for_a_decision_on_every_finding() {
+        let scope = AuditScope {
+            identity: crate::repo::RepoIdentity::Remote("github.com/o/r".into()),
+            diff: crate::diff::Diff::parse("diff --git a/a.rs b/a.rs\n+let x = 1;\n"),
+            diff_range: "HEAD".into(),
+            diff_digest: "d".into(),
+        };
+        let prompt = render_prompt("AUDIT", &scope, &[]);
+
+        // The example must not hand back a default.
+        assert!(
+            prompt.contains(r#""outcome":"fixed""#),
+            "the template should carry a decision, not `open`: {prompt}"
+        );
+        assert!(!prompt.contains(r#""outcome":"open""#), "{prompt}");
+
+        // Each value has to say what it commits the agent to.
+        for clause in [
+            "`fixed` \u{2014} you are correcting this",
+            "`ignored` \u{2014} you are leaving it",
+            "`open` \u{2014} you cannot settle it",
+        ] {
+            assert!(prompt.contains(clause), "missing {clause}: {prompt}");
+        }
+
+        // `fixed` is a commitment made before acting, not an observation.
+        assert!(
+            prompt.contains("Report first, then make the change."),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Pick one for every finding."), "{prompt}");
     }
 
     fn candidate(id: &str, blocking: bool, outcomes: Outcomes) -> Candidate {

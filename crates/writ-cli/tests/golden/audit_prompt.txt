@@ -33,12 +33,17 @@ let y = 2;
 
 ## Report back
 
-Do not rewrite the tree. Send the findings to writ. A reply left in the conversation reaches nothing, because the audit has already exited.
+Decide what you will do about each learning the diff breaks, then send that decision to writ before you act on it. A reply left in the conversation reaches nothing, because the audit has already exited.
 
 - Call the `writ_audit` tool with a `findings` argument holding the whole document below, when MCP is available. This is the normal path.
 - Otherwise pipe the same document to `writ audit --ingest`.
 
-{"audit_id":"AUDIT","findings":[{"learning_id":"ID","path":"PATH","line":1,"detail":"WHAT IS WRONG","outcome":"open"}]}
+{"audit_id":"AUDIT","findings":[{"learning_id":"ID","path":"PATH","line":1,"detail":"WHAT IS WRONG","outcome":"fixed"}]}
 
-Use the audit-id above, verbatim. `outcome` is `open`, `fixed` or `ignored`.
-An empty findings array is the right answer when the diff breaks no rule, and it still has to be sent.
+Use the audit-id above, verbatim. `outcome` is what you have decided to do, not a guess at what the code already is:
+
+- `fixed` — you are correcting this before you hand back. Report first, then make the change.
+- `ignored` — you are leaving it as it stands. Say why in `detail`. A blocking learning still refuses the handoff.
+- `open` — you cannot settle it without the developer. It blocks a blocking learning, so use it when you mean to ask, not as a default.
+
+Pick one for every finding. An empty findings array is the right answer when the diff breaks no rule, and it still has to be sent.

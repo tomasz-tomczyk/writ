@@ -210,6 +210,23 @@ const AUDIT_ARGS: &[ToolArg] = &[
                 opens no audit and moves no counter",
     },
     ToolArg {
+        name: "resolve",
+        flag: "resolve",
+        kind: Kind::Text,
+        about: "A finding id to settle, once a question you reported as open has been \
+                answered. Pass outcome alongside it. Use this when the developer and \
+                you agreed what to do about a finding an earlier audit left open: \
+                ingest writes an outcome once, so without this the finding stays open \
+                and a blocking learning keeps refusing the handoff",
+    },
+    ToolArg {
+        name: "outcome",
+        flag: "outcome",
+        kind: Kind::Text,
+        about: "What resolve settles the finding to: fixed or ignored. Only a \
+                developer rejects a finding, so rejected is not accepted here",
+    },
+    ToolArg {
         name: "findings",
         flag: "ingest",
         kind: Kind::Stdin,

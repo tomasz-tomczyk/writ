@@ -752,6 +752,54 @@ impl Store {
         Ok(())
     }
 
+    /// Settle a finding a later conversation resolved.
+    ///
+    /// Ingest writes an outcome once and never again, so a finding the
+    /// agent reported `open` — meaning it could not settle the question
+    /// without the developer — had no way to become `fixed` after they
+    /// settled it. It stayed `open` forever, and a blocking learning
+    /// refuses the handoff on `open`, so the question had no answer.
+    ///
+    /// This is that answer. It moves the outcome and nothing else:
+    /// `times_applied` already moved at ingest, and this is the same
+    /// application reaching its conclusion, not a second one.
+    ///
+    /// `rejected` is refused in both directions. It cannot be written
+    /// here, because section 7.5 gives it to the developer alone and
+    /// [`Store::reject_finding`] is their path; and a finding already
+    /// `rejected` is left alone, so an agent cannot talk a rejection back
+    /// into `fixed`. [`Store::unreject_finding`] is the way out of one.
+    pub fn resolve_finding(&mut self, finding_id: &str, outcome: Outcome) -> Result<()> {
+        if outcome == Outcome::Rejected {
+            return Err(Error::validation(format!(
+                "--resolve cannot set outcome rejected on {finding_id}. \
+                 Only a developer rejects a finding"
+            )));
+        }
+        let changed = self.conn.execute(
+            "UPDATE findings SET outcome = ?2
+              WHERE id = ?1 AND outcome <> 'rejected'",
+            params![finding_id, outcome.as_str()],
+        )?;
+        if changed == 0 {
+            let known: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM findings WHERE id = ?1)",
+                [finding_id],
+                |row| row.get(0),
+            )?;
+            if !known {
+                return Err(Error::NotFound {
+                    id: finding_id.to_string(),
+                });
+            }
+            return Err(Error::validation(format!(
+                "finding {finding_id} is rejected. \
+                 Undo the rejection before settling it"
+            )));
+        }
+        Ok(())
+    }
+
     /// Undo a rejection: return the finding to `open`.
     ///
     /// It returns to `open` and never to what it carried before, because
@@ -3067,6 +3115,105 @@ mod tests {
         store.unreject_finding(&finding_id).unwrap();
 
         assert_eq!(store.findings_of(&id).unwrap()[0].outcome, Outcome::Fixed);
+    }
+
+    /// The whole point: an `open` finding can reach `fixed` later.
+    #[test]
+    fn resolve_finding_settles_an_open_finding() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = active(&mut store, "t", &["global"]);
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        store
+            .ingest(&FindingsInput {
+                audit_id: audit,
+                findings: vec![IncomingFinding {
+                    learning_id: id.clone(),
+                    path: None,
+                    line: None,
+                    detail: None,
+                    outcome: Outcome::Open,
+                }],
+            })
+            .unwrap();
+        let finding_id = store.findings_of(&id).unwrap()[0].id.clone();
+        let applied_before = store.get(&id).unwrap().times_applied;
+
+        store.resolve_finding(&finding_id, Outcome::Fixed).unwrap();
+
+        assert_eq!(store.findings_of(&id).unwrap()[0].outcome, Outcome::Fixed);
+        // Settling is the same application concluding, not a second one.
+        assert_eq!(store.get(&id).unwrap().times_applied, applied_before);
+    }
+
+    #[test]
+    fn resolve_finding_refuses_to_write_rejected() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = active(&mut store, "t", &["global"]);
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        store
+            .ingest(&FindingsInput {
+                audit_id: audit,
+                findings: vec![IncomingFinding {
+                    learning_id: id.clone(),
+                    path: None,
+                    line: None,
+                    detail: None,
+                    outcome: Outcome::Open,
+                }],
+            })
+            .unwrap();
+        let finding_id = store.findings_of(&id).unwrap()[0].id.clone();
+
+        let error = store
+            .resolve_finding(&finding_id, Outcome::Rejected)
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("Only a developer rejects"),
+            "{error}"
+        );
+        assert_eq!(store.findings_of(&id).unwrap()[0].outcome, Outcome::Open);
+    }
+
+    /// A rejection is the developer's word and an agent cannot talk it back.
+    #[test]
+    fn resolve_finding_leaves_a_rejected_finding_alone() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = active(&mut store, "t", &["global"]);
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        store
+            .ingest(&FindingsInput {
+                audit_id: audit,
+                findings: vec![IncomingFinding {
+                    learning_id: id.clone(),
+                    path: None,
+                    line: None,
+                    detail: None,
+                    outcome: Outcome::Open,
+                }],
+            })
+            .unwrap();
+        let finding_id = store.findings_of(&id).unwrap()[0].id.clone();
+        store.reject_finding(&finding_id).unwrap();
+
+        let error = store
+            .resolve_finding(&finding_id, Outcome::Fixed)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("is rejected"), "{error}");
+        assert_eq!(
+            store.findings_of(&id).unwrap()[0].outcome,
+            Outcome::Rejected
+        );
+    }
+
+    #[test]
+    fn resolve_finding_unknown_id_is_not_found() {
+        let mut store = Store::open_in_memory().unwrap();
+        let error = store
+            .resolve_finding("missing", Outcome::Fixed)
+            .unwrap_err();
+        assert!(matches!(error, Error::NotFound { .. }), "{error}");
     }
 
     #[test]
