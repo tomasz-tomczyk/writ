@@ -94,6 +94,9 @@ pub enum FindingOutcomeMetric {
     Fixed,
     Ignored,
     Rejected,
+    /// A rejection the developer took back. Counted apart from the three
+    /// the ranking reads, so the rate of withdrawn rejections is legible.
+    Unrejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +169,9 @@ impl CounterMetric {
             Self::FindingOutcome(FindingOutcomeMetric::Fixed) => ("finding_outcome", "fixed"),
             Self::FindingOutcome(FindingOutcomeMetric::Ignored) => ("finding_outcome", "ignored"),
             Self::FindingOutcome(FindingOutcomeMetric::Rejected) => ("finding_outcome", "rejected"),
+            Self::FindingOutcome(FindingOutcomeMetric::Unrejected) => {
+                ("finding_outcome", "unrejected")
+            }
             Self::HealthAction(HealthActionMetric::Archive) => ("health_action", "archive"),
             Self::HealthAction(HealthActionMetric::Edit) => ("health_action", "edit"),
             Self::HealthAction(HealthActionMetric::Keep) => ("health_action", "keep"),

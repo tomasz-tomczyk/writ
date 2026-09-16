@@ -134,6 +134,42 @@ pub async fn reject_finding(
     }
 }
 
+/// Undo a rejection. No confirmation: it is restorative, and the arming
+/// the Reject button carries exists because rejection is the destructive
+/// direction, not this one.
+pub async fn unreject_finding(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let result = with_store(&state, |store| {
+        let finding = store.finding(&id)?;
+        let learning_id = finding.learning_id;
+        let changed = finding.outcome == Outcome::Rejected;
+        if changed {
+            store.unreject_finding(&id)?;
+        }
+        Ok((learning_id, changed))
+    });
+    match result {
+        Ok((learning_id, changed)) => {
+            let message = if changed {
+                observe_ui(
+                    &state,
+                    CounterMetric::FindingOutcome(FindingOutcomeMetric::Unrejected),
+                );
+                // Say where it landed. It is not where it came from, and a
+                // developer who expected `fixed` back should learn that here.
+                "Rejection undone; the finding is open again."
+            } else {
+                "That finding is not rejected."
+            };
+            finding_reply(&state, &headers, &id, &learning_id, message)
+        }
+        Err(error) => error_response(error),
+    }
+}
+
 pub async fn health_archive(
     Path(id): Path<String>,
     State(state): State<AppState>,

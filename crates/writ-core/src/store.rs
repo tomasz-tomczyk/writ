@@ -752,6 +752,46 @@ impl Store {
         Ok(())
     }
 
+    /// Undo a rejection: return the finding to `open`.
+    ///
+    /// It returns to `open` and never to what it carried before, because
+    /// `findings` stores only the current outcome — a finding the agent
+    /// reported `fixed` and the developer then rejected has no record of
+    /// the `fixed`. Keeping one would be a nullable column, and P9 says a
+    /// nullable column is cheap to retrofit, so it is deferred until a
+    /// reader actually needs it.
+    ///
+    /// `open` is the honest landing place regardless: spec section 7.5
+    /// calls it "reported, and nothing has happened to it yet", which is
+    /// exactly true of a finding whose only judgement was just withdrawn.
+    /// It also weighs nothing in [`Outcomes::acceptance`], so undoing a
+    /// rejection restores the learning's ranking rather than leaving a
+    /// penalty behind.
+    ///
+    /// The `WHERE` clause pins the outcome, so this can never quietly
+    /// reopen a finding the developer did not reject. Repeating it is
+    /// harmless.
+    pub fn unreject_finding(&mut self, finding_id: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE findings SET outcome = 'open'
+              WHERE id = ?1 AND outcome = 'rejected'",
+            [finding_id],
+        )?;
+        if changed == 0 {
+            let known: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM findings WHERE id = ?1)",
+                [finding_id],
+                |row| row.get(0),
+            )?;
+            if !known {
+                return Err(Error::NotFound {
+                    id: finding_id.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// How past findings settled for many learnings at once.
     fn outcomes_of_many(&self, ids: &[&str]) -> Result<HashMap<String, Outcomes>> {
         let mut outcomes_by_id: HashMap<String, Outcomes> = HashMap::new();
@@ -2971,6 +3011,68 @@ mod tests {
     fn reject_finding_unknown_id_is_not_found() {
         let mut store = Store::open_in_memory().unwrap();
         let error = store.reject_finding("missing").unwrap_err();
+        assert!(matches!(error, Error::NotFound { .. }), "{error}");
+    }
+
+    /// Undo returns a rejection to `open`, which is all it can do: the
+    /// outcome the finding carried before the rejection is not stored.
+    #[test]
+    fn unreject_finding_returns_the_outcome_to_open() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = active(&mut store, "t", &["global"]);
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        store
+            .ingest(&FindingsInput {
+                audit_id: audit,
+                findings: vec![IncomingFinding {
+                    learning_id: id.clone(),
+                    path: None,
+                    line: None,
+                    detail: None,
+                    outcome: Outcome::Fixed,
+                }],
+            })
+            .unwrap();
+        let finding_id = store.findings_of(&id).unwrap()[0].id.clone();
+        store.reject_finding(&finding_id).unwrap();
+
+        store.unreject_finding(&finding_id).unwrap();
+
+        // `fixed`, not `open`, is what it carried before. That is gone.
+        assert_eq!(store.findings_of(&id).unwrap()[0].outcome, Outcome::Open);
+    }
+
+    /// Repeating it is harmless, and it never touches a finding that the
+    /// developer did not reject.
+    #[test]
+    fn unreject_finding_leaves_an_unrejected_finding_alone() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = active(&mut store, "t", &["global"]);
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        store
+            .ingest(&FindingsInput {
+                audit_id: audit,
+                findings: vec![IncomingFinding {
+                    learning_id: id.clone(),
+                    path: None,
+                    line: None,
+                    detail: None,
+                    outcome: Outcome::Fixed,
+                }],
+            })
+            .unwrap();
+        let finding_id = store.findings_of(&id).unwrap()[0].id.clone();
+
+        store.unreject_finding(&finding_id).unwrap();
+        store.unreject_finding(&finding_id).unwrap();
+
+        assert_eq!(store.findings_of(&id).unwrap()[0].outcome, Outcome::Fixed);
+    }
+
+    #[test]
+    fn unreject_finding_unknown_id_is_not_found() {
+        let mut store = Store::open_in_memory().unwrap();
+        let error = store.unreject_finding("missing").unwrap_err();
         assert!(matches!(error, Error::NotFound { .. }), "{error}");
     }
 

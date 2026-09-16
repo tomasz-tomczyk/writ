@@ -514,7 +514,7 @@ async fn main_htmx_detail_collection_contracts_are_preserved() {
     assert!(saved.body.contains("swapped rule"));
     assert!(
         saved.body.contains(&format!(
-            r##"action="/findings/{finding_id}/reject" hx-post="/findings/{finding_id}/reject" hx-target="#finding-{finding_id}" hx-swap="outerHTML""##
+            r##"action="/findings/{finding_id}/reject" hx-post="/findings/{finding_id}/reject" hx-target="#findings" hx-swap="outerHTML""##
         )),
         "{}",
         saved.body
@@ -541,6 +541,58 @@ async fn main_htmx_detail_collection_contracts_are_preserved() {
     assert!(rejected.body.contains("rejected"));
     assert!(rejected.body.contains(r#"hx-swap-oob="innerHTML""#));
     assert!(rejected.body.contains("Marked as not a violation"));
+    // The swap is the section, not the row, so the tally moves with it.
+    assert!(
+        rejected
+            .body
+            .contains(r#"<span class="tally" data-filter="rejected" data-count="1""#),
+        "{}",
+        rejected.body
+    );
+    // A rejected row offers the undo and no longer offers the rejection.
+    assert!(
+        rejected
+            .body
+            .contains(&format!("/findings/{finding_id}/unreject")),
+        "{}",
+        rejected.body
+    );
+
+    let undone = htmx(
+        &app,
+        Method::POST,
+        &format!("/findings/{finding_id}/unreject"),
+        None,
+    )
+    .await;
+    assert_eq!(undone.status, 200);
+    assert!(is_fragment(&undone.body), "{}", undone.body);
+    assert!(undone.body.contains("Rejection undone"), "{}", undone.body);
+    assert!(
+        undone
+            .body
+            .contains(r#"<span class="tally" data-filter="rejected" data-count="0""#),
+        "{}",
+        undone.body
+    );
+    assert!(
+        undone
+            .body
+            .contains(r#"<span class="tally" data-filter="open" data-count="1""#),
+        "{}",
+        undone.body
+    );
+
+    // Undoing again is harmless and says so rather than failing.
+    let again = htmx(
+        &app,
+        Method::POST,
+        &format!("/findings/{finding_id}/unreject"),
+        None,
+    )
+    .await;
+    assert_eq!(again.status, 200);
+    assert!(again.body.contains("not rejected"), "{}", again.body);
 }
 
 #[tokio::test]

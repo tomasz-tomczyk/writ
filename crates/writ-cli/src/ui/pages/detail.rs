@@ -175,13 +175,7 @@ fn render_with_origin(state: &AppState, id: &str, origin: Option<&str>) -> Resul
 
         if !findings.is_empty() {
             html.push_str("<div class=\"section-heading\"><h2>Findings</h2><p>Violations reported for this learning.</p></div>");
-            html.push_str("<div class=\"table-shell\">");
-            html.push_str(r#"<table class="findings">"#);
-            html.push_str("<thead><tr><th>Path</th><th>Line</th><th>Detail</th><th>Outcome</th><th></th></tr></thead><tbody>");
-            for finding in findings {
-                html.push_str(&render_finding_row(&finding));
-            }
-            html.push_str("</tbody></table></div>");
+            html.push_str(&render_findings(&findings));
         }
 
         html.push_str("</div>");
@@ -189,50 +183,153 @@ fn render_with_origin(state: &AppState, id: &str, origin: Option<&str>) -> Resul
     })
 }
 
-/// Render the one finding row an htmx rejection replaces.
+/// Render the whole Findings section an htmx outcome action replaces.
+///
+/// The swap is the section and not the one row it changed, because the
+/// header strip carries per-outcome counts. Swapping a row alone would
+/// move a finding out of `open` and leave the tally claiming it is still
+/// there.
 pub(crate) fn render_finding(state: &AppState, id: &str) -> Result<String, Error> {
     with_store(state, |store| {
         let finding = store.finding(id)?;
-        Ok(render_finding_row(&finding))
+        let findings = store.findings_of(&finding.learning_id)?;
+        Ok(render_findings(&findings))
     })
+}
+
+/// How many findings carry each outcome. Rendered as static text, which a
+/// script upgrades into filters; the counts read without it.
+fn tally(findings: &[Finding]) -> [(Outcome, usize); 4] {
+    let count = |want: Outcome| findings.iter().filter(|f| f.outcome == want).count();
+    [
+        (Outcome::Open, count(Outcome::Open)),
+        (Outcome::Fixed, count(Outcome::Fixed)),
+        (Outcome::Ignored, count(Outcome::Ignored)),
+        (Outcome::Rejected, count(Outcome::Rejected)),
+    ]
+}
+
+/// The glyph one outcome is drawn with. Four shapes for four values, so
+/// the state survives a reader who cannot separate the four hues.
+fn outcome_glyph(outcome: Outcome, size: u32) -> String {
+    let body = match outcome {
+        Outcome::Open => r#"<circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.7"/>"#.to_string(),
+        // `r##` because the check stroke is "#fff" and `"#` would close `r#`.
+        Outcome::Fixed => r##"<circle cx="8" cy="8" r="6.6" fill="currentColor"/><path d="M5.2 8.2l2 2 3.6-4.1" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>"##.to_string(),
+        Outcome::Ignored => r#"<circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.2 8h5.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>"#.to_string(),
+        Outcome::Rejected => r#"<circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>"#.to_string(),
+    };
+    format!(
+        r#"<svg viewBox="0 0 16 16" width="{size}" height="{size}" aria-hidden="true">{body}</svg>"#
+    )
+}
+
+/// Split a path so only the directory is allowed to give way when the row
+/// runs out of room. The file name and the line are what the developer
+/// reads, so they are their own elements and never shrink.
+fn split_path(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(cut) => path.split_at(cut + 1),
+        None => ("", path),
+    }
+}
+
+fn render_findings(findings: &[Finding]) -> String {
+    let mut html =
+        String::from(r#"<section class="findings" id="findings" aria-label="Findings">"#);
+    html.push_str(r#"<div class="findings-head">"#);
+    html.push_str(&format!(
+        r#"<span class="findings-count">{} finding{}</span>"#,
+        findings.len(),
+        if findings.len() == 1 { "" } else { "s" }
+    ));
+    html.push_str(r#"<div class="findings-legend" id="findings-legend">"#);
+    html.push_str(r#"<span class="tally" data-filter="all">All</span>"#);
+    for (outcome, count) in tally(findings) {
+        html.push_str(&format!(
+            r#"<span class="tally" data-filter="{key}" data-count="{count}" data-outcome="{key}">{glyph}<span class="tally-n">{count}</span> {key}</span>"#,
+            key = outcome.as_str(),
+            glyph = outcome_glyph(outcome, 12),
+        ));
+    }
+    html.push_str("</div></div>");
+
+    html.push_str(r#"<ul class="findings-list">"#);
+    for finding in findings {
+        html.push_str(&render_finding_row(finding));
+    }
+    html.push_str("</ul></section>");
+    html
 }
 
 fn render_finding_row(finding: &Finding) -> String {
     let id = escape(&finding.id);
-    let mut html = format!(r#"<tr id="finding-{id}">"#);
+    let outcome = finding.outcome;
+    let mut html = format!(
+        r#"<li class="f-row" id="finding-{id}" data-outcome="{key}">"#,
+        key = outcome.as_str()
+    );
+
+    // Badge: glyph plus the word. Colour lives only in these two, so a
+    // findings list never becomes a wall of filled pills.
     html.push_str(&format!(
-        "<td>{}</td>",
-        escape(finding.path.as_deref().unwrap_or("—"))
+        r#"<span class="f-badge">{glyph}{word}</span>"#,
+        glyph = outcome_glyph(outcome, 13),
+        word = escape(outcome.as_str()),
     ));
-    html.push_str(&format!(
-        "<td>{}</td>",
-        finding
-            .line
-            .map_or_else(|| "—".into(), |line| line.to_string())
-    ));
-    html.push_str(&format!(
-        "<td>{}</td>",
-        escape(finding.detail.as_deref().unwrap_or(""))
-    ));
-    html.push_str(&format!(
-        "<td><span class=\"outcome {}\">{}</span></td>",
-        finding.outcome.as_str(),
-        escape(finding.outcome.as_str())
-    ));
-    html.push_str("<td class=\"actions\">");
-    if finding.outcome != Outcome::Rejected {
+
+    // Body: the detail is what the developer reads, so it is the row, and
+    // the path is demoted beneath it.
+    html.push_str(r#"<div class="f-body">"#);
+    match finding.detail.as_deref().filter(|text| !text.is_empty()) {
+        Some(detail) => html.push_str(&format!(r#"<p class="f-detail">{}</p>"#, escape(detail))),
+        // A blank cell reads as a rendering fault. Say what is missing.
+        None => html.push_str(r#"<p class="f-detail is-empty">No detail reported</p>"#),
+    }
+    html.push_str(r#"<div class="f-meta">"#);
+    match (finding.path.as_deref(), finding.line) {
+        // The longest string on the row is also the thing the developer
+        // clicks, so it is the control and there is no separate button.
+        (Some(path), Some(line)) => {
+            let open = format!("/findings/{id}/open");
+            let (dir, base) = split_path(path);
+            html.push_str(&format!(
+                r#"<form class="f-path-form" method="post" action="{open}" hx-post="{open}" hx-swap="none"><button class="f-path" type="submit" title="Open {loc} in your editor"><span class="f-dir">{dir}</span><span class="f-base">{base}</span><span class="f-line">:{line}</span></button></form>"#,
+                loc = escape(&format!("{path}:{line}")),
+                dir = escape(dir),
+                base = escape(base),
+            ));
+        }
+        // A path with no line cannot be opened, so it is text, not a
+        // control that would do nothing.
+        (Some(path), None) => {
+            let (dir, base) = split_path(path);
+            html.push_str(&format!(
+                r#"<span class="f-path"><span class="f-dir">{dir}</span><span class="f-base">{base}</span></span>"#,
+                dir = escape(dir),
+                base = escape(base),
+            ));
+        }
+        (None, _) => html.push_str(r#"<span class="f-nopath">No location reported</span>"#),
+    }
+    html.push_str("</div></div>");
+
+    // Actions. Rejecting is the only human vote in the ranking, so the
+    // script arms it and a second click commits; without the script the
+    // first click submits, which is what the server expects either way.
+    html.push_str(r#"<div class="f-actions">"#);
+    if outcome == Outcome::Rejected {
+        let unreject = format!("/findings/{id}/unreject");
+        html.push_str(&format!(
+            r##"<form method="post" action="{unreject}" hx-post="{unreject}" hx-target="#findings" hx-swap="outerHTML"><button class="f-act f-act-undo" type="submit" title="Undo the rejection. The finding returns to open, not to what it carried before.">Undo rejection</button></form>"##
+        ));
+    } else {
         let reject = format!("/findings/{id}/reject");
         html.push_str(&format!(
-            r##"<form method="post" action="{reject}" hx-post="{reject}" hx-target="#finding-{id}" hx-swap="outerHTML" hx-confirm="Mark this finding as not a violation? This affects the learning's ranking."><button type="submit">Mark rejected</button></form>"##
+            r##"<form method="post" action="{reject}" hx-post="{reject}" hx-target="#findings" hx-swap="outerHTML"><button class="f-act f-act-reject" type="submit" data-confirm="Confirm reject" title="This finding was wrong. Rejecting it demotes this rule in every future selection.">Reject</button></form>"##
         ));
     }
-    if finding.path.is_some() && finding.line.is_some() {
-        let open = format!("/findings/{id}/open");
-        html.push_str(&format!(
-            r#"<form method="post" action="{open}" hx-post="{open}" hx-swap="none"><button type="submit">Open</button></form>"#
-        ));
-    }
-    html.push_str("</td></tr>");
+    html.push_str("</div></li>");
     html
 }
 
