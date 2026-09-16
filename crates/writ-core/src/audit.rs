@@ -179,9 +179,16 @@ pub fn rule_block(position: usize, selected: &Selected) -> String {
 
 /// The prompt `--format prompt` prints. Spec section 7.1 step 4.
 ///
-/// It carries the diff, then the selected rules, then how to send the
-/// findings back. It never asks the host to rewrite the tree: writ
-/// reports, the developer decides.
+/// It carries the diff, then the selected rules, then what to do about
+/// each one and how to send that decision back.
+///
+/// **It asks the agent to act.** It used to open with "Do not rewrite the
+/// tree", on the reasoning that writ reports and the developer decides.
+/// That reasoning was wrong for the gate: a learning exists to change what
+/// the agent writes, so a prompt forbidding the change asks the agent to
+/// read a rule and then ignore it. The instruction that survives is the
+/// ordering, not a prohibition — report the decision first, because the
+/// hook exits when it has printed, then carry it out.
 ///
 /// **It names a return path, not only a JSON shape.** An earlier version
 /// ended with "reply with this JSON", and a reply in the conversation
