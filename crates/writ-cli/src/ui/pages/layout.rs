@@ -29,6 +29,7 @@ pub fn render(state: &AppState, title: &str, body: &str) -> Response {
   <title>{title} · writ</title>
   <link rel="stylesheet" href="/assets/app.css">
   <script src="/assets/htmx.min.js"></script>
+  <script src="/assets/findings.js" defer></script>
 </head>
 <body>
   <header class="app-header">

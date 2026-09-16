@@ -288,8 +288,12 @@ button,
   box-shadow: 0 1px 0 rgba(31, 35, 40, 0.04);
 }
 
-/* Neutral hover must not repaint primary/danger text. */
-button:hover:not(.primary):not(.btn--primary):not(.danger),
+/* Neutral hover must not repaint primary/danger text.
+
+   `.f-act` opts out because the findings actions paint their own hover, and
+   this rule is specificity 41 — high enough that every `.f-act:hover` below
+   would lose to it silently, the armed Reject included. */
+button:hover:not(.primary):not(.btn--primary):not(.danger):not(.f-act),
 .button:hover:not(.primary):not(.danger),
 .btn:hover:not(.primary):not(.btn--primary):not(.danger) {
   background: var(--bg);
@@ -298,7 +302,7 @@ button:hover:not(.primary):not(.btn--primary):not(.danger),
   text-decoration: none;
 }
 
-button:active:not(.primary):not(.btn--primary),
+button:active:not(.primary):not(.btn--primary):not(.f-act),
 .btn:active:not(.primary):not(.btn--primary) {
   background: var(--canvas-inset);
   box-shadow: inset 0 1px 0 rgba(208, 215, 222, 0.2);
@@ -750,7 +754,6 @@ tr:hover td {
 .chip,
 .badge:not(.counter),
 .status-badge,
-.outcome,
 .mode-badge {
   display: inline-flex;
   align-items: center;
@@ -803,8 +806,7 @@ tr:hover td {
   border-color: var(--border);
 }
 
-.status-badge.active,
-.outcome.applied {
+.status-badge.active {
   color: var(--ok);
   background: var(--ok-subtle);
   border-color: rgba(31, 136, 61, 0.15);
@@ -816,9 +818,7 @@ tr:hover td {
   border-color: rgba(154, 103, 0, 0.15);
 }
 
-.status-badge.archived,
-.outcome.ignored,
-.outcome.rejected {
+.status-badge.archived {
   color: var(--danger);
   background: var(--danger-subtle);
   border-color: rgba(207, 34, 46, 0.15);
@@ -1208,15 +1208,353 @@ tr:hover td {
   max-width: 40rem;
 }
 
+/* Findings — a list, not a table.
+
+   A finding is one located violation. The path is the longest string on the
+   row and the least of the three things the developer wants, so it is not a
+   column: the detail is the row, the path is a demoted second line, and the
+   outcome is a badge that carries a glyph as well as a hue. */
+
 .findings {
+  --rail: 100px;
+  --row-pad-x: 14px;
+  --state-open: var(--warn);
+  --state-fixed: var(--ok);
+  --state-ignored: var(--subtle);
+  --state-rejected: var(--danger);
   margin-top: var(--gap);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
 }
 
-.findings td.actions {
+/* Header strip: static counts, which findings.js upgrades into filters. */
+.findings-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px var(--row-pad-x);
+  border-bottom: 1px solid var(--border-muted);
+  background: var(--panel);
+}
+
+.findings-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.findings-legend {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.tally {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--muted);
+  padding: 3px 8px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: none;
   white-space: nowrap;
 }
 
-.findings td.actions .row-actions,
+.tally svg {
+  flex: none;
+  display: block;
+}
+
+.tally[data-outcome="open"] { color: var(--muted); }
+
+.tally[data-outcome="open"] svg { color: var(--state-open); }
+.tally[data-outcome="fixed"] svg { color: var(--state-fixed); }
+.tally[data-outcome="ignored"] svg { color: var(--state-ignored); }
+.tally[data-outcome="rejected"] svg { color: var(--state-rejected); }
+
+.tally-n {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.tally[data-count="0"],
+.tally[data-count="0"] .tally-n {
+  color: var(--subtle);
+  font-weight: 400;
+}
+
+button.tally {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+button.tally:hover {
+  background: var(--canvas-inset);
+  color: var(--ink);
+}
+
+button.tally[aria-pressed="true"] {
+  background: var(--accent-subtle);
+  border-color: rgba(9, 105, 218, 0.25);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* Rows */
+
+.findings-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.f-row {
+  display: grid;
+  grid-template-columns: var(--rail) minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 12px;
+  padding: 11px var(--row-pad-x);
+  border-top: 1px solid var(--border-muted);
+}
+
+.f-row:first-child {
+  border-top: 0;
+}
+
+.f-row:hover,
+.f-row:focus-within {
+  background: var(--canvas-inset);
+}
+
+.f-row[hidden] {
+  display: none;
+}
+
+/* Badge: glyph plus word, and colour lives nowhere else. */
+.f-badge {
+  grid-column: 1;
+  grid-row: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 20px;
+  padding-top: 1px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.f-badge svg {
+  flex: none;
+  display: block;
+}
+
+.f-row[data-outcome="open"] .f-badge { color: var(--state-open); }
+.f-row[data-outcome="fixed"] .f-badge { color: var(--state-fixed); }
+.f-row[data-outcome="ignored"] .f-badge { color: var(--state-ignored); }
+.f-row[data-outcome="rejected"] .f-badge { color: var(--state-rejected); }
+
+/* Body: detail first, location underneath. */
+
+.f-body {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+}
+
+.f-detail {
+  margin: 0;
+  max-width: 96ch;
+  line-height: 1.45;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.f-detail.is-empty {
+  color: var(--subtle);
+  font-style: italic;
+}
+
+/* A settled finding reads quieter than one that still wants work. */
+.f-row[data-outcome="ignored"] .f-detail,
+.f-row[data-outcome="rejected"] .f-detail {
+  color: var(--muted);
+}
+
+/* Block, not flex: as a flex item the form's base size fed back into the
+   button's max-width and truncated the directory with space to spare. */
+.f-meta {
+  display: block;
+  margin-top: 3px;
+  min-width: 0;
+}
+
+.f-path-form {
+  margin: 0;
+  min-width: 0;
+  display: block;
+}
+
+/* inline-flex so the button is shrink-to-fit and only reaches max-width when
+   the path genuinely overflows; then .f-dir is the only part that gives. */
+.f-path {
+  display: inline-flex;
+  align-items: baseline;
+  /* The Primer button rule sets gap: 0.5rem, which would part the directory
+     from the file name and the file name from the line. A path is one string. */
+  gap: 0;
+  max-width: 100%;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--subtle);
+  background: none;
+  border: 0;
+  border-radius: var(--radius);
+  margin: -1px -4px;
+  padding: 1px 4px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.f-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.f-base,
+.f-line {
+  flex: none;
+}
+
+button.f-path {
+  cursor: pointer;
+}
+
+button.f-path .f-base {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+button.f-path:hover {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+button.f-path:hover .f-base,
+button.f-path:hover .f-line {
+  color: var(--accent);
+}
+
+button.f-path:focus-visible {
+  outline: 2px solid var(--accent-muted);
+  outline-offset: 1px;
+  background: var(--accent-subtle);
+}
+
+.f-line {
+  color: var(--subtle);
+}
+
+.f-nopath {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--subtle);
+  font-style: italic;
+}
+
+/* Actions: always present, quiet at rest. A hidden control is a control the
+   developer cannot find. */
+
+.f-actions {
+  grid-column: 3;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 132px;
+  min-height: 20px;
+  justify-content: flex-end;
+  padding-left: 0.5rem;
+}
+
+.f-actions form {
+  margin: 0;
+  display: contents;
+}
+
+.f-act {
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 1px 8px;
+  color: var(--subtle);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    color 80ms linear,
+    background-color 80ms linear,
+    border-color 80ms linear;
+}
+
+.f-row:hover .f-act,
+.f-row:focus-within .f-act {
+  color: var(--muted);
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+/* Each carries `.f-row` to match `.f-row:hover .f-act` at specificity 30 and
+   sits after it, so hovering the button beats hovering the row. */
+.f-row .f-act:hover {
+  background: var(--bg);
+  color: var(--ink);
+  border-color: var(--subtle);
+}
+
+.f-row .f-act-reject:hover {
+  color: var(--danger);
+  border-color: rgba(207, 34, 46, 0.5);
+  background: var(--danger-subtle);
+}
+
+.f-row .f-act-undo:hover {
+  color: var(--accent);
+  border-color: var(--accent-muted);
+  background: var(--accent-subtle);
+}
+
+/* Armed. Last of the specificity-30 rules, so it wins the tie against both
+   the row hover and the button hover above. */
+.f-row .f-act.is-confirming,
+.f-row .f-act.is-confirming:hover {
+  color: var(--accent-ink);
+  background: var(--danger);
+  border-color: var(--danger);
+  font-weight: 600;
+}
+
+.f-act:focus-visible {
+  outline: 2px solid var(--accent-muted);
+  outline-offset: 1px;
+}
+
 .health td.actions-cell .row-actions {
   display: flex;
   flex-wrap: nowrap;
@@ -1432,5 +1770,34 @@ footer.store code {
 
   table {
     min-width: 44rem;
+  }
+
+  /* The badge and the action share the top line; the body takes the width. */
+  .f-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .f-badge {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .f-actions {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+  }
+
+  .f-body {
+    grid-column: 1 / span 2;
+    grid-row: 2;
+    margin-top: 4px;
+  }
+
+  /* No hover on a touch pointer, so the action cannot wait for one. */
+  .f-act {
+    color: var(--muted);
+    background: var(--panel);
+    border-color: var(--border);
   }
 }
