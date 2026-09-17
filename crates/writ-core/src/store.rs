@@ -6,8 +6,9 @@ use rusqlite::{Connection, Row, Transaction, functions::FunctionFlags, params};
 
 use crate::audit::{
     AuditScope, Budget, Candidate, FindingsInput, Ingested, Outcome, Outcomes, Selected,
-    render_prompt, rule_block,
+    learning_slice_digest, render_prompt, rule_block,
 };
+use crate::diff::Diff;
 use crate::error::{Error, Result};
 use crate::fts;
 use crate::glob::glob_match;
@@ -493,36 +494,61 @@ impl Store {
         Ok(selected)
     }
 
-    /// Whether this exact diff was already audited **and answered** in
-    /// this repository. Spec section 9.2, **The gate does not re-nag a
-    /// diff it already covered**.
+    /// Whether **every** selected learning was already audited and
+    /// answered against the slice of this diff it scopes. Spec section
+    /// 9.2, **The digest has to match the granularity of selection**.
     ///
-    /// Both halves of the condition are load-bearing. Keying on the
-    /// digest alone would let any audit at all disarm the gate, so an
-    /// agent that ignored the pointer would be rewarded with silence —
-    /// the failure *Ingest only happens if the prompt asks for it* exists
-    /// to prevent. Requiring `ingested_at` gives "covered" the meaning a
-    /// reader expects: someone looked at this diff against these rules
-    /// and said what they found.
+    /// Both halves of the schema-4 condition survive the change of key.
+    /// Keying on the digest alone would let any audit at all disarm the
+    /// gate, so an agent that ignored the pointer would be rewarded with
+    /// silence — the failure *Ingest only happens if the prompt asks for
+    /// it* exists to prevent. Requiring `ingested_at` on the parent audit
+    /// gives "covered" the meaning a reader expects: someone looked at
+    /// this slice against this rule and said what they found.
     ///
-    /// Rows written before schema 4 carry a NULL digest and so cover
-    /// nothing, which is the honest reading of a diff nobody hashed.
+    /// What changed is the granularity. A whole-diff digest re-served a
+    /// `glob:`-scoped rule on every turn that edited any other file,
+    /// because the digest moved and the rule's concern had not.
     ///
-    /// A rule activated after the fact is the one change this does not
-    /// notice. That is accepted: keying on the collection as well would
-    /// re-nag every turn a rule is edited.
-    pub fn covered(&self, identity: &RepoIdentity, digest: &str) -> Result<bool> {
-        let covered = self.conn.query_row(
+    /// Every selected learning has to be covered, not merely one of them.
+    /// A learning with no row at all — never selected, never answered, or
+    /// activated after the last audit — is not covered, so it blocks and
+    /// the prompt then carries all of them: a reviewer handed three rules
+    /// and told to re-check one has to re-read the other two to know they
+    /// still hold.
+    ///
+    /// An empty selection is covered. There is nothing to nag about, and
+    /// the caller has already decided not to emit.
+    pub fn all_covered(
+        &self,
+        identity: &RepoIdentity,
+        diff: &Diff,
+        selected: &[Selected],
+    ) -> Result<bool> {
+        let mut stmt = self.conn.prepare(
             "SELECT EXISTS (
-               SELECT 1 FROM audits
-                WHERE diff_digest = ?1
-                  AND repo IS ?2
-                  AND ingested_at IS NOT NULL
+               SELECT 1 FROM audit_coverage c
+                 JOIN audits a ON a.id = c.audit_id
+                WHERE c.repo IS ?1
+                  AND c.learning_id = ?2
+                  AND c.slice_digest = ?3
+                  AND a.ingested_at IS NOT NULL
              )",
-            params![digest, identity.value()],
-            |row| row.get(0),
         )?;
-        Ok(covered)
+        for one in selected {
+            let covered: bool = stmt.query_row(
+                params![
+                    identity.value(),
+                    &one.learning.id,
+                    &learning_slice_digest(&one.learning, diff),
+                ],
+                |row| row.get(0),
+            )?;
+            if !covered {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Open an `audits` row, stamp the rules it sent, and return its id.
@@ -566,6 +592,22 @@ impl Store {
                         last_selected_at = datetime('now')
                   WHERE id = ?1",
                 [&one.learning.id],
+            )?;
+            // One coverage row per learning the prompt carries, naming the
+            // slice it was asked about. Written here rather than at ingest
+            // so that what was asked is recorded even when nobody answers:
+            // `ingested_at` on the parent row is what separates the two.
+            // Spec 9.2, **The digest has to match the granularity of
+            // selection**.
+            tx.execute(
+                "INSERT INTO audit_coverage (audit_id, learning_id, repo, slice_digest)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    &id,
+                    &one.learning.id,
+                    scope.identity.value(),
+                    &learning_slice_digest(&one.learning, &scope.diff),
+                ],
             )?;
         }
         tx.commit()?;
@@ -1442,12 +1484,12 @@ mod tests {
         assert_eq!(learning.sides, Sides::Both);
     }
 
-    /// Schema 4 keeps the audits that predate the digest, unlike schema
-    /// 3. The columns are nullable, so nothing has to be invented for a
-    /// row whose diff nobody hashed — and a NULL digest covers nothing,
-    /// which is the honest reading of it.
+    /// Schemas 4 and 5 keep the audits that predate them, unlike schema
+    /// 3. Nothing has to be invented for a row whose diff nobody hashed
+    /// and whose learnings nobody sliced: it simply carries no coverage
+    /// row, so it covers nothing. That is the honest reading of it.
     #[test]
-    fn migrating_to_schema_four_keeps_audits_and_covers_nothing_with_them() {
+    fn migrating_to_schema_five_keeps_audits_and_covers_nothing_with_them() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("learnings.db");
         let audit = new_id();
@@ -1485,23 +1527,39 @@ mod tests {
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(count(&store, "audits"), 1, "the old audit survives");
 
+        assert_eq!(
+            count(&store, "audit_coverage"),
+            0,
+            "an audit written before schema 5 has no coverage rows"
+        );
+
+        let mut store = store;
+        let learning = active(&mut store, "a title", &["global"]);
         let identity = RepoIdentity::Remote("github.com/o/r".into());
+        let diff = Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n");
+        let selected = vec![Selected {
+            learning: store.get(&learning).unwrap(),
+            exemplars: Vec::new(),
+        }];
         assert!(
-            !store.covered(&identity, "any digest at all").unwrap(),
-            "a row with no digest must cover nothing"
+            !store.all_covered(&identity, &diff, &selected).unwrap(),
+            "a row nobody sliced must cover nothing"
         );
     }
 
-    /// Both halves of the coverage condition, at the store.
+    /// Both halves of the coverage condition, at the store, now keyed per
+    /// learning. Spec 9.2, **The digest has to match the granularity of
+    /// selection**.
     #[test]
-    fn coverage_needs_the_same_digest_in_the_same_repo_and_an_ingest() {
+    fn coverage_needs_the_same_slice_in_the_same_repo_and_an_ingest() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("learnings.db")).unwrap();
         let learning = active(&mut store, "a title", &["global"]);
         let identity = RepoIdentity::Remote("github.com/o/r".into());
+        let diff = Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n");
         let scope = AuditScope {
             identity: identity.clone(),
-            diff: Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n"),
+            diff: diff.clone(),
             diff_range: "HEAD".into(),
             diff_digest: "the digest".into(),
         };
@@ -1512,7 +1570,7 @@ mod tests {
         let audit = store.start_audit(&scope, 1, &selected).unwrap();
 
         assert!(
-            !store.covered(&identity, "the digest").unwrap(),
+            !store.all_covered(&identity, &diff, &selected).unwrap(),
             "an audit nobody answered covers nothing"
         );
 
@@ -1524,21 +1582,81 @@ mod tests {
             .unwrap();
 
         assert!(
-            store.covered(&identity, "the digest").unwrap(),
+            store.all_covered(&identity, &diff, &selected).unwrap(),
             "a clean report is still an answer"
         );
+
+        let other = Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 2;\n");
         assert!(
-            !store.covered(&identity, "another digest").unwrap(),
-            "a different diff is not covered"
+            !store.all_covered(&identity, &other, &selected).unwrap(),
+            "a global rule's slice is the whole diff, so another diff is not covered"
         );
         assert!(
             !store
-                .covered(
+                .all_covered(
                     &RepoIdentity::Remote("github.com/o/other".into()),
-                    "the digest"
+                    &diff,
+                    &selected
                 )
                 .unwrap(),
             "another repository is not covered"
+        );
+    }
+
+    /// An empty selection is covered: there is nothing to nag about.
+    #[test]
+    fn an_empty_selection_is_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("learnings.db")).unwrap();
+        let identity = RepoIdentity::Remote("github.com/o/r".into());
+        let diff = Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n");
+
+        assert!(store.all_covered(&identity, &diff, &[]).unwrap());
+    }
+
+    /// One uncovered learning is enough to block, however many are
+    /// covered beside it.
+    #[test]
+    fn one_uncovered_learning_is_not_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("learnings.db")).unwrap();
+        let first = active(&mut store, "first", &["global"]);
+        let identity = RepoIdentity::Remote("github.com/o/r".into());
+        let diff = Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n");
+        let scope = AuditScope {
+            identity: identity.clone(),
+            diff: diff.clone(),
+            diff_range: "HEAD".into(),
+            diff_digest: "the digest".into(),
+        };
+        let one = Selected {
+            learning: store.get(&first).unwrap(),
+            exemplars: Vec::new(),
+        };
+        let audit = store
+            .start_audit(&scope, 1, std::slice::from_ref(&one))
+            .unwrap();
+        store
+            .ingest(&FindingsInput {
+                audit_id: audit,
+                findings: Vec::new(),
+            })
+            .unwrap();
+        assert!(
+            store
+                .all_covered(&identity, &diff, std::slice::from_ref(&one))
+                .unwrap()
+        );
+
+        // A second learning arrives after the first was settled.
+        let second = active(&mut store, "second", &["global"]);
+        let two = Selected {
+            learning: store.get(&second).unwrap(),
+            exemplars: Vec::new(),
+        };
+        assert!(
+            !store.all_covered(&identity, &diff, &[one, two]).unwrap(),
+            "a learning activated after the last audit is not covered"
         );
     }
 

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diff::Diff;
 use crate::error::{Error, Result};
-use crate::model::{Exemplar, ExemplarKind, Learning, Sides};
+use crate::model::{Exemplar, ExemplarKind, Learning, Scope, ScopeKind, Sides};
 use crate::repo::RepoIdentity;
 
 /// What one audit is looking at.
@@ -47,6 +47,66 @@ pub fn diff_digest(text: &str) -> String {
             let _ = write!(out, "{byte:02x}");
             out
         })
+}
+
+/// The paths in this diff that one learning's scopes selected.
+///
+/// Spec section 9.2, **The digest has to match the granularity of
+/// selection**. Kinds AND across each other and rows OR within one kind,
+/// exactly as selection itself does, so this narrows by intersection:
+///
+/// - `global` selects every path. Not a special case to write around — a
+///   global rule does care about every byte, and keying its coverage on
+///   the whole diff is the behaviour it should have.
+/// - `project:` is repository-level and narrows no path.
+/// - `language:` and `glob:` each narrow to the paths they match.
+///
+/// This recomputes what `writ_glob_any` already decided in SQL, because
+/// that function answers *whether* a pattern matched and not *which paths*
+/// did. It only ever runs over the selected set, which the budget caps at
+/// `max_rules`, so it is not the linear cost invariant 5 is about.
+pub fn matched_paths(learning: &Learning, diff: &Diff) -> Vec<String> {
+    if learning
+        .scopes
+        .iter()
+        .any(|one| one.kind == ScopeKind::Global)
+    {
+        return diff.paths.clone();
+    }
+
+    let languages = diff.languages();
+    let mut paths = diff.paths.clone();
+    for kind in [ScopeKind::Language, ScopeKind::Glob] {
+        let rows: Vec<&Scope> = learning
+            .scopes
+            .iter()
+            .filter(|one| one.kind == kind)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        paths.retain(|path| {
+            rows.iter().any(|one| match kind {
+                ScopeKind::Language => {
+                    crate::diff::language_of(path) == Some(one.value.as_str())
+                        && languages.contains(&one.value)
+                }
+                ScopeKind::Glob => crate::glob::glob_match(&one.value, path),
+                ScopeKind::Global | ScopeKind::Project => true,
+            })
+        });
+    }
+    paths
+}
+
+/// The coverage key for one learning against one diff.
+///
+/// A hash of [`Diff::slice`] over [`matched_paths`], so an edit in a path
+/// the learning does not scope leaves it untouched and an edit in a path it
+/// does scope moves it. That is the whole correction in section 9.2: the
+/// key has to be as narrow as the match that produced it.
+pub fn learning_slice_digest(learning: &Learning, diff: &Diff) -> String {
+    diff_digest(&diff.slice(&matched_paths(learning, diff)))
 }
 
 /// How many characters and rules one prompt may carry. Spec section 10.
@@ -634,5 +694,181 @@ mod tests {
     fn well_formed_json_of_the_wrong_shape_is_a_validation_error() {
         let error = parse_findings(r#"{"findings":[]}"#).unwrap_err();
         assert!(matches!(error, Error::Validation { .. }), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod slice_digest_tests {
+    use super::*;
+    use crate::diff::Diff;
+    use crate::model::{Scope, ScopeKind, SourceKind, Status};
+
+    const DIFF: &str = "diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml\n\
+        --- a/.github/workflows/deploy.yml\n\
+        +++ b/.github/workflows/deploy.yml\n\
+        @@ -1 +1 @@\n\
+        -uses: actions/checkout@v4\n\
+        +uses: actions/checkout@v7\n\
+        diff --git a/src/app.ts b/src/app.ts\n\
+        --- a/src/app.ts\n\
+        +++ b/src/app.ts\n\
+        @@ -1 +1 @@\n\
+        -const a = 1;\n\
+        +const a = 2;\n";
+
+    fn scoped(scopes: Vec<Scope>) -> Learning {
+        Learning {
+            id: "01".into(),
+            created_at: "2026-01-01 00:00:00".into(),
+            updated_at: "2026-01-01 00:00:00".into(),
+            status: Status::Active,
+            title: "t".into(),
+            rule: "r".into(),
+            rationale: "why".into(),
+            blocking: true,
+            sides: Sides::Both,
+            matcher_kind: None,
+            matcher: None,
+            source_kind: SourceKind::Manual,
+            source_adapter: None,
+            source_ref: None,
+            author: None,
+            activated_at: None,
+            reinforced: 0,
+            times_selected: 0,
+            last_selected_at: None,
+            times_applied: 0,
+            last_applied_at: None,
+            last_verified: None,
+            scopes,
+        }
+    }
+
+    fn glob(pattern: &str) -> Scope {
+        Scope {
+            kind: ScopeKind::Glob,
+            value: pattern.to_string(),
+        }
+    }
+
+    fn language(name: &str) -> Scope {
+        Scope {
+            kind: ScopeKind::Language,
+            value: name.to_string(),
+        }
+    }
+
+    /// A `glob:` scope narrows the slice to the paths it matched.
+    #[test]
+    fn a_glob_scope_selects_only_its_paths() {
+        let diff = Diff::parse(DIFF);
+        let one = scoped(vec![glob(".github/workflows/**")]);
+
+        assert_eq!(matched_paths(&one, &diff), [".github/workflows/deploy.yml"]);
+    }
+
+    /// A `global` scope cares about every byte, so its slice is the whole
+    /// diff. Not a special case — the deliberate behaviour.
+    #[test]
+    fn a_global_scope_selects_every_path() {
+        let diff = Diff::parse(DIFF);
+        let one = scoped(vec![Scope::global()]);
+
+        assert_eq!(matched_paths(&one, &diff), diff.paths);
+    }
+
+    /// `project:` is repo-level, so it narrows nothing about paths.
+    #[test]
+    fn a_project_scope_narrows_no_path() {
+        let diff = Diff::parse(DIFF);
+        let one = scoped(vec![Scope {
+            kind: ScopeKind::Project,
+            value: "github.com/o/r".into(),
+        }]);
+
+        assert_eq!(matched_paths(&one, &diff), diff.paths);
+    }
+
+    /// Kinds AND across each other, so two kinds intersect.
+    #[test]
+    fn kinds_intersect_across_each_other() {
+        let diff = Diff::parse(DIFF);
+        let one = scoped(vec![language("typescript"), glob("src/**")]);
+
+        assert_eq!(matched_paths(&one, &diff), ["src/app.ts"]);
+
+        // The same language against a glob that excludes it leaves nothing.
+        let neither = scoped(vec![language("typescript"), glob(".github/**")]);
+        assert!(matched_paths(&neither, &diff).is_empty());
+    }
+
+    /// Rows inside one kind are alternatives, so two globs union.
+    #[test]
+    fn rows_within_one_kind_union() {
+        let diff = Diff::parse(DIFF);
+        let one = scoped(vec![glob(".github/**"), glob("src/**")]);
+
+        assert_eq!(matched_paths(&one, &diff), diff.paths);
+    }
+
+    /// The whole point. Spec 9.2, *The digest has to match the
+    /// granularity of selection*: eleven distinct whole-diff digests
+    /// re-served one settled rule ten times. The slice digest holds still.
+    #[test]
+    fn an_unscoped_edit_leaves_the_slice_digest_alone() {
+        let one = scoped(vec![glob(".github/workflows/**")]);
+        let before = Diff::parse(DIFF);
+        let after = Diff::parse(&DIFF.replace("const a = 2;", "const a = 3;"));
+
+        assert_ne!(
+            diff_digest(&before.text),
+            diff_digest(&after.text),
+            "the whole-diff digest does move, which is the defect"
+        );
+        assert_eq!(
+            learning_slice_digest(&one, &before),
+            learning_slice_digest(&one, &after),
+            "the slice digest must not"
+        );
+    }
+
+    /// Touch the scoped file and the gate has to come back.
+    #[test]
+    fn a_scoped_edit_moves_the_slice_digest() {
+        let one = scoped(vec![glob(".github/workflows/**")]);
+        let before = Diff::parse(DIFF);
+        let after = Diff::parse(&DIFF.replace("checkout@v7", "checkout@v6"));
+
+        assert_ne!(
+            learning_slice_digest(&one, &before),
+            learning_slice_digest(&one, &after)
+        );
+    }
+
+    /// A global rule keeps exactly today's behaviour: its slice digest
+    /// moves with any byte, because it scopes every byte.
+    #[test]
+    fn a_global_rule_still_moves_with_any_byte() {
+        let one = scoped(vec![Scope::global()]);
+        let before = Diff::parse(DIFF);
+        let after = Diff::parse(&DIFF.replace("const a = 2;", "const a = 3;"));
+
+        assert_ne!(
+            learning_slice_digest(&one, &before),
+            learning_slice_digest(&one, &after)
+        );
+    }
+
+    /// The digest is a hash, not the slice. It has to be stable across
+    /// builds, because it is compared against rows an older binary wrote.
+    #[test]
+    fn the_slice_digest_is_the_hash_of_the_slice() {
+        let one = scoped(vec![glob(".github/workflows/**")]);
+        let diff = Diff::parse(DIFF);
+
+        assert_eq!(
+            learning_slice_digest(&one, &diff),
+            diff_digest(&diff.slice(&[".github/workflows/deploy.yml".to_string()]))
+        );
     }
 }

@@ -4005,3 +4005,239 @@ fn hook_and_ingest_conflict() {
     let output = sandbox.run(&["audit", "--hook", "codex", "--ingest"]);
     output.assert_code(2);
 }
+
+// --- per-learning coverage: section 9.2, *The digest has to match the
+// --- granularity of selection* --------------------------------------
+
+/// A repo with two files and one learning scoped to only one of them.
+/// The workflow file is committed, so it stays inside a `merge-base`
+/// range for the life of the branch — the ledger's exact shape.
+fn scoped_gate_repo(sandbox: &Sandbox) -> PathBuf {
+    let root = sandbox.repo("scoped", Some("git@github.com:Owner/Repo.git"));
+    std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    std::fs::write(
+        root.join(".github/workflows/deploy.yml"),
+        "steps:\n  - uses: actions/checkout@v3\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src.ts"), "const a = 0;\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "two"]);
+
+    // Both files are now tracked and both are modified in the tree, so
+    // the diff carries the workflow the rule scopes *and* a source file
+    // it does not — the ledger's shape, where the workflow sat inside the
+    // range for the life of the branch while other files kept moving.
+    std::fs::write(
+        root.join(".github/workflows/deploy.yml"),
+        "steps:\n  - uses: actions/checkout@v4\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src.ts"), "const a = 1;\n").unwrap();
+    sandbox.record(&["--activate", "--scope", "glob:.github/workflows/**"]);
+    root
+}
+
+/// Take the audit id out of a blocked Claude Code pointer.
+fn pointer_audit_id(output: &Output) -> String {
+    output
+        .stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("audit-id: "))
+        .expect("the pointer names the audit")
+        .to_string()
+}
+
+/// The measured defect. Spec 9.2, *The digest has to match the
+/// granularity of selection*.
+///
+/// Eleven selections of one `glob:.github/workflows/**` rule across 75
+/// minutes, the first finding three violations and every one after it
+/// ingesting clean, because each turn edited a source file the rule does
+/// not scope and the whole-diff digest moved with it.
+#[test]
+fn an_edit_outside_a_rules_scope_does_not_re_nag_it() {
+    let sandbox = Sandbox::new();
+    let root = scoped_gate_repo(&sandbox);
+    let id = sandbox.learnings()[0]["id"].as_str().unwrap().to_string();
+
+    let first = hook(&sandbox, &root, "claude-code", "{}");
+    first.assert_code(2);
+    let audit_id = pointer_audit_id(&first);
+    sandbox
+        .pipe(
+            &["audit", "--ingest"],
+            &format!(
+                r#"{{"audit_id":"{audit_id}","findings":[{{"learning_id":"{id}","outcome":"fixed"}}]}}"#
+            ),
+        )
+        .assert_code(0);
+
+    // A later turn edits a path the rule does not scope. The whole diff
+    // changed; the rule's slice did not.
+    std::fs::write(root.join("src.ts"), "const a = 2;\n").unwrap();
+
+    let second = hook(&sandbox, &root, "claude-code", "{}");
+    second.assert_code(0);
+    assert!(second.stdout.is_empty(), "{}", second.stdout);
+
+    let conn = rusqlite::Connection::open(sandbox.db()).unwrap();
+    let audits: i64 = conn
+        .query_row("SELECT COUNT(*) FROM audits", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(audits, 1, "an unscoped edit opens no second audits row");
+    let selected: i64 = conn
+        .query_row("SELECT times_selected FROM learnings", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        selected, 1,
+        "a gate suppressed at the coverage step moves no counter"
+    );
+}
+
+/// And touching the scoped path brings it straight back, or the rule
+/// could never fire again on the file it is about.
+#[test]
+fn an_edit_inside_a_rules_scope_brings_it_back() {
+    let sandbox = Sandbox::new();
+    let root = scoped_gate_repo(&sandbox);
+    let id = sandbox.learnings()[0]["id"].as_str().unwrap().to_string();
+
+    let first = hook(&sandbox, &root, "claude-code", "{}");
+    first.assert_code(2);
+    let audit_id = pointer_audit_id(&first);
+    sandbox
+        .pipe(
+            &["audit", "--ingest"],
+            &format!(
+                r#"{{"audit_id":"{audit_id}","findings":[{{"learning_id":"{id}","outcome":"fixed"}}]}}"#
+            ),
+        )
+        .assert_code(0);
+
+    std::fs::write(
+        root.join(".github/workflows/deploy.yml"),
+        "steps:\n  - uses: actions/checkout@v7\n",
+    )
+    .unwrap();
+
+    hook(&sandbox, &root, "claude-code", "{}").assert_code(2);
+}
+
+/// A learning nobody answered has no covered row, so it still fires.
+/// Both halves of the original condition survive the change of key.
+#[test]
+fn an_unanswered_learning_is_not_covered_by_its_slice() {
+    let sandbox = Sandbox::new();
+    let root = scoped_gate_repo(&sandbox);
+
+    hook(&sandbox, &root, "claude-code", "{}").assert_code(2);
+    hook(&sandbox, &root, "claude-code", "{}").assert_code(2);
+}
+
+/// One uncovered learning blocks, and the prompt then carries **every**
+/// selected learning rather than only the uncovered one. A reviewer
+/// handed two rules has to re-read both to know they still hold.
+#[test]
+fn one_uncovered_learning_blocks_and_the_prompt_keeps_them_all() {
+    let sandbox = Sandbox::new();
+    let root = scoped_gate_repo(&sandbox);
+    let scoped_id = sandbox.learnings()[0]["id"].as_str().unwrap().to_string();
+
+    let first = hook(&sandbox, &root, "claude-code", "{}");
+    first.assert_code(2);
+    let audit_id = pointer_audit_id(&first);
+    sandbox
+        .pipe(
+            &["audit", "--ingest"],
+            &format!(
+                r#"{{"audit_id":"{audit_id}","findings":[{{"learning_id":"{scoped_id}","outcome":"fixed"}}]}}"#
+            ),
+        )
+        .assert_code(0);
+
+    // A second, global learning arrives after the first was settled. It
+    // has never been covered, so the gate returns.
+    let global_id = sandbox.run(&[
+        "record",
+        "--title",
+        "no dbg",
+        "--rule",
+        "drop dbg",
+        "--rationale",
+        "noise",
+        "--activate",
+    ]);
+    global_id.assert_code(0);
+
+    let second = hook(&sandbox, &root, "claude-code", "{}");
+    second.assert_code(2);
+    let second_id = pointer_audit_id(&second);
+
+    let prompt = sandbox.run(&["audit", "--fetch", &second_id]);
+    prompt.assert_code(0);
+    assert!(
+        prompt.stdout.contains("no dbg"),
+        "the uncovered rule must be there: {}",
+        prompt.stdout
+    );
+    assert!(
+        prompt.stdout.contains("prefer sd"),
+        "the covered rule must be there too: {}",
+        prompt.stdout
+    );
+
+    let conn = rusqlite::Connection::open(sandbox.db()).unwrap();
+    let sent: i64 = conn
+        .query_row(
+            "SELECT sent FROM audits WHERE id = ?1",
+            [&second_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sent, 2, "both learnings were sent");
+}
+
+/// Coverage rows are per learning, and they name the slice they covered.
+#[test]
+fn coverage_is_recorded_per_learning() {
+    let sandbox = Sandbox::new();
+    let root = scoped_gate_repo(&sandbox);
+
+    hook(&sandbox, &root, "claude-code", "{}").assert_code(2);
+
+    let conn = rusqlite::Connection::open(sandbox.db()).unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM audit_coverage", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "one row per learning the prompt carried");
+
+    let (learning_id, digest, repo): (String, String, String) = conn
+        .query_row(
+            "SELECT learning_id, slice_digest, repo FROM audit_coverage",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(learning_id, sandbox.learnings()[0]["id"].as_str().unwrap());
+    assert_eq!(digest.len(), 64, "a sha256 hex digest");
+    assert_eq!(repo, "github.com/owner/repo");
+}
+
+/// A dry run still writes nothing, coverage rows included.
+#[test]
+fn a_dry_run_records_no_coverage() {
+    let sandbox = Sandbox::new();
+    let root = scoped_gate_repo(&sandbox);
+
+    sandbox
+        .cmd_at(root.clone(), &["audit", "--dry-run"])
+        .output()
+        .unwrap();
+
+    let conn = rusqlite::Connection::open(sandbox.db()).unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM audit_coverage", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+}

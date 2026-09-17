@@ -198,17 +198,66 @@ ingested against. Both halves matter:
   and an honest clean report ingests zero. Reading `findings = 0` as
   "never answered" re-nags precisely the agent that did the work.
 
-Touch one byte and the digest changes, so the gate returns on its own.
-A rule activated after the fact is the one case it does not notice; that
-is accepted, because keying on the collection too would re-nag every
-turn a rule is edited.
-
 Digest the diff, never the prompt. The prompt carries the rendered
 rules, so a `max_chars` change would re-nag a diff nobody touched.
 
 The check is for **gates**, not every caller: `writ audit` by hand still
 audits. The ingest moment is untouched — a `blocking` finding still
 `open` still refuses the handoff.
+
+## The digest matches the granularity of selection
+
+**"Touch one byte and the digest changes" was the wrong granularity.**
+Schema 4 keyed coverage on the whole diff, while selection matches per
+learning, per path. Those are the same thing only when every active
+learning is `global`. They come apart the moment a rule carries a
+`glob:` scope and the gate carries a `merge-base` range, which is the
+combination *What the gate audits* mandates.
+
+Measured: one branch, 75 minutes, eleven selections of a single rule
+scoped `glob:.github/workflows/**` — the first reporting three
+violations and each of the ten after it ingesting clean. Eleven distinct
+digests, so `covered` never matched once. Every later turn edited a
+source file the rule does not scope, and the whole-diff digest moved
+with it while the rule's own concern had not. The workflow file was
+committed early, so it sat inside the `merge-base` range for the life of
+the branch: the scope kept matching, the digest kept changing, and the
+rule could never settle.
+
+`audit_coverage` (schema 5) holds one row per learning per audit, keyed
+on `slice_digest` — a hash of the hunks of the paths *that learning's*
+`glob:` and `language:` scopes selected, concatenated in sorted-path
+order so the same change hashes the same however git laid it out. A
+`global` scope's slice is the whole diff, which is deliberate rather
+than a special case: a global rule does care about every byte.
+
+A gate passes when **every** selected learning is covered — a row with
+the same repo, learning and slice digest whose parent audit has
+`ingested_at` set. Both halves of the schema-4 condition survive: a
+learning nobody answered has no covered row and still fires. One
+uncovered learning blocks, and the prompt then carries every selected
+learning rather than only the uncovered ones, because a reviewer handed
+three rules and told to re-check one has to re-read the other two to
+know they still hold.
+
+`audits.diff_digest` stays. It is evidence of what an audit looked at
+(P4), and it is still the key for the all-`global` case.
+
+A rule activated after the fact has no coverage row, so unlike schema 4
+this *does* notice it, and fires. That is the correct reading and not a
+regression: the rule has never been put in front of anyone.
+
+**Check coverage after selecting, and move no counters when it
+suppresses.** It cannot run before: the slices are not known until the
+learnings are. So the order is cap, select, rank, budget, coverage,
+emit. A gate suppressed at the coverage step opens no `audits` row and
+leaves `times_selected` alone — crediting a rule that was selected and
+then suppressed records an appearance no reviewer saw, which is the same
+defect the retry cap had before it was hoisted above `select`.
+
+This buys nothing in selection cost, and no test may imply it does
+(invariant 5). Selection still runs in full. What is saved is the prompt
+render, the nag, and the counter.
 
 ## Two surfaces, one gate
 
