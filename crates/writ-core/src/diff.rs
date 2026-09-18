@@ -3,6 +3,8 @@
 //! Running `git diff` is I/O and lives in `writ-cli`. Reading the text it
 //! prints is pure and lives here. Invariant 1.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::glob::glob_match;
 
 /// The one extension-to-language allowlist used by scoping and telemetry.
@@ -71,6 +73,12 @@ pub struct Diff {
     pub added: String,
     /// The removed lines only, with their `-` removed.
     pub removed: String,
+    /// The diff text belonging to each path, keyed by path.
+    ///
+    /// A `BTreeMap` because [`Diff::slice`] concatenates in sorted-path
+    /// order, so the digest a slice hashes to does not depend on the order
+    /// git happened to name the files in.
+    pub sections: BTreeMap<String, String>,
 }
 
 impl Diff {
@@ -79,14 +87,48 @@ impl Diff {
         let mut paths: Vec<String> = Vec::new();
         let mut added = String::new();
         let mut removed = String::new();
+        let mut sections: BTreeMap<String, String> = BTreeMap::new();
         // File headers (`---` / `+++`) only appear outside hunks. Inside a
         // hunk a content line can begin `-- `, which the patch renders as
         // `--- …` and must not be mistaken for a header.
         let mut in_hunk = false;
+        // The lines of the file currently being read, and the path they
+        // belong to once a header names it. The path arrives *after* the
+        // `diff --git` line, so the buffer fills before it has a key.
+        let mut buffer = String::new();
+        let mut buffer_path: Option<String> = None;
+
+        // Close the open section, if a header has named one.
+        macro_rules! flush {
+            () => {
+                if let Some(path) = buffer_path.take() {
+                    sections
+                        .entry(path)
+                        .or_default()
+                        .push_str(std::mem::take(&mut buffer).as_str());
+                } else {
+                    buffer.clear();
+                }
+            };
+        }
 
         for line in text.lines() {
+            // A `diff --git` line is the only section boundary. `git diff`
+            // always emits one per file, and it is also the only line that
+            // clears `in_hunk` — so a bare unified diff with no such header
+            // reads as one section, exactly as it already reads as one file.
+            // Loosening this to treat an out-of-hunk `--- ` as a boundary
+            // would mean clearing `in_hunk` on it too, and that is the
+            // guard keeping a `--- ` content line from being read as a
+            // header.
             if line.starts_with("diff ") {
+                flush!();
                 in_hunk = false;
+            }
+            buffer.push_str(line);
+            buffer.push('\n');
+
+            if line.starts_with("diff ") {
                 continue;
             }
             if line.starts_with("@@") {
@@ -95,20 +137,25 @@ impl Diff {
             }
             if !in_hunk {
                 if let Some(rest) = line.strip_prefix("+++ ") {
-                    if let Some(path) = strip_prefix_marker(rest)
-                        && !paths.iter().any(|seen| seen == path)
-                    {
-                        paths.push(path.to_string());
+                    if let Some(path) = strip_prefix_marker(rest) {
+                        if !paths.iter().any(|seen| seen == path) {
+                            paths.push(path.to_string());
+                        }
+                        // The post-image name wins: a rename's hunk belongs
+                        // to the file as it now exists, which is the name a
+                        // `glob:` scope is written against.
+                        buffer_path = Some(path.to_string());
                     }
                     continue;
                 }
                 if let Some(rest) = line.strip_prefix("--- ") {
                     // A deletion has `+++ /dev/null`, so the old side is the
                     // only place the path appears.
-                    if let Some(path) = strip_prefix_marker(rest)
-                        && !paths.iter().any(|seen| seen == path)
-                    {
-                        paths.push(path.to_string());
+                    if let Some(path) = strip_prefix_marker(rest) {
+                        if !paths.iter().any(|seen| seen == path) {
+                            paths.push(path.to_string());
+                        }
+                        buffer_path.get_or_insert_with(|| path.to_string());
                     }
                     continue;
                 }
@@ -122,12 +169,39 @@ impl Diff {
             }
         }
 
+        flush!();
+
         Self {
             text: text.to_string(),
             paths,
             added,
             removed,
+            sections,
         }
+    }
+
+    /// The diff text belonging to `paths` alone, in sorted-path order.
+    ///
+    /// This is what a learning's coverage digest hashes. Spec section 9.2,
+    /// **The digest has to match the granularity of selection**: keying
+    /// coverage on the whole diff re-served a `glob:`-scoped rule on every
+    /// turn that edited any other file, because the whole-diff digest moved
+    /// and the rule's own concern had not.
+    ///
+    /// Sorted rather than in git's order so the digest is reproducible: the
+    /// same change has to hash the same however git chose to lay it out.
+    /// A path the diff does not carry contributes nothing rather than
+    /// erroring, which is what a `language:` scope naming a language the
+    /// diff no longer touches leaves behind.
+    pub fn slice(&self, paths: &[String]) -> String {
+        let wanted: BTreeSet<&String> = paths.iter().collect();
+        let mut out = String::new();
+        for (path, section) in &self.sections {
+            if wanted.contains(path) {
+                out.push_str(section);
+            }
+        }
+        out
     }
 
     /// Whether the diff changed nothing. Section 5.7 gives this exit `7`.
@@ -290,5 +364,102 @@ diff --git a/q.sql b/q.sql
         let diff = Diff::parse(SAMPLE);
         assert!(diff.matches_glob("lib/**"));
         assert!(!diff.matches_glob("web/**"));
+    }
+}
+
+#[cfg(test)]
+mod slice_tests {
+    use super::*;
+
+    const TWO_FILES: &str = "diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml\n\
+        --- a/.github/workflows/deploy.yml\n\
+        +++ b/.github/workflows/deploy.yml\n\
+        @@ -1,1 +1,1 @@\n\
+        -uses: actions/checkout@v4\n\
+        +uses: actions/checkout@v7\n\
+        diff --git a/src/app.ts b/src/app.ts\n\
+        --- a/src/app.ts\n\
+        +++ b/src/app.ts\n\
+        @@ -1,1 +1,1 @@\n\
+        -const a = 1;\n\
+        +const a = 2;\n";
+
+    /// A slice is the hunks of the paths a rule's scopes selected, and
+    /// nothing else. Spec 9.2, *The digest has to match the granularity
+    /// of selection*.
+    #[test]
+    fn a_slice_carries_only_the_paths_it_was_asked_for() {
+        let diff = Diff::parse(TWO_FILES);
+        let slice = diff.slice(&[".github/workflows/deploy.yml".to_string()]);
+
+        assert!(slice.contains("checkout@v7"), "{slice}");
+        assert!(
+            !slice.contains("const a"),
+            "a slice must not carry an unscoped path: {slice}"
+        );
+    }
+
+    /// Sorted-path order, so the digest is reproducible whatever order
+    /// git named the files in.
+    #[test]
+    fn a_slice_is_ordered_by_path_not_by_git() {
+        let diff = Diff::parse(TWO_FILES);
+        let both = diff.slice(&[
+            "src/app.ts".to_string(),
+            ".github/workflows/deploy.yml".to_string(),
+        ]);
+        let reversed = diff.slice(&[
+            ".github/workflows/deploy.yml".to_string(),
+            "src/app.ts".to_string(),
+        ]);
+
+        assert_eq!(both, reversed);
+        assert!(
+            both.find(".github").unwrap() < both.find("src/app.ts").unwrap(),
+            "{both}"
+        );
+    }
+
+    /// The whole diff is a slice too, which is what a `global` scope asks
+    /// for. It must equal the text git printed, not a rebuild of it.
+    #[test]
+    fn slicing_every_path_is_the_whole_diff() {
+        let diff = Diff::parse(TWO_FILES);
+        let slice = diff.slice(&diff.paths);
+        for needle in ["checkout@v7", "const a = 2;"] {
+            assert!(slice.contains(needle), "{needle} missing from {slice}");
+        }
+    }
+
+    /// The measured defect: an edit in a path no rule scopes must leave
+    /// that rule's slice alone.
+    #[test]
+    fn an_edit_outside_the_slice_does_not_change_it() {
+        let before = Diff::parse(TWO_FILES);
+        let after = Diff::parse(&TWO_FILES.replace("const a = 2;", "const a = 3;"));
+        let scoped = [".github/workflows/deploy.yml".to_string()];
+
+        assert_ne!(before.text, after.text, "the diffs do differ");
+        assert_eq!(before.slice(&scoped), after.slice(&scoped));
+    }
+
+    /// And an edit inside it must change it, or the gate never returns.
+    #[test]
+    fn an_edit_inside_the_slice_changes_it() {
+        let before = Diff::parse(TWO_FILES);
+        let after = Diff::parse(&TWO_FILES.replace("checkout@v7", "checkout@v6"));
+        let scoped = [".github/workflows/deploy.yml".to_string()];
+
+        assert_ne!(before.slice(&scoped), after.slice(&scoped));
+    }
+
+    /// A content line reading `--- ` inside a hunk is not a file header.
+    #[test]
+    fn a_dashed_content_line_does_not_split_a_slice() {
+        let text = "diff --git a/one.md b/one.md\n--- a/one.md\n+++ b/one.md\n\
+                    @@ -1,2 +1,2 @@\n--- old bullet\n+-- new bullet\n";
+        let diff = Diff::parse(text);
+        assert_eq!(diff.paths, ["one.md"]);
+        assert!(diff.slice(&["one.md".to_string()]).contains("new bullet"));
     }
 }

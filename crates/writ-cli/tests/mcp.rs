@@ -172,7 +172,7 @@ fn recording_through_mcp_matches_recording_through_the_cli() {
     let cli_home = Sandbox::new();
     let through_cli = cli_home.record_json(&argv_of("writ_record", &arguments));
 
-    assert_eq!(anonymize(&through_mcp), anonymize(&through_cli));
+    assert_eq!(anonymize(&through_mcp["recorded"]), anonymize(&through_cli));
     // And both actually wrote the same row.
     assert_eq!(
         anonymize(&mcp_home.learnings()),
@@ -444,7 +444,7 @@ fn an_agent_can_attach_an_exemplar_pair_through_mcp() {
     );
     server.close();
 
-    let id = written[0]["id"].as_str().unwrap();
+    let id = written["recorded"][0]["id"].as_str().unwrap();
     let shown = home.show(id);
     let exemplars = shown["exemplars"].as_array().unwrap();
     assert_eq!(exemplars.len(), 2);
@@ -494,6 +494,29 @@ fn an_unknown_argument_is_refused() {
 }
 
 // --- the protocol -------------------------------------------------------
+
+/// The protocol says `structuredContent` is an object, and Claude Code
+/// refuses a result whose `structuredContent` is anything else. `writ
+/// record` answers a list, so the list rides under `recorded`. Without
+/// this the write lands and the agent is told it failed, and a retry
+/// records the learning twice.
+#[test]
+fn a_record_result_is_an_object_the_host_accepts() {
+    let home = Sandbox::new();
+    let mut server = home.server();
+    let raw = server.call_raw(
+        "writ_record",
+        &json!({ "title": "t", "rule": "r", "rationale": "w", "activate": true }),
+    );
+    server.close();
+
+    assert!(raw.get("isError").is_none(), "{raw}");
+    let structured = &raw["structuredContent"];
+    assert!(structured.is_object(), "{structured}");
+    assert_eq!(structured["recorded"][0]["reinforced"], false);
+    let text: Value = serde_json::from_str(raw["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(&text, structured);
+}
 
 #[test]
 fn the_server_initializes_and_lists_its_tools() {

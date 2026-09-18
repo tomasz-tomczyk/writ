@@ -328,29 +328,6 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
 
     let mut store = Store::open(db)?;
 
-    // A gate over a diff that was already audited and answered stops
-    // here, before the selection costs anything and before an `audits`
-    // row or a counter moves. Spec section 9.2, **The gate does not
-    // re-nag a diff it already covered**.
-    //
-    // Gates only. A human running `writ audit` by hand is asking for an
-    // audit and gets one; the spec says *a gate* passes, not every
-    // caller. `--dry-run` is a preview of what a gate would select, so it
-    // is not short-circuited either.
-    if args.hook.is_some() && !args.dry_run && store.covered(&scope.identity, &scope.diff_digest)? {
-        return Ok(Selection {
-            audit_id: COVERED_ID.to_string(),
-            scope,
-            considered: 0,
-            selected: Vec::new(),
-            notices: vec![
-                "writ: this diff was already audited and answered. Nothing new to review."
-                    .to_string(),
-            ],
-            telemetry,
-        });
-    }
-
     let mut candidates = store.candidates(&scope)?;
     let considered = candidates.len();
     let mut notices = Vec::new();
@@ -393,6 +370,42 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     telemetry
         .buckets
         .push(BucketMetric::AuditSent(selected.len() as u64));
+
+    // A gate whose every selected learning was already audited and
+    // answered against the slice it scopes stops here, before an `audits`
+    // row opens and before a counter moves. Spec section 9.2, **The digest
+    // has to match the granularity of selection**.
+    //
+    // This cannot run before the selection: the slices are not known until
+    // the learnings are. So the order is cap, select, rank, budget,
+    // coverage, emit — and the suppressed path must move no counters.
+    // Crediting `times_selected` to a learning selected and then
+    // suppressed records an appearance no reviewer saw, which is the
+    // conflation the two counter pairs exist to prevent and the defect the
+    // retry cap itself had until it was hoisted above `select`.
+    //
+    // Gates only. A human running `writ audit` by hand is asking for an
+    // audit and gets one; the spec says *a gate* passes, not every caller.
+    // `--dry-run` is a preview of what a gate would select, so it is not
+    // short-circuited either.
+    if args.hook.is_some()
+        && !args.dry_run
+        && !selected.is_empty()
+        && store.all_covered(&scope.identity, &scope.diff, &selected)?
+    {
+        return Ok(Selection {
+            audit_id: COVERED_ID.to_string(),
+            scope,
+            considered: 0,
+            selected: Vec::new(),
+            notices: vec![
+                "writ: every rule that applies here was already audited and answered. \
+                 Nothing new to review."
+                    .to_string(),
+            ],
+            telemetry,
+        });
+    }
 
     // A dry run writes nothing: no `audits` row and no `times_selected`.
     // Seeing what an audit would select had no cost-free path before, and

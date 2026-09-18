@@ -53,9 +53,11 @@ finding on the next audit, forever, because writ cannot tell one turn
 from the next.
 
 The cap bounds one stop-cycle only: your next message clears
-`stop_hook_active`. What stops the gate re-nagging an unchanged diff
-across turns is `audits.diff_digest` — once a diff has been audited and
-the findings ingested, the gate passes on it until the diff changes.
+`stop_hook_active`. What stops the gate re-nagging across turns is
+`audit_coverage` — once a rule has been audited and the findings
+ingested, the gate passes on that rule until the part of the diff it
+actually scopes changes. So editing a source file does not re-serve a
+rule scoped to `.github/workflows/**`, while editing a workflow does.
 
 ## Do not also run `writ install claude-code`
 
