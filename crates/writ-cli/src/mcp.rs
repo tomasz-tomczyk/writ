@@ -593,9 +593,10 @@ impl Server {
                     record::execute_with_telemetry(&line.inner, &self.db, &self.config)
                         .map_err(cause)?;
                 self.observe(batch, CommandMetric::Record);
-                Ok(Answer::json(
-                    serde_json::to_value(&written).expect("Recorded serializes"),
-                ))
+                // `structuredContent` must be an object, and Claude Code
+                // refuses a result whose `structuredContent` is not one. A
+                // record answers a list, so the list rides under `recorded`.
+                Ok(Answer::json(json!({ "recorded": written })))
             }
             "audit" => {
                 let line = AuditLine::try_parse_from(argv).map_err(usage)?;
