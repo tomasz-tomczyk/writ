@@ -1,6 +1,7 @@
 //! The `--format` flag. Spec section 5: json is available on every command.
 
 use std::fmt;
+use std::io::Write;
 use std::str::FromStr;
 
 /// How a command prints its result.
@@ -115,5 +116,32 @@ impl fmt::Display for AuditFormat {
             Self::Json => "json",
             Self::Text => "text",
         })
+    }
+}
+
+/// Print one result in the requested format.
+///
+/// Every command reached for the same shape — lock stdout, match the
+/// format, serialize or render — and wrote it out again, so the `expect`
+/// message and the trailing newline were decided seven times. The text
+/// side takes a closure because only the command knows how a person
+/// should read its result.
+///
+/// A write to a closed stdout is dropped rather than raised: a caller
+/// that pipes into `head` closes the pipe, and that is not a failure of
+/// the command that already did its work.
+pub fn emit<T, F>(format: Format, value: &T, text: F)
+where
+    T: serde::Serialize,
+    F: FnOnce(&mut dyn std::io::Write),
+{
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    match format {
+        Format::Json => {
+            let json = serde_json::to_string(value).expect("the result serializes");
+            let _ = writeln!(out, "{json}");
+        }
+        Format::Text => text(&mut out),
     }
 }

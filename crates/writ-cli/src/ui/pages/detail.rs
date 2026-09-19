@@ -3,7 +3,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use writ_core::{
-    Error, Exemplar, ExemplarKind, Finding, LearningUpdate, NewExemplar, Outcome, Scope, Status,
+    Error, Exemplar, ExemplarKind, Finding, Learning, LearningUpdate, NewExemplar, Outcome, Scope,
+    Status,
 };
 
 use crate::ui::AppState;
@@ -457,7 +458,8 @@ pub async fn post(
     let form = SaveForm::from_fields(fields);
     let result = with_store(&state, |store| {
         let exemplars = store.exemplars_of(&id)?;
-        let update = build_update(&form, &exemplars)?;
+        let current = store.get(&id)?;
+        let update = build_update(&form, &current, &exemplars)?;
         let status = (form.action.as_deref() == Some("save_activate")).then_some(Status::Active);
         store.update_learning_and_set_status(&id, &update, status)
     });
@@ -506,7 +508,11 @@ pub async fn archive(
     }
 }
 
-fn build_update(form: &SaveForm, current_exemplars: &[Exemplar]) -> Result<LearningUpdate, Error> {
+fn build_update(
+    form: &SaveForm,
+    current: &Learning,
+    current_exemplars: &[Exemplar],
+) -> Result<LearningUpdate, Error> {
     let matcher_kind = form
         .matcher_kind
         .as_deref()
@@ -529,6 +535,10 @@ fn build_update(form: &SaveForm, current_exemplars: &[Exemplar]) -> Result<Learn
 
     let exemplars = merge_visible_exemplars(form, current_exemplars);
 
+    // The form always submits this field, so the fallback is for a
+    // partial post. Keeping the current value is what the CLI does, and
+    // it is the safe direction: defaulting to `both` would silently widen
+    // a rule that was deliberately narrowed.
     let sides = match form
         .sides
         .as_deref()
@@ -536,7 +546,7 @@ fn build_update(form: &SaveForm, current_exemplars: &[Exemplar]) -> Result<Learn
         .filter(|s| !s.is_empty())
     {
         Some(text) => text.parse()?,
-        None => writ_core::Sides::Both,
+        None => current.sides,
     };
 
     Ok(LearningUpdate {
@@ -566,14 +576,14 @@ fn merge_visible_exemplars(form: &SaveForm, current: &[Exemplar]) -> Vec<NewExem
             ExemplarKind::Bad => (&form.bad_snippet, !std::mem::replace(&mut saw_bad, true)),
         };
         if !first || submitted.is_none() {
-            exemplars.push(as_new_exemplar(exemplar));
+            exemplars.push(NewExemplar::from(exemplar));
             continue;
         }
         if let Some(snippet) = submitted
             .as_deref()
             .filter(|snippet| !snippet.trim().is_empty())
         {
-            let mut edited = as_new_exemplar(exemplar);
+            let mut edited = NewExemplar::from(exemplar);
             edited.snippet = snippet.to_string();
             exemplars.push(edited);
         }
@@ -607,15 +617,6 @@ fn merge_visible_exemplars(form: &SaveForm, current: &[Exemplar]) -> Vec<NewExem
     }
 
     exemplars
-}
-
-fn as_new_exemplar(exemplar: &Exemplar) -> NewExemplar {
-    NewExemplar {
-        kind: exemplar.kind,
-        language: exemplar.language.clone(),
-        snippet: exemplar.snippet.clone(),
-        note: exemplar.note.clone(),
-    }
 }
 
 fn redirect(path: &str) -> Response {

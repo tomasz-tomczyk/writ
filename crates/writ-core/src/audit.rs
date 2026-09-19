@@ -105,6 +105,20 @@ pub fn matched_paths(learning: &Learning, diff: &Diff) -> Vec<String> {
 /// the learning does not scope leaves it untouched and an edit in a path it
 /// does scope moves it. That is the whole correction in section 9.2: the
 /// key has to be as narrow as the match that produced it.
+/// The coverage keys for a whole selection, in selection order.
+///
+/// The gate needs these twice — once to ask whether every learning is
+/// already covered, and once to record what this audit asked about — and
+/// each one materializes a slice of the diff and hashes it. Computing them
+/// once and carrying them is what keeps a blocked turn from building and
+/// hashing the same bytes twice.
+pub fn slice_digests(diff: &Diff, selected: &[Selected]) -> Vec<String> {
+    selected
+        .iter()
+        .map(|one| learning_slice_digest(&one.learning, diff))
+        .collect()
+}
+
 pub fn learning_slice_digest(learning: &Learning, diff: &Diff) -> String {
     diff_digest(&diff.slice(&matched_paths(learning, diff)))
 }
@@ -224,12 +238,22 @@ pub fn rule_block(position: usize, selected: &Selected) -> String {
     block.push_str(&format!("scopes: {scopes}\n"));
     block.push_str(&format!("rule: {}\n", selected.learning.rule));
     block.push_str(&format!("why: {}\n", selected.learning.rationale));
+    // A fence with no language is a fence the reader's tooling cannot
+    // highlight and the model has to infer from the code. The exemplar
+    // names its own language when it was read from a file; otherwise the
+    // learning's `language:` scope is the best answer available, and a
+    // rule scoped to one language cannot have an exemplar in another.
+    let scoped_language = selected.learning.scope_language();
     for exemplar in &selected.exemplars {
         let label = match exemplar.kind {
             ExemplarKind::Good => "good",
             ExemplarKind::Bad => "bad",
         };
-        let language = exemplar.language.clone().unwrap_or_default();
+        let language = exemplar
+            .language
+            .as_deref()
+            .or(scoped_language)
+            .unwrap_or_default();
         block.push_str(&format!("{label}:\n```{language}\n"));
         block.push_str(exemplar.snippet.trim_end_matches('\n'));
         block.push_str("\n```\n");
@@ -488,6 +512,15 @@ pub struct Ingested {
     /// be waved past. `rejected` never reaches here: `--ingest` refuses
     /// it, because the developer owns that word.
     pub unfixed_blocking: usize,
+    /// The ids of the findings this ingest left `open`, in the order they
+    /// were reported.
+    ///
+    /// `--resolve` settles a finding by its id, and until this existed no
+    /// caller was ever told one: ids appear only on the web UI detail
+    /// page, which P5 reserves for a human and an audit may not open. So
+    /// the one surface that can answer the question an `open` finding
+    /// asks could not name the finding it was answering.
+    pub open: Vec<String>,
 }
 
 #[cfg(test)]
@@ -637,6 +670,62 @@ mod tests {
             added_block.contains("sides: added\n"),
             "narrow sides must reach the reviewer: {added_block}"
         );
+    }
+
+    /// An exemplar's fence carries a language, so the snippet reaches the
+    /// reviewer as code rather than as text.
+    ///
+    /// The column had a reader here and no writer anywhere, so every
+    /// fence rendered bare. The learning's own `language:` scope answers
+    /// it whenever the exemplar does not.
+    #[test]
+    fn an_exemplar_fence_is_labelled_from_the_exemplar_or_the_scope() {
+        let exemplar = |language: Option<&str>| Exemplar {
+            id: "e".into(),
+            kind: ExemplarKind::Bad,
+            language: language.map(str::to_string),
+            snippet: "x = 1".into(),
+            note: None,
+        };
+        let language = |value: &str| Scope {
+            kind: ScopeKind::Language,
+            value: value.to_string(),
+        };
+
+        // What the exemplar knows wins.
+        let mut scoped = learning("a", true);
+        scoped.scopes = vec![language("elixir")];
+        let block = rule_block(
+            1,
+            &Selected {
+                learning: scoped.clone(),
+                exemplars: vec![exemplar(Some("rust"))],
+            },
+        );
+        assert!(block.contains("```rust\n"), "{block}");
+
+        // Otherwise the single `language:` scope answers.
+        let block = rule_block(
+            1,
+            &Selected {
+                learning: scoped,
+                exemplars: vec![exemplar(None)],
+            },
+        );
+        assert!(block.contains("```elixir\n"), "{block}");
+
+        // Two languages name no one language, so the fence stays bare
+        // rather than claiming the wrong one.
+        let mut ambiguous = learning("a", true);
+        ambiguous.scopes = vec![language("elixir"), language("rust")];
+        let block = rule_block(
+            1,
+            &Selected {
+                learning: ambiguous,
+                exemplars: vec![exemplar(None)],
+            },
+        );
+        assert!(block.contains("```\n"), "{block}");
     }
 
     #[test]

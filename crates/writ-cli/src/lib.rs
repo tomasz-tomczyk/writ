@@ -25,10 +25,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use writ_core::{
-    BucketMetric, CommandMetric, CounterMetric, Env, Error, Paths, SurfaceMetric, TelemetryBatch,
-    resolve_paths,
-};
+use writ_core::{CommandMetric, Env, Error, Paths, SurfaceMetric, TelemetryBatch, resolve_paths};
 
 /// A local-first ledger of the steering you give coding agents.
 #[derive(Debug, Parser)]
@@ -207,14 +204,15 @@ fn observe_command(
     code: u8,
     elapsed_ms: u64,
 ) {
-    batch.counters.extend([
-        CounterMetric::Command(command),
-        CounterMetric::Surface(SurfaceMetric::Cli),
-        CounterMetric::ExitCode(code),
-    ]);
-    batch.buckets.push(BucketMetric::CommandMs(elapsed_ms));
-    telemetry::add_collection_size_best_effort(&paths.db, batch);
-    telemetry::record_best_effort(&paths.telemetry_db, batch);
+    telemetry::observe(
+        &paths.db,
+        &paths.telemetry_db,
+        batch,
+        command,
+        SurfaceMetric::Cli,
+        code,
+        Some(elapsed_ms),
+    );
 }
 
 fn process_exit_code(code: ExitCode) -> u8 {

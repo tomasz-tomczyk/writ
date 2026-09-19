@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// One forward-only step. writ never rolls a migration back, so a step is
 /// only ever added, never edited.
@@ -32,6 +32,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 5,
         sql: include_str!("migrations/0005_per_learning_coverage.sql"),
+    },
+    Migration {
+        version: 6,
+        sql: include_str!("migrations/0006_child_table_indexes.sql"),
     },
 ];
 

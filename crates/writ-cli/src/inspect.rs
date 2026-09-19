@@ -4,12 +4,11 @@
 //! Section 5.7 gives "not found" its own code so that a typo in an id can
 //! never read as a usage error or a storage failure.
 
-use std::io::Write;
 use std::path::Path;
 
 use writ_core::{Exemplar, Learning, Result, Status, Store};
 
-use crate::output::Format;
+use crate::output::{self, Format};
 
 /// `writ show ID`.
 #[derive(Debug, clap::Args)]
@@ -41,21 +40,10 @@ pub fn show(args: &ShowArgs, db: &Path) -> Result<()> {
     let learning = store.get(&args.id)?;
     let exemplars = store.exemplars_of(&learning.id)?;
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    match args.format {
-        Format::Json => {
-            let text = serde_json::to_string(&serde_json::json!({
-                "learning": learning,
-                "exemplars": exemplars,
-            }))
-            .expect("Learning serializes");
-            let _ = writeln!(out, "{text}");
-        }
-        Format::Text => {
-            let _ = write!(out, "{}", detail(&learning, &exemplars));
-        }
-    }
+    let report = serde_json::json!({ "learning": learning, "exemplars": exemplars });
+    output::emit(args.format, &report, |out| {
+        let _ = write!(out, "{}", detail(&learning, &exemplars));
+    });
     Ok(())
 }
 
@@ -65,22 +53,11 @@ pub fn archive(args: &ArchiveArgs, db: &Path) -> Result<()> {
     let mut store = Store::open(db)?;
     store.set_status(&args.id, Status::Archived)?;
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    match args.format {
-        Format::Json => {
-            let text = serde_json::to_string(&serde_json::json!({
-                "id": args.id,
-                "status": "archived",
-            }))
-            .expect("the report serializes");
-            let _ = writeln!(out, "{text}");
-        }
-        // crit #446: every write says what it wrote.
-        Format::Text => {
-            let _ = writeln!(out, "archived {}", args.id);
-        }
-    }
+    let report = serde_json::json!({ "id": args.id, "status": "archived" });
+    // crit #446: every write says what it wrote.
+    output::emit(args.format, &report, |out| {
+        let _ = writeln!(out, "archived {}", args.id);
+    });
     Ok(())
 }
 

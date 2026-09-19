@@ -347,6 +347,21 @@ pub struct NewExemplar {
     pub note: Option<String>,
 }
 
+/// A stored exemplar, back in the shape a write takes.
+///
+/// An edit that keeps an exemplar has to hand it back as a new one, and
+/// both the CLI and the web form did that with their own copy of this.
+impl From<&Exemplar> for NewExemplar {
+    fn from(exemplar: &Exemplar) -> Self {
+        Self {
+            kind: exemplar.kind,
+            language: exemplar.language.clone(),
+            snippet: exemplar.snippet.clone(),
+            note: exemplar.note.clone(),
+        }
+    }
+}
+
 /// The editable fields on a stored learning.
 ///
 /// Status, provenance, counters and activation history are deliberately
@@ -680,6 +695,25 @@ pub struct Learning {
     pub last_verified: Option<String>,
     /// Where it applies.
     pub scopes: Vec<Scope>,
+}
+
+impl Learning {
+    /// The one language this learning is scoped to, when there is exactly
+    /// one.
+    ///
+    /// Scopes OR within a kind, so a rule carrying two `language:` rows
+    /// applies to both and neither answers "what language is this snippet
+    /// written in". Only an unambiguous answer is worth having: a wrong
+    /// fence label is worse than a bare one.
+    pub fn scope_language(&self) -> Option<&str> {
+        let mut languages = self
+            .scopes
+            .iter()
+            .filter(|scope| scope.kind == ScopeKind::Language)
+            .map(|scope| scope.value.as_str());
+        let first = languages.next()?;
+        languages.next().is_none().then_some(first)
+    }
 }
 
 /// What a write did, so the caller can report it. crit #446: every write

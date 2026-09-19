@@ -780,6 +780,30 @@ impl McpServer {
         result["structuredContent"].clone()
     }
 
+    /// Send a raw frame and read the next reply, without ever blocking on
+    /// one that may not come.
+    ///
+    /// A `ping` follows the frame immediately, so the read has a reply
+    /// waiting either way. If the frame under test was answered, its reply
+    /// is the one that comes back; if it was silently dropped, the ping's
+    /// reply arrives instead and the caller's assertion fails. The test
+    /// for a hang must fail on regression, not hang CI with it.
+    fn raw_frame(&mut self, frame: &str) -> Value {
+        self.write_line(frame);
+        let ping_id = self.next_id;
+        self.next_id += 1;
+        self.write_line(&json!({ "jsonrpc": "2.0", "id": ping_id, "method": "ping" }).to_string());
+        let first = self.read_reply();
+        if first["id"] == json!(ping_id) {
+            // The frame was dropped. Hand the ping reply back so the
+            // assertion on an error code fails and says so.
+            return first;
+        }
+        let ping = self.read_reply();
+        assert_eq!(ping["id"], json!(ping_id), "expected the ping reply");
+        first
+    }
+
     fn close(mut self) {
         drop(self.child.stdin.take());
         let status = self.child.wait().unwrap();
@@ -803,5 +827,128 @@ fn git(dir: &Path, args: &[&str]) {
         output.status.success(),
         "git {args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The third write the audit tool advertises. Spec section 9.2.
+///
+/// `resolve` sat in the tool list with a description telling the agent it
+/// was the only way to settle an open finding, while the dispatch fell
+/// through to the selection path: the finding stayed open, a second
+/// `audits` row opened, and `times_selected` moved for a call that asked
+/// to settle one column.
+#[test]
+fn the_audit_tool_settles_an_open_finding() {
+    let home = Sandbox::new();
+    let repo = home.repo();
+    let id = home.record_json(&[
+        "--title",
+        "t",
+        "--rule",
+        "r",
+        "--rationale",
+        "why",
+        "--activate",
+    ])[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let report = home.audit_json::<&str>(&repo, &[]);
+    let audit_id = report["audit_id"].as_str().unwrap().to_string();
+
+    let findings = json!({
+        "audit_id": audit_id,
+        "findings": [{ "learning_id": id, "outcome": "open", "detail": "ask the developer" }],
+    });
+    let mut server = home.server_at(&repo);
+    let ingested = server.call("writ_audit", &json!({ "findings": findings }));
+
+    // Ingest names the findings it left open, because `resolve` takes an
+    // id and this is the only surface an agent can learn one from.
+    let finding_id = ingested["open"][0].as_str().unwrap().to_string();
+    let settled = server.call(
+        "writ_audit",
+        &json!({ "resolve": &finding_id, "outcome": "fixed" }),
+    );
+    server.close();
+
+    assert_eq!(settled["finding_id"], finding_id.as_str());
+    assert_eq!(settled["outcome"], "fixed");
+}
+
+/// Invariant 6 through the transport. A frame that is neither a request
+/// nor a notification used to produce no output at all, so a client that
+/// sent one — a batch from a 2025-03-26 negotiation, or anything
+/// malformed of that shape — waited on a reply that was never coming.
+#[test]
+fn a_frame_that_is_not_an_object_is_answered_rather_than_ignored() {
+    let home = Sandbox::new();
+    let repo = home.repo();
+    let mut server = home.server_at(&repo);
+
+    let batch = server.raw_frame(r#"[{"jsonrpc":"2.0","id":2,"method":"ping"}]"#);
+    assert_eq!(batch["error"]["code"], -32600, "{batch}");
+    assert!(batch["id"].is_null(), "{batch}");
+
+    let scalar = server.raw_frame("42");
+    assert_eq!(scalar["error"]["code"], -32600, "{scalar}");
+
+    // A null id is not a usable id, so it is malformed too.
+    let null_id = server.raw_frame(r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#);
+    assert_eq!(null_id["error"]["code"], -32600, "{null_id}");
+
+    // And the session survives all three.
+    let alive = server.request("ping", &json!({}));
+    assert!(alive.get("error").is_none(), "{alive}");
+    server.close();
+}
+
+/// Naming a tool that does not exist is a protocol error, not a tool
+/// error: `isError` is for a tool that ran and failed, so a host that
+/// cannot tell the two apart retries a call that can never succeed.
+#[test]
+fn naming_an_unknown_tool_is_a_protocol_error() {
+    let home = Sandbox::new();
+    let repo = home.repo();
+    let mut server = home.server_at(&repo);
+
+    let unknown = server.request("tools/call", &json!({ "name": "writ_nope" }));
+    assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+
+    let nameless = server.request("tools/call", &json!({}));
+    assert_eq!(nameless["error"]["code"], -32602, "{nameless}");
+    server.close();
+}
+
+/// The write-back document is the payload that moves `times_applied`,
+/// gives `blocking` its teeth and stamps `ingested_at`. Typed as a bare
+/// object, its real shape lived only in rendered prompt text, and this
+/// loop has shipped broken once before.
+#[test]
+fn the_findings_document_and_the_edit_id_are_described_in_the_schema() {
+    let tools: Vec<&Tool> = TOOLS.iter().collect();
+    let schema = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap()
+            .input_schema()
+    };
+
+    // An id is the one thing `writ_edit` cannot run without.
+    assert_eq!(schema("writ_edit")["required"], json!(["id"]));
+
+    let findings = schema("writ_audit")["properties"]["findings"].clone();
+    assert_eq!(findings["required"], json!(["audit_id", "findings"]));
+    let item = &findings["properties"]["findings"]["items"];
+    assert_eq!(
+        item["required"],
+        json!(["learning_id", "detail", "outcome"])
+    );
+    // `rejected` is the developer's word, and `--ingest` refuses it, so
+    // the schema must not offer it to an agent.
+    assert_eq!(
+        item["properties"]["outcome"]["enum"],
+        json!(["fixed", "ignored", "open"])
     );
 }

@@ -38,7 +38,7 @@ sort -u -o "$known" "$known"
 # stop at the README. `-type f` skips the CLAUDE.md symlink, which is the
 # same bytes and would report every failure twice.
 docs=$(find . -type f \( -name README.md -o -name SKILL.md -o -name AGENTS.md \) |
-  grep -v '/target/' | grep -v '/\.worktrees/' | sort)
+  grep -v '/target/' | grep -v '/\.worktrees/' | grep -v '/node_modules/' | sort)
 if [ -z "$docs" ]; then
   echo "check-doc-flags: no README.md, SKILL.md or AGENTS.md found. Nothing was checked." >&2
   exit 1

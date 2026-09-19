@@ -149,7 +149,7 @@ fn build_update(
 ) -> Result<LearningUpdate> {
     let (matcher, matcher_kind) = resolve_matcher(args, current)?;
     let exemplars = if args.example_texts.is_empty() {
-        current_exemplars.iter().map(as_new_exemplar).collect()
+        current_exemplars.iter().map(NewExemplar::from).collect()
     } else {
         record::parse_example_texts(&args.example_texts)?
     };
@@ -207,15 +207,6 @@ fn resolve_matcher(
         None => current.matcher_kind,
     };
     Ok((matcher, matcher_kind))
-}
-
-fn as_new_exemplar(exemplar: &Exemplar) -> NewExemplar {
-    NewExemplar {
-        kind: exemplar.kind,
-        language: exemplar.language.clone(),
-        snippet: exemplar.snippet.clone(),
-        note: exemplar.note.clone(),
-    }
 }
 
 /// Say what was edited. crit #446: no silent no-ops on user data.
