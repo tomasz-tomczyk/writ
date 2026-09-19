@@ -5,7 +5,7 @@
 //! the host sent back, writes them, and exits `1` when a blocking one
 //! landed. That exit code is the gate the Stop hook uses.
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -193,9 +193,20 @@ pub fn run(args: &Args, db: &Path, config: &Config) -> Result<(ExitCode, Telemet
 /// It prints the finding id and where it landed, so a caller piping this
 /// can see the write happened without opening the UI.
 pub fn resolve(id: &str, outcome: ResolveOutcome, db: &Path) -> Result<(ExitCode, TelemetryBatch)> {
-    Store::open(db)?.resolve_finding(id, outcome.outcome())?;
+    let telemetry = settle(id, outcome, db)?;
     let stdout = std::io::stdout();
     let _ = writeln!(stdout.lock(), "writ: finding {id} is now {outcome}");
+    Ok((ExitCode::SUCCESS, telemetry))
+}
+
+/// Settle a finding and report the counter it moved, printing nothing.
+///
+/// This is the half both front-ends share. The CLI wraps it in a line on
+/// stdout; MCP answers the object. Keeping one body is what stops the two
+/// surfaces drifting, which is how `resolve` reached the tool list without
+/// ever reaching the store.
+pub fn settle(id: &str, outcome: ResolveOutcome, db: &Path) -> Result<TelemetryBatch> {
+    Store::open(db)?.resolve_finding(id, outcome.outcome())?;
     let mut telemetry = TelemetryBatch::default();
     telemetry
         .counters
@@ -203,7 +214,7 @@ pub fn resolve(id: &str, outcome: ResolveOutcome, db: &Path) -> Result<(ExitCode
             ResolveOutcome::Fixed => FindingOutcomeMetric::Fixed,
             ResolveOutcome::Ignored => FindingOutcomeMetric::Ignored,
         }));
-    Ok((ExitCode::SUCCESS, telemetry))
+    Ok(telemetry)
 }
 
 /// Print the prompt an audit already sent. Spec section 9.2.
@@ -384,6 +395,11 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     // conflation the two counter pairs exist to prevent and the defect the
     // retry cap itself had until it was hoisted above `select`.
     //
+    // One coverage key per selected learning, built once. The gate reads
+    // them to decide whether it has already asked, and `start_audit`
+    // records them as what it asked about.
+    let slice_digests = writ_core::slice_digests(&scope.diff, &selected);
+
     // Gates only. A human running `writ audit` by hand is asking for an
     // audit and gets one; the spec says *a gate* passes, not every caller.
     // `--dry-run` is a preview of what a gate would select, so it is not
@@ -391,7 +407,7 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     if args.hook.is_some()
         && !args.dry_run
         && !selected.is_empty()
-        && store.all_covered(&scope.identity, &scope.diff, &selected)?
+        && store.all_covered(&scope.identity, &selected, &slice_digests)?
     {
         return Ok(Selection {
             audit_id: COVERED_ID.to_string(),
@@ -415,7 +431,7 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     let audit_id = if args.dry_run {
         DRY_RUN_ID.to_string()
     } else {
-        store.start_audit(&scope, considered, &selected)?
+        store.start_audit(&scope, considered, &selected, &slice_digests)?
     };
 
     if scope.identity.is_fallback() {
@@ -442,7 +458,10 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
 
 /// Steps 5 and 6: write the findings, then gate on them.
 fn ingest(args: &Args, db: &Path) -> Result<(ExitCode, TelemetryBatch)> {
-    let (written, telemetry) = ingest_with_telemetry(&read_stdin()?, db)?;
+    let (written, telemetry) = ingest_with_telemetry(
+        &crate::context::read_stdin("--ingest reads findings JSON on stdin")?,
+        db,
+    )?;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -508,21 +527,4 @@ pub fn ingest_with_telemetry(text: &str, db: &Path) -> Result<(Ingested, Telemet
             GateResultMetric::Pass
         }));
     Ok((written, telemetry))
-}
-
-/// Read the whole stream, and never wait on a person. crit #693.
-fn read_stdin() -> Result<String> {
-    let mut stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        return Err(Error::Validation {
-            message: "--ingest reads findings JSON on stdin. Pipe a file in".to_string(),
-        });
-    }
-    let mut text = String::new();
-    stdin
-        .read_to_string(&mut text)
-        .map_err(|error| Error::Validation {
-            message: format!("cannot read stdin: {error}"),
-        })?;
-    Ok(text)
 }

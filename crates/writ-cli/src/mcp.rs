@@ -23,9 +23,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use serde_json::{Value, json};
-use writ_core::{
-    CommandMetric, Config, CounterMetric, Paths, Result, Store, SurfaceMetric, TelemetryBatch,
-};
+use writ_core::{CommandMetric, Config, Paths, Result, Store, SurfaceMetric, TelemetryBatch};
 
 use crate::audit;
 use crate::edit;
@@ -42,6 +40,42 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// path is honored by every subcommand that touches the store.
 #[derive(Debug, clap::Args)]
 pub struct Args {}
+
+/// What the host may put in front of the model once, at connection.
+///
+/// writ's value is a loop that spans tools — a gate emits a pointer, the
+/// agent fetches the document, reports findings, and later settles what it
+/// left open — and no single tool description can say that, because each
+/// one is read alone and only when the model is already reaching for it.
+/// Without this, that knowledge ships only in the Claude Code skill and
+/// the CLAUDE.md snippet, so a host that installs the MCP server and
+/// nothing else never learns the loop exists.
+const INSTRUCTIONS: &str = "\
+writ is a ledger of the steering this developer has already given. It \
+gates a handoff: when a turn ends, writ checks the diff against the rules \
+that apply to it.
+
+The loop, in order:
+
+1. A gate blocks a turn with an audit id and nothing else. It never pastes \
+   the document, because that would put the whole diff in the transcript \
+   after every turn.
+2. Fetch it: call writ_audit with `fetch` set to that audit id. This is a \
+   read — it opens no audit and moves no counter.
+3. Decide what you will do about each learning the diff breaks, then send \
+   that back: call writ_audit with `findings` holding the whole document. \
+   Nothing is recorded until you do, and an empty findings array is the \
+   right answer when the diff breaks no rule. It still has to be sent.
+4. A finding you reported as `open` — one you could not settle without the \
+   developer — keeps refusing the handoff while it stands. Once the two of \
+   you agree, call writ_audit with `resolve` set to that finding id and \
+   `outcome` set to fixed or ignored.
+
+Use writ_record when the developer corrects an approach, states a \
+convention, or says to always or never do something: one rule, with the \
+reason it exists, so it transfers to a case they did not foresee. A write \
+lands as a proposal for them to review unless they asked for it to be \
+active.";
 
 /// How one tool argument reaches the CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,17 +184,17 @@ const RECORD_ARGS: &[ToolArg] = &[
         kind: Kind::Text,
         about: "Which half of the diff the rule cares about: added, removed, or both (default both)",
     },
-    ToolArg {
-        name: "status",
-        flag: "status",
-        kind: Kind::Text,
-        about: "proposed or active. Default proposed, so a forgotten activate lands in the Inbox",
-    },
+    // `--status` is not offered here, though the CLI keeps it. It has
+    // exactly one non-default value, which `activate` already spells, and
+    // two spellings of one decision in a tool schema is a coin an agent
+    // flips. The default stays where invariant 2 puts it: in the column.
     ToolArg {
         name: "activate",
         flag: "activate",
         kind: Kind::Flag,
-        about: "Sugar for status active",
+        about: "Record it active instead of proposed. Without this it lands in the \
+                developer's Inbox for review, which is the safe default and usually \
+                the right one: activate only what they have actually approved",
     },
     ToolArg {
         name: "reinforce",
@@ -372,14 +406,82 @@ impl Tool {
                     "items": { "type": "string" },
                     "description": arg.about,
                 }),
-                Kind::Stdin => json!({ "type": "object", "description": arg.about }),
+                // The one argument that is a document rather than a
+                // flag value. Typing it as a bare object left the shape
+                // that moves `times_applied` and stamps `ingested_at`
+                // described only in rendered prompt text, and this loop
+                // has shipped broken once already.
+                Kind::Stdin => json!({
+                    "type": "object",
+                    "description": arg.about,
+                    "properties": {
+                        "audit_id": {
+                            "type": "string",
+                            "description": "The audit-id the prompt printed, verbatim",
+                        },
+                        "findings": {
+                            "type": "array",
+                            "description": "One entry per violation. An empty array is \
+                                            the right answer when the diff breaks no \
+                                            rule, and it still has to be sent",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "learning_id": {
+                                        "type": "string",
+                                        "description": "The id of the learning this violates",
+                                    },
+                                    "path": {
+                                        "type": "string",
+                                        "description": "The file it happens in, when there is one",
+                                    },
+                                    "line": {
+                                        "type": "integer",
+                                        "description": "The line it happens on, when there is one",
+                                    },
+                                    "detail": {
+                                        "type": "string",
+                                        "description": "What is wrong, in one sentence",
+                                    },
+                                    "outcome": {
+                                        "type": "string",
+                                        "enum": ["fixed", "ignored", "open"],
+                                        "description": "What you have decided to do: \
+                                                        `fixed` you are correcting it, \
+                                                        `ignored` you are leaving it and \
+                                                        say why in detail, `open` you \
+                                                        cannot settle it without the \
+                                                        developer. `rejected` is the \
+                                                        developer's word and is refused here",
+                                    },
+                                },
+                                "required": ["learning_id", "detail", "outcome"],
+                                "additionalProperties": false,
+                            },
+                        },
+                    },
+                    "required": ["audit_id", "findings"],
+                }),
                 Kind::Positional => json!({ "type": "string", "description": arg.about }),
             };
             properties.insert(arg.name.to_string(), schema);
         }
+        // A positional is the one argument shape the command cannot run
+        // without: `writ_edit` has nothing to edit without an id. Every
+        // flag is optional, including the ones a bare `writ_record`
+        // needs, because `--reinforce` is a call that carries none of
+        // them. Saying so in the schema turns a refusal the model has to
+        // read into a call it gets right the first time.
+        let required: Vec<&str> = self
+            .args
+            .iter()
+            .filter(|arg| arg.kind == Kind::Positional)
+            .map(|arg| arg.name)
+            .collect();
         json!({
             "type": "object",
             "properties": properties,
+            "required": required,
             "additionalProperties": false,
         })
     }
@@ -526,24 +628,48 @@ impl Server {
     /// Handle one request. `None` means the message was a notification and
     /// takes no reply.
     pub fn handle(&self, request: &Value) -> Option<Value> {
-        let id = request.get("id").cloned();
-        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-        let params = request.get("params").cloned().unwrap_or(json!({}));
+        // Only an object can be a request. A top-level array (a 2025-03-26
+        // batch, which 2025-06-18 removed) or a bare scalar is neither a
+        // request nor a notification, and answering nothing would hang the
+        // client forever: P7 says name the cause instead.
+        let Some(object) = request.as_object() else {
+            return Some(invalid_request(
+                "a JSON-RPC message must be an object. writ does not serve batches",
+            ));
+        };
+        let method = object.get("method").and_then(Value::as_str);
+        let id = object.get("id").cloned();
 
-        // A notification has no id, and JSON-RPC forbids replying to one.
-        let id = id?;
+        // A notification is an object carrying a method and no id, and
+        // JSON-RPC forbids replying to one. An object with neither, or an
+        // explicit null id, is malformed rather than silent.
+        let (Some(method), Some(id)) = (method, id) else {
+            // A method with no id is a notification: no reply. Anything
+            // else is malformed and gets one.
+            if method.is_some() {
+                return None;
+            }
+            return Some(invalid_request(
+                "a JSON-RPC request needs a method and a non-null id",
+            ));
+        };
+        if id.is_null() {
+            return Some(invalid_request("a JSON-RPC request id must not be null"));
+        }
+        let params = object.get("params").cloned().unwrap_or(json!({}));
 
         let result = match method {
             "initialize" => Ok(json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "writ", "version": env!("CARGO_PKG_VERSION") },
+                "instructions": INSTRUCTIONS,
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({
                 "tools": TOOLS.iter().map(Tool::describe).collect::<Vec<_>>(),
             })),
-            "tools/call" => Ok(self.call(&params)),
+            "tools/call" => self.call(&params),
             other => Err((-32601, format!("unknown method {other}"))),
         };
 
@@ -557,26 +683,37 @@ impl Server {
         })
     }
 
-    /// Run one tool. A refusal is a tool error, not a protocol error: the
-    /// agent has to read it, and a JSON-RPC error is not shown to a model.
-    fn call(&self, params: &Value) -> Value {
-        let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    /// Run one tool.
+    ///
+    /// A refusal the *tool* produced is a tool error, not a protocol error:
+    /// the agent has to read it, and a JSON-RPC error is not shown to a
+    /// model. Failing to *find* the tool is the other way round — the
+    /// caller named something that does not exist, so it is `-32602`, and
+    /// a host can tell a stale tool list from a tool that ran and failed
+    /// rather than retrying a call that can never succeed.
+    fn call(&self, params: &Value) -> std::result::Result<Value, (i64, String)> {
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return Err((-32602, "tools/call needs a tool name".to_string()));
+        };
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
         let Some(tool) = tool(name) else {
-            return failure(&format!(
-                "unknown tool {name}. writ serves writ_record, writ_audit, and writ_edit"
+            return Err((
+                -32602,
+                format!("unknown tool {name}. writ serves writ_record, writ_audit, and writ_edit"),
             ));
         };
+        // From here the tool exists, so every refusal is its own and
+        // reaches the model as a tool error it can act on.
         let (argv, stdin) = match tool.to_argv(&arguments) {
             Ok(both) => both,
-            Err(message) => return failure(&message),
+            Err(message) => return Ok(failure(&message)),
         };
 
-        match self.dispatch(tool, &argv, stdin.as_deref()) {
+        Ok(match self.dispatch(tool, &argv, stdin.as_deref()) {
             Ok(Answer { value, text }) => success(&value, text.as_deref()),
             Err(message) => failure(&message),
-        }
+        })
     }
 
     /// Parse the argv and call the function the CLI calls.
@@ -619,6 +756,23 @@ impl Server {
                         prompt,
                     ));
                 }
+                // A resolve is a write of one column on one finding. It must
+                // come before the selection path: falling through to it would
+                // open an audit row and move `times_selected` for a call that
+                // asked to settle a finding, and leave the finding open.
+                if let Some(id) = &line.inner.resolve {
+                    let Some(outcome) = line.inner.outcome else {
+                        return Err(cause(writ_core::Error::Validation {
+                            message: "--resolve needs --outcome fixed or --outcome ignored"
+                                .to_string(),
+                        }));
+                    };
+                    let batch = audit::settle(id, outcome, &self.db).map_err(cause)?;
+                    self.observe(batch, CommandMetric::Audit);
+                    return Ok(Answer::json(
+                        json!({ "finding_id": id, "outcome": outcome.to_string() }),
+                    ));
+                }
                 let mut run = audit::select(&line.inner, &self.db, &self.config).map_err(cause)?;
                 let mut report = audit::report(&run, line.inner.dry_run);
                 if !run.notices.is_empty() {
@@ -643,13 +797,17 @@ impl Server {
         if !self.config.telemetry.enabled {
             return;
         }
-        batch.counters.extend([
-            CounterMetric::Command(command),
-            CounterMetric::Surface(SurfaceMetric::Mcp),
-            CounterMetric::ExitCode(0),
-        ]);
-        telemetry::add_collection_size_best_effort(&self.db, &mut batch);
-        telemetry::record_best_effort(&self.telemetry_db, &batch);
+        // A tool call that got this far succeeded, and the server keeps
+        // no clock, so there is no duration to record.
+        telemetry::observe(
+            &self.db,
+            &self.telemetry_db,
+            &mut batch,
+            command,
+            SurfaceMetric::Mcp,
+            0,
+            None,
+        );
     }
 }
 
@@ -698,6 +856,16 @@ fn success(value: &Value, text: Option<&str>) -> Value {
             "text": text.map_or_else(|| value.to_string(), str::to_string),
         }],
         "structuredContent": value,
+    })
+}
+
+/// A malformed frame, answered with `id: null` so the client sees a reply
+/// rather than waiting on one. Invariant 6.
+fn invalid_request(message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "error": { "code": -32600, "message": message },
     })
 }
 

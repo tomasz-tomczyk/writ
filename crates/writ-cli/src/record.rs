@@ -1,6 +1,6 @@
 //! `writ record`, the only way into the database. Spec sections 5 and 7.2.
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::Write;
 use std::path::Path;
 
 use writ_core::{
@@ -153,7 +153,8 @@ pub fn execute_with_telemetry(
     let written = if let Some(id) = &args.reinforce {
         vec![store.reinforce(id, &exemplars, status)?]
     } else if args.json {
-        let mut learnings = parse_jsonl(&read_stdin()?)?;
+        let mut learnings =
+            parse_jsonl(&crate::context::read_stdin("--json reads JSONL on stdin")?)?;
         let author = resolve_author(config);
         for learning in &mut learnings {
             learning.status = learning.status.or(status);
@@ -246,7 +247,13 @@ impl Args {
                     message: format!("the example file {path} is empty"),
                 });
             }
-            out.push(exemplar(kind, snippet));
+            // The file is the one place a snippet's language is known
+            // for certain. The path itself is not kept: invariant 3 is
+            // about locations, and a language is not one.
+            out.push(NewExemplar {
+                language: writ_core::language_of(path).map(str::to_string),
+                ..exemplar(kind, snippet)
+            });
         }
         out.extend(parse_example_texts(&self.example_texts)?);
         Ok(out)
@@ -289,31 +296,6 @@ pub(crate) fn parse_example_texts(texts: &[String]) -> Result<Vec<NewExemplar>> 
             Ok(exemplar(kind, snippet.to_string()))
         })
         .collect()
-}
-
-/// Read the whole stream, and never wait on a person.
-///
-/// A terminal on stdin means nobody piped anything in, so the command says
-/// what it wanted instead of hanging. crit #693.
-///
-/// The `is_terminal()` branch below has no test, and that is deliberate,
-/// not an oversight. The integration harness gives the child process a
-/// pipe or a closed handle, so a test cannot put a terminal on its stdin
-/// without a pty. Anyone adding one needs that pty.
-fn read_stdin() -> Result<String> {
-    let mut stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        return Err(Error::Validation {
-            message: "--json reads JSONL on stdin. Pipe a file in".to_string(),
-        });
-    }
-    let mut text = String::new();
-    stdin
-        .read_to_string(&mut text)
-        .map_err(|error| Error::Validation {
-            message: format!("cannot read stdin: {error}"),
-        })?;
-    Ok(text)
 }
 
 /// Say what was written. crit #446: no silent no-ops on user data.

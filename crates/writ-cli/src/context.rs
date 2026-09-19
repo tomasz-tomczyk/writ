@@ -3,6 +3,7 @@
 //! This crate is the only one that reads a file, runs a program, or looks
 //! at a terminal. `writ-core` takes the answers as arguments. Invariant 1.
 
+use std::io::{IsTerminal, Read};
 use std::path::Path;
 use std::process::Command;
 
@@ -116,6 +117,34 @@ fn git_user_email() -> Option<String> {
     let email = String::from_utf8(output.stdout).ok()?;
     let email = email.trim();
     (!email.is_empty()).then(|| email.to_string())
+}
+
+/// Read the whole stream, and never wait on a person.
+///
+/// A terminal on stdin means nobody piped anything in, so the command says
+/// what it wanted instead of hanging. crit #693.
+///
+/// `what` names the document the flag expects, so the two callers keep
+/// their own sentence while sharing the guard that implements P7.
+///
+/// The `is_terminal()` branch has no test, and that is deliberate, not an
+/// oversight. The integration harness gives the child process a pipe or a
+/// closed handle, so a test cannot put a terminal on its stdin without a
+/// pty. Anyone adding one needs that pty.
+pub fn read_stdin(what: &str) -> Result<String> {
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(Error::Validation {
+            message: format!("{what}. Pipe a file in"),
+        });
+    }
+    let mut text = String::new();
+    stdin
+        .read_to_string(&mut text)
+        .map_err(|error| Error::Validation {
+            message: format!("cannot read stdin: {error}"),
+        })?;
+    Ok(text)
 }
 
 /// Read a snippet file for `--example`.

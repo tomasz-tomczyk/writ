@@ -6,9 +6,8 @@ use rusqlite::{Connection, Row, Transaction, functions::FunctionFlags, params};
 
 use crate::audit::{
     AuditScope, Budget, Candidate, FindingsInput, Ingested, Outcome, Outcomes, Selected,
-    learning_slice_digest, render_prompt, rule_block,
+    render_prompt, rule_block,
 };
-use crate::diff::Diff;
 use crate::error::{Error, Result};
 use crate::fts;
 use crate::glob::glob_match;
@@ -74,6 +73,15 @@ impl Store {
         }
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // A gate, an MCP call and the UI can all reach one file at once.
+        // Without a timeout the loser of that race gets SQLITE_BUSY
+        // immediately, which P7 would have to report as a failure for
+        // what is really a moment's contention.
+        conn.pragma_update(None, "busy_timeout", 5_000)?;
+        // NORMAL is the documented safe setting under WAL: a crash can
+        // lose the last commits, never the database. The gate commits the
+        // rendered prompt on every turn, and FULL makes that an fsync.
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::from_connection(conn)
     }
 
@@ -522,10 +530,13 @@ impl Store {
     pub fn all_covered(
         &self,
         identity: &RepoIdentity,
-        diff: &Diff,
         selected: &[Selected],
+        slice_digests: &[String],
     ) -> Result<bool> {
-        let mut stmt = self.conn.prepare(
+        debug_assert_eq!(selected.len(), slice_digests.len());
+        // Fixed SQL on the gate path, so the plan is worth keeping rather
+        // than re-parsing once per selected learning on every turn.
+        let mut stmt = self.conn.prepare_cached(
             "SELECT EXISTS (
                SELECT 1 FROM audit_coverage c
                  JOIN audits a ON a.id = c.audit_id
@@ -535,15 +546,11 @@ impl Store {
                   AND a.ingested_at IS NOT NULL
              )",
         )?;
-        for one in selected {
-            let covered: bool = stmt.query_row(
-                params![
-                    identity.value(),
-                    &one.learning.id,
-                    &learning_slice_digest(&one.learning, diff),
-                ],
-                |row| row.get(0),
-            )?;
+        for (one, digest) in selected.iter().zip(slice_digests) {
+            let covered: bool = stmt
+                .query_row(params![identity.value(), &one.learning.id, digest], |row| {
+                    row.get(0)
+                })?;
             if !covered {
                 return Ok(false);
             }
@@ -568,7 +575,9 @@ impl Store {
         scope: &AuditScope,
         considered: usize,
         selected: &[Selected],
+        slice_digests: &[String],
     ) -> Result<String> {
+        debug_assert_eq!(selected.len(), slice_digests.len());
         let id = new_id();
         let prompt = render_prompt(&id, scope, selected);
         let tx = self.conn.transaction()?;
@@ -585,7 +594,7 @@ impl Store {
                 &scope.diff_digest,
             ],
         )?;
-        for one in selected {
+        for (one, digest) in selected.iter().zip(slice_digests) {
             tx.execute(
                 "UPDATE learnings
                     SET times_selected = times_selected + 1,
@@ -602,12 +611,7 @@ impl Store {
             tx.execute(
                 "INSERT INTO audit_coverage (audit_id, learning_id, repo, slice_digest)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    &id,
-                    &one.learning.id,
-                    scope.identity.value(),
-                    &learning_slice_digest(&one.learning, &scope.diff),
-                ],
+                params![&id, &one.learning.id, scope.identity.value(), digest],
             )?;
         }
         tx.commit()?;
@@ -658,6 +662,7 @@ impl Store {
 
         let mut blocking = 0usize;
         let mut unfixed_blocking = 0usize;
+        let mut open = Vec::new();
         for finding in &input.findings {
             if finding.outcome == Outcome::Rejected {
                 return Err(Error::validation(format!(
@@ -684,11 +689,15 @@ impl Store {
                     unfixed_blocking += 1;
                 }
             }
+            let finding_id = new_id();
+            if finding.outcome == Outcome::Open {
+                open.push(finding_id.clone());
+            }
             tx.execute(
                 "INSERT INTO findings (id, audit_id, learning_id, path, line, detail, outcome)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    new_id(),
+                    &finding_id,
                     &input.audit_id,
                     &finding.learning_id,
                     &finding.path,
@@ -722,29 +731,30 @@ impl Store {
             findings: input.findings.len(),
             blocking,
             unfixed_blocking,
+            open,
         })
+    }
+
+    /// Whether a finding id names a row.
+    ///
+    /// A guarded UPDATE that changes nothing is ambiguous: the id may name
+    /// no row, or it may name one the guard refused. Both callers have to
+    /// tell those apart to name the real cause, which is P7.
+    fn finding_exists(&self, id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM findings WHERE id = ?1)",
+            [id],
+            |row| row.get(0),
+        )?)
     }
 
     /// One finding by id, or [`Error::NotFound`].
     pub fn finding(&self, id: &str) -> Result<Finding> {
         self.conn
             .query_row(
-                "SELECT id, audit_id, learning_id, path, line, detail, outcome
-                   FROM findings
-                  WHERE id = ?1",
+                &format!("SELECT {FINDING_COLUMNS} FROM findings WHERE id = ?1"),
                 [id],
-                |row| {
-                    let outcome: String = row.get(6)?;
-                    Ok(Finding {
-                        id: row.get(0)?,
-                        audit_id: row.get(1)?,
-                        learning_id: row.get(2)?,
-                        path: row.get(3)?,
-                        line: row.get(4)?,
-                        detail: row.get(5)?,
-                        outcome: parse_outcome(&outcome).map_err(to_sqlite_error)?,
-                    })
-                },
+                read_finding,
             )
             .map_err(|error| match error {
                 rusqlite::Error::QueryReturnedNoRows => Error::NotFound { id: id.into() },
@@ -754,24 +764,10 @@ impl Store {
 
     /// Read the findings for one learning, oldest first.
     pub fn findings_of(&self, learning_id: &str) -> Result<Vec<Finding>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, audit_id, learning_id, path, line, detail, outcome
-               FROM findings
-              WHERE learning_id = ?1
-              ORDER BY id",
-        )?;
-        let rows = stmt.query_map([learning_id], |row| {
-            let outcome: String = row.get(6)?;
-            Ok(Finding {
-                id: row.get(0)?,
-                audit_id: row.get(1)?,
-                learning_id: row.get(2)?,
-                path: row.get(3)?,
-                line: row.get(4)?,
-                detail: row.get(5)?,
-                outcome: parse_outcome(&outcome).map_err(to_sqlite_error)?,
-            })
-        })?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {FINDING_COLUMNS} FROM findings WHERE learning_id = ?1 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map([learning_id], read_finding)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -824,12 +820,7 @@ impl Store {
             params![finding_id, outcome.as_str()],
         )?;
         if changed == 0 {
-            let known: bool = self.conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM findings WHERE id = ?1)",
-                [finding_id],
-                |row| row.get(0),
-            )?;
-            if !known {
+            if !self.finding_exists(finding_id)? {
                 return Err(Error::NotFound {
                     id: finding_id.to_string(),
                 });
@@ -867,17 +858,10 @@ impl Store {
               WHERE id = ?1 AND outcome = 'rejected'",
             [finding_id],
         )?;
-        if changed == 0 {
-            let known: bool = self.conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM findings WHERE id = ?1)",
-                [finding_id],
-                |row| row.get(0),
-            )?;
-            if !known {
-                return Err(Error::NotFound {
-                    id: finding_id.to_string(),
-                });
-            }
+        if changed == 0 && !self.finding_exists(finding_id)? {
+            return Err(Error::NotFound {
+                id: finding_id.to_string(),
+            });
         }
         Ok(())
     }
@@ -919,8 +903,12 @@ impl Store {
     }
 
     /// The exemplars attached to one learning, oldest first.
+    ///
+    /// The budget loop calls this once per ranked candidate, so the
+    /// statement is cached: the SQL is fixed and re-planning it up to
+    /// `max_rules` times a turn buys nothing.
     pub fn exemplars_of(&self, id: &str) -> Result<Vec<Exemplar>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, kind, language, snippet, note FROM exemplars
              WHERE learning_id = ?1 ORDER BY id",
         )?;
@@ -936,25 +924,12 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// One learning's scopes, in the same order [`Store::scopes_of_many`]
+    /// returns them. It defers to that one rather than keeping a second
+    /// SELECT: two statements would have to stay in step on ordering, and
+    /// nothing would catch them drifting apart.
     fn scopes_of(&self, id: &str) -> Result<Vec<Scope>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT kind, value FROM learning_scopes
-             WHERE learning_id = ?1 ORDER BY kind, value",
-        )?;
-        let rows = stmt.query_map([id], |row| {
-            let kind: String = row.get(0)?;
-            let value: String = row.get(1)?;
-            Ok((kind, value))
-        })?;
-        let mut scopes = Vec::new();
-        for row in rows {
-            let (kind, value) = row?;
-            scopes.push(Scope {
-                kind: scope_kind(&kind)?,
-                value,
-            });
-        }
-        Ok(scopes)
+        Ok(self.scopes_of_many(&[id])?.remove(id).unwrap_or_default())
     }
 
     /// All scopes for a set of learning ids, grouped by id.
@@ -1164,6 +1139,23 @@ fn replace_exemplars(
         insert_exemplar(tx, learning_id, exemplar, None)?;
     }
     Ok(())
+}
+
+/// The columns [`read_finding`] reads, in the order it reads them.
+const FINDING_COLUMNS: &str = "id, audit_id, learning_id, path, line, detail, outcome";
+
+/// One `findings` row, for any query that selects [`FINDING_COLUMNS`].
+fn read_finding(row: &rusqlite::Row<'_>) -> rusqlite::Result<Finding> {
+    let outcome: String = row.get(6)?;
+    Ok(Finding {
+        id: row.get(0)?,
+        audit_id: row.get(1)?,
+        learning_id: row.get(2)?,
+        path: row.get(3)?,
+        line: row.get(4)?,
+        detail: row.get(5)?,
+        outcome: parse_outcome(&outcome).map_err(to_sqlite_error)?,
+    })
 }
 
 /// `updated_at` is never named here. The trigger owns it. Invariant 7.
@@ -1542,7 +1534,13 @@ mod tests {
             exemplars: Vec::new(),
         }];
         assert!(
-            !store.all_covered(&identity, &diff, &selected).unwrap(),
+            !store
+                .all_covered(
+                    &identity,
+                    &selected,
+                    &crate::audit::slice_digests(&diff, &selected)
+                )
+                .unwrap(),
             "a row nobody sliced must cover nothing"
         );
     }
@@ -1567,10 +1565,23 @@ mod tests {
             learning: store.get(&learning).unwrap(),
             exemplars: Vec::new(),
         }];
-        let audit = store.start_audit(&scope, 1, &selected).unwrap();
+        let audit = store
+            .start_audit(
+                &scope,
+                1,
+                &selected,
+                &crate::audit::slice_digests(&scope.diff, &selected),
+            )
+            .unwrap();
 
         assert!(
-            !store.all_covered(&identity, &diff, &selected).unwrap(),
+            !store
+                .all_covered(
+                    &identity,
+                    &selected,
+                    &crate::audit::slice_digests(&diff, &selected)
+                )
+                .unwrap(),
             "an audit nobody answered covers nothing"
         );
 
@@ -1582,21 +1593,33 @@ mod tests {
             .unwrap();
 
         assert!(
-            store.all_covered(&identity, &diff, &selected).unwrap(),
+            store
+                .all_covered(
+                    &identity,
+                    &selected,
+                    &crate::audit::slice_digests(&diff, &selected)
+                )
+                .unwrap(),
             "a clean report is still an answer"
         );
 
         let other = Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 2;\n");
         assert!(
-            !store.all_covered(&identity, &other, &selected).unwrap(),
+            !store
+                .all_covered(
+                    &identity,
+                    &selected,
+                    &crate::audit::slice_digests(&other, &selected)
+                )
+                .unwrap(),
             "a global rule's slice is the whole diff, so another diff is not covered"
         );
         assert!(
             !store
                 .all_covered(
                     &RepoIdentity::Remote("github.com/o/other".into()),
-                    &diff,
-                    &selected
+                    &selected,
+                    &crate::audit::slice_digests(&diff, &selected)
                 )
                 .unwrap(),
             "another repository is not covered"
@@ -1609,9 +1632,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("learnings.db")).unwrap();
         let identity = RepoIdentity::Remote("github.com/o/r".into());
-        let diff = Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n");
 
-        assert!(store.all_covered(&identity, &diff, &[]).unwrap());
+        assert!(store.all_covered(&identity, &[], &[]).unwrap());
     }
 
     /// One uncovered learning is enough to block, however many are
@@ -1634,7 +1656,12 @@ mod tests {
             exemplars: Vec::new(),
         };
         let audit = store
-            .start_audit(&scope, 1, std::slice::from_ref(&one))
+            .start_audit(
+                &scope,
+                1,
+                std::slice::from_ref(&one),
+                &crate::audit::slice_digests(&scope.diff, std::slice::from_ref(&one)),
+            )
             .unwrap();
         store
             .ingest(&FindingsInput {
@@ -1644,7 +1671,11 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .all_covered(&identity, &diff, std::slice::from_ref(&one))
+                .all_covered(
+                    &identity,
+                    std::slice::from_ref(&one),
+                    &crate::audit::slice_digests(&diff, std::slice::from_ref(&one)),
+                )
                 .unwrap()
         );
 
@@ -1655,7 +1686,13 @@ mod tests {
             exemplars: Vec::new(),
         };
         assert!(
-            !store.all_covered(&identity, &diff, &[one, two]).unwrap(),
+            !store
+                .all_covered(
+                    &identity,
+                    &[one.clone(), two.clone()],
+                    &crate::audit::slice_digests(&diff, &[one, two]),
+                )
+                .unwrap(),
             "a learning activated after the last audit is not covered"
         );
     }
@@ -1713,7 +1750,7 @@ mod tests {
         assert_eq!(count(&store, "learnings"), 1, "the collection is kept");
 
         // And the rebuilt table records a prompt for every new audit.
-        let fresh = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let fresh = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         assert!(store.audit_prompt(&fresh).unwrap().contains("# writ audit"));
     }
 
@@ -3001,7 +3038,7 @@ mod tests {
     fn ingesting_writes_a_finding_and_moves_the_counters() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "rule", &["global"]);
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         let before = store.get(&id).unwrap();
         assert_eq!(before.times_applied, 0);
         assert_eq!(before.last_applied_at, None);
@@ -3038,7 +3075,7 @@ mod tests {
         learning.blocking = false;
         learning.status = Some(Status::Active);
         let id = store.record(&learning).unwrap().id;
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         let written = store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -3072,7 +3109,7 @@ mod tests {
     fn an_ingested_outcome_is_stored_and_ranks_the_learning_down() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "rule", &["global"]);
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -3098,7 +3135,7 @@ mod tests {
     fn ingest_refuses_to_set_rejected() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "rule", &["global"]);
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         let error = store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -3120,7 +3157,7 @@ mod tests {
     fn findings_of_returns_rows_for_a_learning() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "t", &["global"]);
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         store
             .ingest(&FindingsInput {
                 audit_id: audit.clone(),
@@ -3149,7 +3186,7 @@ mod tests {
     fn reject_finding_sets_outcome_rejected() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "t", &["global"]);
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -3186,7 +3223,7 @@ mod tests {
     fn unreject_finding_returns_the_outcome_to_open() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "t", &["global"]);
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -3214,7 +3251,7 @@ mod tests {
     fn unreject_finding_leaves_an_unrejected_finding_alone() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "t", &["global"]);
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -3240,7 +3277,7 @@ mod tests {
     fn resolve_finding_settles_an_open_finding() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "t", &["global"]);
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -3267,7 +3304,7 @@ mod tests {
     fn resolve_finding_refuses_to_write_rejected() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "t", &["global"]);
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -3298,7 +3335,7 @@ mod tests {
     fn resolve_finding_leaves_a_rejected_finding_alone() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "t", &["global"]);
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         store
             .ingest(&FindingsInput {
                 audit_id: audit,
@@ -3346,7 +3383,7 @@ mod tests {
     fn a_rejected_finding_ranks_the_learning_to_the_bottom() {
         let mut store = Store::open_in_memory().unwrap();
         let id = active(&mut store, "rule", &["global"]);
-        let audit = store.start_audit(&scope_for(DIFF), 1, &[]).unwrap();
+        let audit = store.start_audit(&scope_for(DIFF), 1, &[], &[]).unwrap();
         store
             .conn
             .execute(
@@ -3380,7 +3417,14 @@ mod tests {
             .unwrap();
         assert_eq!(selected.len(), 1);
         let chosen = selected[0].learning.id.clone();
-        store.start_audit(&scope_for(DIFF), 2, &selected).unwrap();
+        store
+            .start_audit(
+                &scope_for(DIFF),
+                2,
+                &selected,
+                &crate::audit::slice_digests(&scope_for(DIFF).diff, &selected),
+            )
+            .unwrap();
 
         let other = if chosen == sent { held } else { sent };
         let stamped = store.get(&chosen).unwrap();

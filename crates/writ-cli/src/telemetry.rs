@@ -4,7 +4,8 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use writ_core::{
-    BucketMetric, Config, Error, Paths, Result, Store, TelemetryBatch, TelemetryStore,
+    BucketMetric, CommandMetric, Config, CounterMetric, Error, Paths, Result, Store, SurfaceMetric,
+    TelemetryBatch, TelemetryStore,
 };
 
 use crate::context::set_telemetry_enabled;
@@ -182,6 +183,34 @@ fn os_family() -> &'static str {
         "windows" => "windows",
         _ => "other",
     }
+}
+
+/// Stamp one completed command and write it, whichever surface ran it.
+///
+/// Both surfaces had their own copy of this, and the copies had already
+/// drifted: the MCP one omitted the duration bucket it had no clock for
+/// and hardcoded the exit code it had no code for. Those are now
+/// arguments, so a difference between the two surfaces is visible at the
+/// call site rather than hidden in a second body.
+pub fn observe(
+    db: &std::path::Path,
+    telemetry_db: &std::path::Path,
+    batch: &mut TelemetryBatch,
+    command: CommandMetric,
+    surface: SurfaceMetric,
+    code: u8,
+    elapsed_ms: Option<u64>,
+) {
+    batch.counters.extend([
+        CounterMetric::Command(command),
+        CounterMetric::Surface(surface),
+        CounterMetric::ExitCode(code),
+    ]);
+    if let Some(elapsed_ms) = elapsed_ms {
+        batch.buckets.push(BucketMetric::CommandMs(elapsed_ms));
+    }
+    add_collection_size_best_effort(db, batch);
+    record_best_effort(telemetry_db, batch);
 }
 
 /// Record an incidental observation without allowing telemetry to influence

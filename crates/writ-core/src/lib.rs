@@ -22,6 +22,7 @@ mod telemetry;
 pub use audit::{
     AuditScope, Budget, Candidate, FindingsInput, IncomingFinding, Ingested, Outcome, Outcomes,
     Selected, diff_digest, parse_findings, rank, render_pointer, render_prompt, rule_block,
+    slice_digests,
 };
 pub use config::{Audit, Config, Identity, Telemetry, Ui};
 pub use diff::{Diff, language_of, telemetry_language};

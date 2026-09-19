@@ -27,7 +27,7 @@ scopes: language:rust
 rule: use sd
 why: sed is terse
 good:
-```
+```rust
 let y = 2;
 ```
 

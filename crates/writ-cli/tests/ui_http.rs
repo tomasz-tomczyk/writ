@@ -361,7 +361,12 @@ fn select_learning(store: &mut Store, learning_id: &str) {
         exemplars,
     }];
     let audit_id = store
-        .start_audit(&audit_scope(), selected.len(), &selected)
+        .start_audit(
+            &audit_scope(),
+            selected.len(),
+            &selected,
+            &writ_core::slice_digests(&audit_scope().diff, &selected),
+        )
         .unwrap();
     store
         .ingest(&writ_core::FindingsInput {
@@ -698,7 +703,12 @@ fn finding_with_path(
         exemplars,
     }];
     let audit_id = store
-        .start_audit(&audit_scope(), selected.len(), &selected)
+        .start_audit(
+            &audit_scope(),
+            selected.len(),
+            &selected,
+            &writ_core::slice_digests(&audit_scope().diff, &selected),
+        )
         .unwrap();
     store
         .ingest(&writ_core::FindingsInput {

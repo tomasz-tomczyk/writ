@@ -4,12 +4,11 @@
 //! `writ list --never-applied --format json` are the Health screen as two
 //! queries, which keeps the UI free of logic the CLI lacks.
 
-use std::io::Write;
 use std::path::Path;
 
 use writ_core::{Learning, ListFilter, Result, Status, Store};
 
-use crate::output::Format;
+use crate::output::{self, Format};
 
 /// Every flag in the `writ list` row of spec section 5.
 #[derive(Debug, clap::Args)]
@@ -56,23 +55,22 @@ pub fn run(args: &Args, db: &Path) -> Result<()> {
     let store = Store::open(db)?;
     let learnings = store.list(&filter)?;
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    match args.format {
-        Format::Json => {
-            let text = serde_json::to_string(&learnings).expect("Learning serializes");
-            let _ = writeln!(out, "{text}");
+    output::emit(args.format, &learnings, |out| {
+        for learning in &learnings {
+            let _ = writeln!(out, "{}", line(learning));
         }
-        Format::Text => {
-            for learning in &learnings {
-                let _ = writeln!(out, "{}", line(learning));
-            }
-        }
-    }
+    });
     Ok(())
 }
 
-/// One learning on one line: id, status, scopes, title.
+/// One learning on one line: id, status, reach and usefulness, scopes,
+/// title.
+///
+/// The two counters are here because the curation filters are built on
+/// them. `--never-applied` and `--unused-days` select on reach and
+/// usefulness and then printed neither, so the answer to "is this rule
+/// misscoped or dead" needed a second command per row. Read the ratio,
+/// never the absolute number.
 fn line(learning: &Learning) -> String {
     let scopes = learning
         .scopes
@@ -80,8 +78,9 @@ fn line(learning: &Learning) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(",");
+    let counters = format!("{}/{}", learning.times_applied, learning.times_selected);
     format!(
-        "{}  {:<9}  [{scopes}]  {}",
+        "{}  {:<9}  {counters:>9}  [{scopes}]  {}",
         learning.id,
         learning.status.as_str(),
         learning.title

@@ -444,6 +444,7 @@ mod tests {
                         learning,
                         exemplars: Vec::new(),
                     }],
+                    &["private digest".to_string()],
                 )
                 .unwrap();
             store
