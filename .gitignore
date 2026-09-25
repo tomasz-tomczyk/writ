@@ -1,10 +1,14 @@
 target/
 node_modules/
 *.db
-docs/
+docs/*
 .worktrees/
 .superpowers/
 /writ
 
 # Draft notes from /release-notes (do not commit)
 v*-release-notes.md
+
+# Public competitive notes (rest of docs/ stays local)
+!docs/competitive/
+!docs/competitive/**
