@@ -154,6 +154,32 @@ work too. The commit gate audits each commit as it is made.
   it lets through has that tree, which is how Stop knows the commit was
   reviewed.
 
+## Two gates: why both, and when to revisit
+
+Not **The gate has two moments** (hook entry against ingest). This is
+two hooks that each start an audit. Spec section 9.2, **Two gates**.
+
+| | Commit gate | Stop |
+| --- | --- | --- |
+| fires | during the turn, at each `git commit` | at the end of every turn |
+| audits | that one commit | from the last answered commit to the working tree |
+| uncommitted work | no | yes |
+| a commit by Codex or a human, one made with `--no-verify`, or any on git < 2.54 | no | yes |
+
+When the agent commits, the commit gate fires first and Stop last. Stop
+starts after what the commit gate answered, so it usually sees only
+uncommitted work, or nothing.
+
+- **Stop cannot go.** It is the only gate for uncommitted work and the
+  only one that works everywhere.
+- **The commit gate is kept** because it audits each change while it is
+  one commit, and a violation is fixed before it is in history.
+- **The cost** is that the two must agree on what was reviewed. Each gap
+  fixed so far (#46, #47) was one gate not honouring the other's answer.
+- **Revisit when** another such gap turns up, or the ledger shows Stop
+  re-auditing work the commit gate answered. The simpler model is Stop
+  alone with `--since-answer`, reviewing one turn's commits at a time.
+
 ## An audit records what it reviewed
 
 A working-tree audit reads a **snapshot**: `git add -A` into a copy of
