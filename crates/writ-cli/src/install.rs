@@ -64,12 +64,45 @@ impl Host {
     }
 }
 
-/// Write the registration and the gate into a host's configuration.
+/// What `writ install` can be pointed at: one host, or the git commit gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Target {
+    /// Claude Code.
+    ClaudeCode,
+    /// Codex CLI.
+    Codex,
+    /// Cursor.
+    Cursor,
+    /// OpenCode.
+    Opencode,
+    /// The git commit gate, in the global git config.
+    Git,
+}
+
+impl Target {
+    fn host(self) -> Option<Host> {
+        match self {
+            Self::ClaudeCode => Some(Host::ClaudeCode),
+            Self::Codex => Some(Host::Codex),
+            Self::Cursor => Some(Host::Cursor),
+            Self::Opencode => Some(Host::Opencode),
+            Self::Git => None,
+        }
+    }
+}
+
+/// Set writ up for your coding agents and git. With no target, it finds
+/// them, shows each change, and asks before writing it
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// Which host to configure
+    /// One host, or `git`, to configure without asking. Leave it out for
+    /// the guided setup
     #[arg(value_enum)]
-    pub host: Host,
+    pub host: Option<Target>,
+
+    /// Accept every change the guided setup offers, without asking
+    #[arg(long, conflicts_with_all = ["host", "print"])]
+    pub yes: bool,
 
     /// Show what would be written and change nothing
     #[arg(long)]
@@ -390,7 +423,7 @@ fn merge_named(existing: Option<&str>, force: bool, path: &[&str], value: Value)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateEvent {
     /// The end of a turn. The agent may have committed, so the range
-    /// has to reach back to the branch point.
+    /// reaches back to the last answer.
     Turn,
     /// The end of one subagent. Nothing is committed yet, so the
     /// working tree is exactly that subagent's own work.
@@ -412,34 +445,23 @@ impl GateEvent {
 
 /// The command a gate hook runs, per host protocol. Section 9.2.
 ///
-/// The turn's gate resolves a branch point first. Left at writ's own
-/// default the range is the working tree against HEAD, which is empty
-/// for any agent that commits as it goes — and those are the agents
-/// most worth gating. `merge-base` against the remote's default branch
-/// is the closest a hook can get to "what this branch changed" without
-/// writ keeping state it has no way to key.
+/// The turn's gate starts at the last answer: the newest commit in the
+/// branch's history that an answered audit reviewed, or the branch point
+/// against the remote's default branch when there is none. Left at writ's
+/// own default the range is the working tree against HEAD, which is empty
+/// for any agent that commits as it goes — and those are the agents most
+/// worth gating. writ resolves the start itself, so the hook is one
+/// command and not a shell program each host copy has to keep in step.
 ///
 /// The subagent's gate keeps the default on purpose. A subagent has not
-/// committed, so the working tree is its own work; the branch point
+/// committed, so the working tree is its own work; reaching further back
 /// would hand a read-only subagent every violation its parent had
 /// already committed and ask it to fix them.
-///
-/// Every clause is POSIX `sh`. It degrades to the plain command outside
-/// a repository, and `git` never reads stdin, so the host's payload
-/// still reaches writ.
 fn gate_command(host: &str, event: GateEvent) -> String {
     let audit = format!("writ audit --hook {host}");
     match event {
         GateEvent::Subagent => audit,
-        GateEvent::Turn => format!(
-            "base=\"\"; \
-             for r in \"$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)\" \
-             origin/main origin/master; do \
-             [ -n \"$r\" ] || continue; \
-             base=$(git merge-base HEAD \"$r\" 2>/dev/null) && [ -n \"$base\" ] && break; \
-             done; \
-             if [ -n \"$base\" ]; then {audit} --diff \"$base\"; else {audit}; fi"
-        ),
+        GateEvent::Turn => format!("{audit} --since-answer"),
     }
 }
 
@@ -1003,11 +1025,77 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Whether an enabled `writ@writ` plugin already gates this plan's host.
+///
+/// Only Claude Code has the plugin, and its settings file is the plan's
+/// gate step, so that is the file read.
+pub fn plugin_gates(plan: &Plan) -> bool {
+    plan.steps
+        .iter()
+        .filter(|step| step.role == Role::Gate)
+        .any(|step| {
+            read(&step.path)
+                .ok()
+                .flatten()
+                .and_then(|text| serde_json::from_str::<Map<String, Value>>(&text).ok())
+                .is_some_and(|document| plugin_gates_here(&document))
+        })
+}
+
 /// Run the subcommand.
 pub fn run(args: &Args, roots: &Roots) -> Result<()> {
-    let plan = plan(args.host, args.project, roots)?;
+    let Some(target) = args.host else {
+        return guided(args, roots);
+    };
+    let Some(host) = target.host() else {
+        let machine = crate::guide::Machine::here(roots.clone());
+        print!("{}", crate::guide::install_git(&machine, args.print)?);
+        return Ok(());
+    };
+    let plan = plan(host, args.project, roots)?;
     let reports = execute(&plan, args.print, args.force)?;
     print!("{}", render_report(&plan, &reports, args.print));
+    Ok(())
+}
+
+/// The guided setup. It asks on a terminal, takes `--yes` in place of the
+/// answers, and without either refuses before it reads or writes anything.
+/// It never waits on a stdin nobody will write to. P7.
+fn guided(args: &Args, roots: &Roots) -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    if args.project {
+        return Err(Error::Validation {
+            message: "writ install --project needs a host: writ install claude-code --project"
+                .to_string(),
+        });
+    }
+    let interactive = std::io::stdin().is_terminal();
+    if !args.yes && !interactive {
+        return Err(Error::Validation {
+            message: "writ install asks before each change, and there is no terminal to                       ask on. Run it in a terminal, pass --yes to accept every change, or                       name one target: writ install claude-code"
+                .to_string(),
+        });
+    }
+    let machine = crate::guide::Machine::here(roots.clone());
+    let yes = args.yes;
+    // Each question is printed with everything before it, so the reader
+    // sees the change they are asked about.
+    let mut ask = |question: &str, out: &mut String| {
+        print!("{out}{question}");
+        out.clear();
+        let _ = std::io::stdout().flush();
+        if yes {
+            println!("yes");
+            return true;
+        }
+        let mut line = String::new();
+        let _ = std::io::stdin().lock().read_line(&mut line);
+        matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    };
+    let mut out = String::new();
+    crate::guide::guide(&machine, &mut ask, &mut out)?;
+    print!("{out}");
     Ok(())
 }
 

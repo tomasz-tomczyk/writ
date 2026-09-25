@@ -112,7 +112,8 @@ carries it and writ's default is unchanged.
 
 | Hook | Range | Why |
 | --- | --- | --- |
-| `Stop` | `merge-base` against the remote's default branch | The agent may have committed |
+| git `pre-commit` | `--cached`: the index against HEAD | It is the change being committed |
+| `Stop` | `--since-answer`: from the last answered commit, else the branch point | The agent may have committed |
 | `SubagentStop` | the default: working tree against HEAD | A subagent has not committed, so the tree is its own work |
 
 Do not give the subagent hook the branch point. It would hand a
@@ -126,6 +127,52 @@ drifts, which is P8.
 The prompt does not carry the diff: see *The prompt points at the
 diff*. The diff the agent is asked to read is still unbounded. A long
 branch is a long read, paid only when the agent reads it.
+
+## The commit gate
+
+**Audit the change while it is small.** Stop audits after the agent has
+committed, which is why it needed a range at all, and a branch-point
+range drags in the whole branch and, on a stacked branch, the parent's
+work too. The commit gate audits each commit as it is made.
+
+- **It lives in git config, not in `.git/hooks`.** `hook.writ.command`
+  and `hook.writ.event = pre-commit`, set globally by `writ install`.
+  That needs git 2.54, which is the first git with hooks in config. It
+  runs alongside a repository's own hook file, Husky's `core.hooksPath`
+  included, and one repository can opt out with `hook.writ.enabled
+  false`. Never write into `.git/hooks`: that file is the repository's.
+- **It gates agents only.** `--hook git` passes silently unless
+  `CLAUDECODE`, `CURSOR_AGENT` or `GEMINI_CLI` is set. Codex documents
+  no such variable, so a Codex commit passes here and is audited at the
+  next Stop instead.
+- **Exit 1 refuses the commit**, with the pointer on stderr, which is
+  where an agent reads a failed commit. It reads no stdin and keeps no
+  retry cap: the agent retries by committing again, and a retry of an
+  answered change is covered.
+- **It records the index tree** (`audits.tree`, schema 8). The commit
+  it lets through has that tree, which is how Stop knows the commit was
+  reviewed.
+
+## The Stop gate starts at the last answer
+
+`--since-answer` walks HEAD's first-parent history for the newest commit
+an answered audit reviewed up to, and audits from there. With none, it
+falls back to the branch point against the remote's default branch, and
+with no branch point to the working tree against HEAD.
+
+| Answered audit | Counts for |
+| --- | --- |
+| staged (`--cached`) | the commit whose tree it recorded |
+| over a range | the head it ran at |
+| working tree against HEAD | **nothing** |
+
+The last row is deliberate. A subagent's audit saw only uncommitted
+work; counting its head would mark every commit before it reviewed.
+
+A stacked branch needs no configuration: its parent's answered commits
+are in its history, so it starts after them. Everything before the
+answer point is taken as reviewed, so a commit made with `--no-verify`
+before an answered audit is not audited again.
 
 ## The gate points, it does not paste
 

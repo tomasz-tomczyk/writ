@@ -44,6 +44,17 @@ pub struct Args {
     #[arg(long, value_name = "RANGE", conflicts_with = "ingest")]
     pub diff: Option<String>,
 
+    /// Audit what is staged, against HEAD: the change a commit is about
+    /// to record. `--hook git` implies it
+    #[arg(long, conflicts_with_all = ["diff", "ingest"])]
+    pub cached: bool,
+
+    /// Audit from the last commit an answered audit reviewed, or from
+    /// where the branch left the remote's default branch when there is
+    /// none. What the Stop gate uses
+    #[arg(long = "since-answer", conflicts_with_all = ["diff", "cached", "ingest"])]
+    pub since_answer: bool,
+
     /// prompt, json or text
     #[arg(long, default_value_t = AuditFormat::Prompt, value_name = "FORMAT")]
     pub format: AuditFormat,
@@ -312,7 +323,20 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
         message: error.to_string(),
     })?;
     let repo = git::discover(&cwd)?;
-    let (text, range) = git::diff(&repo.root, args.diff.as_deref())?;
+    // The commit gate audits the change being committed, which is the
+    // index. Spec section 9.2, **The commit gate**.
+    let cached = args.cached || (args.hook == Some(Host::Git) && args.diff.is_none());
+    let mut store = Store::open(db)?;
+    let range = if args.since_answer {
+        since_answer(&store, &repo)?
+    } else {
+        args.diff.clone()
+    };
+    let (text, range) = if cached {
+        git::diff_cached(&repo.root)?
+    } else {
+        git::diff(&repo.root, range.as_deref())?
+    };
     let diff = Diff::parse(&text);
     if diff.is_empty() {
         return Err(Error::EmptyDiff { range });
@@ -333,14 +357,17 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
         diff_range: range,
         diff_digest: diff_digest(&text),
         head: git::head(&repo.root),
+        tree: if cached {
+            git::index_tree(&repo.root)
+        } else {
+            None
+        },
         since: None,
     };
     let budget = Budget {
         max_rules: args.max_rules.unwrap_or(config.audit.max_rules),
         max_chars: args.max_chars.unwrap_or(config.audit.max_chars),
     };
-
-    let mut store = Store::open(db)?;
 
     let mut candidates = store.candidates(&scope)?;
     let considered = candidates.len();
@@ -475,12 +502,44 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     Ok(run)
 }
 
+/// Where the Stop gate starts. Spec section 9.2, **The Stop gate starts at
+/// the last answer**.
+///
+/// The newest commit in HEAD's first-parent history that an answered audit
+/// reviewed up to: a commit whose tree an answered staged audit saw, or a
+/// commit an answered range audit ran at. Everything before it was put in
+/// front of a reviewer, so starting there reviews only what is new — and a
+/// branch cut from another branch starts after the parent's reviewed work
+/// without anyone naming the parent.
+///
+/// With no such commit, the branch point against the remote's default
+/// branch, and with no branch point, `None`: the working tree against HEAD.
+/// An answer at HEAD itself is the same thing, so it is `None` as well.
+fn since_answer(store: &Store, repo: &git::Repo) -> Result<Option<String>> {
+    let (heads, trees) = store.answered_points(&repo.identity)?;
+    let history = git::first_parent_history(&repo.root, git::HISTORY_DEPTH);
+    let answered = history
+        .iter()
+        .position(|(commit, tree)| heads.contains(commit) || trees.contains(tree));
+    let base = match answered {
+        Some(0) => return Ok(None),
+        Some(index) => Some(history[index].0.clone()),
+        None => git::branch_point(&repo.root),
+    };
+    Ok(base.filter(|base| history.first().map(|(head, _)| head) != Some(base)))
+}
+
 /// The last answered audit of this range, and the paths of this diff that
 /// changed after it.
 ///
 /// Nothing when there is no such audit, or when git can no longer compare
 /// against its commit. P6: the prompt is whole without the section.
 fn since(store: &Store, scope: &AuditScope, root: &Path) -> Result<Option<Since>> {
+    // A staged diff is compared with the index, not the working tree, so
+    // "what changed since that commit" would describe the wrong thing.
+    if scope.diff_range == git::CACHED {
+        return Ok(None);
+    }
     let Some((audit_id, head, learnings)) =
         store.last_answer(&scope.identity, &scope.diff_range)?
     else {

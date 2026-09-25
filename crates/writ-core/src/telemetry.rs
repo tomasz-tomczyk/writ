@@ -80,6 +80,7 @@ pub enum HookHostMetric {
     ClaudeCode,
     Codex,
     Cursor,
+    Git,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +164,7 @@ impl CounterMetric {
             Self::HookHost(HookHostMetric::ClaudeCode) => ("hook_host", "claude-code"),
             Self::HookHost(HookHostMetric::Codex) => ("hook_host", "codex"),
             Self::HookHost(HookHostMetric::Cursor) => ("hook_host", "cursor"),
+            Self::HookHost(HookHostMetric::Git) => ("hook_host", "git"),
             Self::GateResult(GateResultMetric::Pass) => ("gate_result", "pass"),
             Self::GateResult(GateResultMetric::Block) => ("gate_result", "block"),
             Self::GateResult(GateResultMetric::RetryCapped) => ("gate_result", "retry_capped"),

@@ -583,8 +583,8 @@ impl Store {
         let prompt = render_prompt(&id, scope, selected);
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO audits (id, repo, diff_range, considered, sent, prompt, diff_digest, head)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO audits (id, repo, diff_range, considered, sent, prompt, diff_digest, head, tree)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &id,
                 scope.identity.value(),
@@ -594,6 +594,7 @@ impl Store {
                 &prompt,
                 &scope.diff_digest,
                 &scope.head,
+                &scope.tree,
             ],
         )?;
         for (one, digest) in selected.iter().zip(slice_digests) {
@@ -656,6 +657,49 @@ impl Store {
             .query_map([&id], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Some((id, head, learnings)))
+    }
+
+    /// The commits and trees answered audits in this repository reviewed up
+    /// to. Spec section 9.2, **The Stop gate starts at the last answer**.
+    ///
+    /// Two kinds of audit count, and one does not:
+    ///
+    /// - a staged audit answers for the commit that records its index, so
+    ///   its **tree** counts;
+    /// - an audit over a range answers for everything from the range's
+    ///   start to the commit it ran at, so its **head** counts;
+    /// - an audit of the working tree against HEAD — a subagent's, or a
+    ///   plain `writ audit` — saw only uncommitted work. The commits
+    ///   before its head were never in front of it, so its head does not
+    ///   count.
+    ///
+    /// Answered means ingested against, as for coverage.
+    pub fn answered_points(&self, identity: &RepoIdentity) -> Result<(Vec<String>, Vec<String>)> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT head, tree, diff_range FROM audits
+              WHERE repo IS ?1 AND ingested_at IS NOT NULL
+                AND (head IS NOT NULL OR tree IS NOT NULL)",
+        )?;
+        let mut heads = Vec::new();
+        let mut trees = Vec::new();
+        let rows = stmt.query_map([identity.value()], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (head, tree, range) = row?;
+            if let Some(tree) = tree {
+                trees.push(tree);
+            } else if let Some(head) = head
+                && !matches!(range.as_deref(), None | Some("HEAD") | Some("--cached"))
+            {
+                heads.push(head);
+            }
+        }
+        Ok((heads, trees))
     }
 
     /// The prompt this audit sent. Spec section 9.2, **The gate points, it
@@ -1354,6 +1398,7 @@ mod tests {
             diff_range: "HEAD".into(),
             diff_digest: "test digest".into(),
             head: None,
+            tree: None,
             since: None,
         }
     }
@@ -1604,6 +1649,7 @@ mod tests {
             diff_range: range.into(),
             diff_digest: "d".into(),
             head: head.map(str::to_string),
+            tree: None,
             since: None,
         };
         let selected = |ids: &[&String]| -> Vec<Selected> {
@@ -1679,6 +1725,7 @@ mod tests {
             diff_range: "HEAD".into(),
             diff_digest: "the digest".into(),
             head: None,
+            tree: None,
             since: None,
         };
         let selected = vec![Selected {
@@ -1772,6 +1819,7 @@ mod tests {
             diff_range: "HEAD".into(),
             diff_digest: "the digest".into(),
             head: None,
+            tree: None,
             since: None,
         };
         let one = Selected {
@@ -3027,6 +3075,7 @@ mod tests {
             diff_range: "HEAD".into(),
             diff_digest: "test digest".into(),
             head: None,
+            tree: None,
             since: None,
         };
         assert!(
