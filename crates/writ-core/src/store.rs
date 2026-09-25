@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{Connection, Row, Transaction, functions::FunctionFlags, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, functions::FunctionFlags, params};
 
 use crate::audit::{
     AuditScope, Budget, Candidate, FindingsInput, Ingested, Outcome, Outcomes, Selected,
@@ -491,6 +491,7 @@ impl Store {
             let one = Selected {
                 learning: candidate.learning.clone(),
                 exemplars: self.exemplars_of(&candidate.learning.id)?,
+                hits: None,
             };
             let cost = rule_block(selected.len() + 1, &one).chars().count();
             if chars + cost > budget.max_chars as usize {
@@ -582,8 +583,8 @@ impl Store {
         let prompt = render_prompt(&id, scope, selected);
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO audits (id, repo, diff_range, considered, sent, prompt, diff_digest)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO audits (id, repo, diff_range, considered, sent, prompt, diff_digest, head)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &id,
                 scope.identity.value(),
@@ -592,6 +593,7 @@ impl Store {
                 selected.len() as i64,
                 &prompt,
                 &scope.diff_digest,
+                &scope.head,
             ],
         )?;
         for (one, digest) in selected.iter().zip(slice_digests) {
@@ -616,6 +618,44 @@ impl Store {
         }
         tx.commit()?;
         Ok(id)
+    }
+
+    /// The newest audit of `diff_range` in this repository that was
+    /// answered and recorded a commit: its id, that commit, and the
+    /// learnings it carried. Spec section 9.2, **Changed since your last
+    /// answer**.
+    ///
+    /// Answered means ingested against, for the reason coverage requires
+    /// it: an audit nobody answered tells the agent nothing about what it
+    /// already checked. The learnings come from `audit_coverage`, which
+    /// records what each audit asked about.
+    pub fn last_answer(
+        &self,
+        identity: &RepoIdentity,
+        diff_range: &str,
+    ) -> Result<Option<(String, String, Vec<String>)>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, head FROM audits
+                  WHERE repo IS ?1 AND diff_range = ?2
+                    AND ingested_at IS NOT NULL AND head IS NOT NULL
+                  ORDER BY id DESC
+                  LIMIT 1",
+                params![identity.value(), diff_range],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((id, head)) = row else {
+            return Ok(None);
+        };
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT learning_id FROM audit_coverage WHERE audit_id = ?1")?;
+        let learnings = stmt
+            .query_map([&id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some((id, head, learnings)))
     }
 
     /// The prompt this audit sent. Spec section 9.2, **The gate points, it
@@ -1313,6 +1353,8 @@ mod tests {
             diff: Diff::parse(diff),
             diff_range: "HEAD".into(),
             diff_digest: "test digest".into(),
+            head: None,
+            since: None,
         }
     }
 
@@ -1532,6 +1574,7 @@ mod tests {
         let selected = vec![Selected {
             learning: store.get(&learning).unwrap(),
             exemplars: Vec::new(),
+            hits: None,
         }];
         assert!(
             !store
@@ -1543,6 +1586,81 @@ mod tests {
                 .unwrap(),
             "a row nobody sliced must cover nothing"
         );
+    }
+
+    /// The last audit of a range that was answered, with the commit it was
+    /// emitted at and the learnings it carried. Spec 9.2, **Changed since
+    /// your last answer**.
+    #[test]
+    fn the_last_answer_is_the_newest_ingested_audit_of_the_same_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("learnings.db")).unwrap();
+        let first = active(&mut store, "first", &["global"]);
+        let second = active(&mut store, "second", &["global"]);
+        let identity = RepoIdentity::Remote("github.com/o/r".into());
+        let scope = |range: &str, head: Option<&str>| AuditScope {
+            identity: identity.clone(),
+            diff: Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n"),
+            diff_range: range.into(),
+            diff_digest: "d".into(),
+            head: head.map(str::to_string),
+            since: None,
+        };
+        let selected = |ids: &[&String]| -> Vec<Selected> {
+            ids.iter()
+                .map(|id| Selected {
+                    learning: store.get(id).unwrap(),
+                    exemplars: Vec::new(),
+                    hits: None,
+                })
+                .collect()
+        };
+        let one = selected(&[&first]);
+        let both = selected(&[&first, &second]);
+        let open = |store: &mut Store, scope: &AuditScope, sel: &[Selected]| {
+            store
+                .start_audit(
+                    scope,
+                    1,
+                    sel,
+                    &crate::audit::slice_digests(&scope.diff, sel),
+                )
+                .unwrap()
+        };
+        let answer = |store: &mut Store, audit: &str| {
+            store
+                .ingest(&FindingsInput {
+                    audit_id: audit.to_string(),
+                    findings: Vec::new(),
+                })
+                .unwrap();
+        };
+
+        assert_eq!(store.last_answer(&identity, "base").unwrap(), None);
+
+        let older = open(&mut store, &scope("base", Some("aaa")), &one);
+        answer(&mut store, &older);
+        let newer = open(&mut store, &scope("base", Some("bbb")), &both);
+        answer(&mut store, &newer);
+        // Not answered, so not an answer.
+        open(&mut store, &scope("base", Some("ccc")), &one);
+        // Another range, and a row with no head, are not candidates.
+        let other = open(&mut store, &scope("HEAD", Some("ddd")), &one);
+        answer(&mut store, &other);
+        let headless = open(&mut store, &scope("base", None), &one);
+        answer(&mut store, &headless);
+
+        let (audit, head, mut learnings) = store.last_answer(&identity, "base").unwrap().unwrap();
+        learnings.sort();
+        let mut expected = vec![first.clone(), second.clone()];
+        expected.sort();
+        assert_eq!(
+            (audit, head, learnings),
+            (newer, "bbb".to_string(), expected)
+        );
+
+        let elsewhere = RepoIdentity::Remote("github.com/o/other".into());
+        assert_eq!(store.last_answer(&elsewhere, "base").unwrap(), None);
     }
 
     /// Both halves of the coverage condition, at the store, now keyed per
@@ -1560,10 +1678,13 @@ mod tests {
             diff: diff.clone(),
             diff_range: "HEAD".into(),
             diff_digest: "the digest".into(),
+            head: None,
+            since: None,
         };
         let selected = vec![Selected {
             learning: store.get(&learning).unwrap(),
             exemplars: Vec::new(),
+            hits: None,
         }];
         let audit = store
             .start_audit(
@@ -1650,10 +1771,13 @@ mod tests {
             diff: diff.clone(),
             diff_range: "HEAD".into(),
             diff_digest: "the digest".into(),
+            head: None,
+            since: None,
         };
         let one = Selected {
             learning: store.get(&first).unwrap(),
             exemplars: Vec::new(),
+            hits: None,
         };
         let audit = store
             .start_audit(
@@ -1684,6 +1808,7 @@ mod tests {
         let two = Selected {
             learning: store.get(&second).unwrap(),
             exemplars: Vec::new(),
+            hits: None,
         };
         assert!(
             !store
@@ -2901,6 +3026,8 @@ mod tests {
             diff: Diff::parse(DIFF),
             diff_range: "HEAD".into(),
             diff_digest: "test digest".into(),
+            head: None,
+            since: None,
         };
         assert!(
             selected_titles(&store, &elsewhere).is_empty(),

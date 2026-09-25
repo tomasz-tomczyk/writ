@@ -123,17 +123,17 @@ event. Its payload carries `agent_type`, and using it to skip read-only
 agents is tempting and wrong — a hand-maintained list of agent names
 drifts, which is P8.
 
-The diff in a prompt is **not** bounded by `max_rules` or `max_chars`,
-which bound rule text. A long branch renders a large prompt every turn.
-That cost is accepted: a large prompt beats a gate that audits nothing.
+The prompt does not carry the diff: see *The prompt points at the
+diff*. The diff the agent is asked to read is still unbounded. A long
+branch is a long read, paid only when the agent reads it.
 
 ## The gate points, it does not paste
 
 What `--hook` emits is a **pointer** — the audit id and the two ways to
 fetch what is behind it — never the prompt. Every host renders a blocked
-turn's message into the transcript verbatim, so pasting a prompt that
-carries the whole diff puts 100 KB of a long branch in front of the
-developer after every turn, for a document written for the agent.
+turn's message into the transcript verbatim, so pasting the prompt puts
+a document written for the agent in front of the developer after every
+turn.
 
 The prompt is recorded on the `audits` row at emit and read back by
 `writ audit --fetch ID`, or by the `writ_audit` tool's `fetch` argument,
@@ -152,10 +152,54 @@ table and dropped the rows that predate the column rather than
 backfilling them with `''`, which `--fetch` would have handed an agent
 as a document. Their findings cascaded with them.
 
-The cost of recording the prompt is that the diff is now in the database
-as well as in the turn. On a long branch that is real growth, and P4
-means it is never reclaimed by pruning. `render_pointer` and its golden
-file pin the emitted text, beside `render_prompt` and its own.
+The prompt is stored and P4 means pruning never reclaims it. It holds
+rule text and at most five hits per rule, not the diff, so a row does
+not grow with the branch. `render_pointer` and its golden file pin the
+emitted text, beside `render_prompt` and its own.
+
+## The prompt points at the diff, it does not carry it
+
+Measured on 2026-09-25: a mean prompt of 72 KB over 410 audits, and in
+one ordinary audit the diff was 31.4 KB of a 36.2 KB prompt. The agent
+that wrote the change can read it with git. Spec section 9.2.
+
+Each selected learning carries `start here` — the changed lines its
+matcher found, as `path:line` and text, at most five, then a count — and
+`slice`, the `git diff RANGE -- PATHS` command that prints the part of
+the diff it applies to. The range is the audit's own `diff_range`, so
+the command prints exactly what writ hashed.
+
+- **A hit is shown only on a changed line.** `ast-grep` scans whole
+  files, so without the filter `start here` points at old code. A
+  pre-image hit is shown at its old line, marked `removed`.
+- **Selection is unchanged.** A match on an unchanged line still
+  selects, as section 8.2 always said. The filter decides only what is
+  shown. A learning selected that way says its matcher matched only
+  unchanged lines.
+- **A hit is where to look, not a finding.** The prompt says so: a
+  matcher can match code that obeys the rule and miss a violation
+  written another way.
+- **Hits are not rule text.** They render after `rule_block` and are
+  bounded by `MAX_HITS` per learning, not by `max_chars`.
+
+The risk is rubber-stamping: an agent that does not run the command
+sees no code. Watch `times_applied` against `times_selected`. If it
+falls, paste the diff again when it is small.
+
+## Changed since your last answer
+
+A gate that fires again on one range is usually firing on the agent's
+own fix. `audits.head` (schema 7) records `git rev-parse HEAD` at emit.
+When an earlier audit of the same repo and `diff_range` was ingested
+against and has a head, the prompt names it, the paths of this diff that
+changed since (`git diff --name-only HEAD_THEN`), the command that
+prints what changed, and marks `new` each selected learning that audit
+did not carry, read from its `audit_coverage` rows.
+
+The path list is a superset: uncommitted work already in the answered
+audit is listed again. Listing too much costs a line; listing too little
+would hide new work. When git cannot compare against the old head, the
+section is left out. It changes no gate decision.
 
 **Ingest only happens if the prompt asks for it.** The hook process
 exits when it has printed. A reply the agent leaves in the conversation
@@ -336,8 +380,8 @@ These are decisions, not preferences. Breaking one is a spec violation.
    Selection cost is therefore not bounded by the diff alone; it is
    bounded by how many active learnings survive the filter. If you
    improve that, say so. Do not write a test that implies it is already
-   true. The **diff** in a prompt is not bounded at all: see *What the
-   gate audits*.
+   true. The prompt carries no diff; the diff the agent reads is not
+   bounded at all: see *The prompt points at the diff*.
 6. **Fail honestly.** Every error names its real cause and exits with
    its own code. Never hang on stdin. See spec P7.
 7. **Never set `updated_at` by hand in a write.** A database trigger

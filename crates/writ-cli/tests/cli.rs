@@ -2164,6 +2164,274 @@ fn a_matcher_that_misses_drops_the_learning() {
     );
 }
 
+// --- the prompt points at the diff, spec section 9.2 --------------------
+
+/// A regex hit is shown by path and line, and only on a line the diff
+/// changed. An unchanged line the pattern also matches is not listed.
+#[test]
+fn a_regex_hit_is_listed_by_line_and_only_on_a_changed_line() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(root.join("b.rs"), "// TODO old\nfn b() {}\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "b"]);
+    sandbox.record(&[
+        "--scope",
+        "language:rust",
+        "--matcher",
+        "TODO",
+        "--matcher-kind",
+        "regex",
+        "--activate",
+    ]);
+    std::fs::write(root.join("b.rs"), "// TODO old\nfn b() {}\n// TODO new\n").unwrap();
+    // Outside the rule's `language:rust` scope, so the slice leaves it out.
+    std::fs::write(root.join("notes.md"), "TODO outside the scope\n").unwrap();
+    git(&root, &["add", "-N", "notes.md"]);
+
+    let output = sandbox.run_at(&root, &["audit"]);
+    output.assert_code(0);
+    assert!(
+        output
+            .stdout
+            .contains("start here:\n- b.rs:3  // TODO new\n"),
+        "{}",
+        output.stdout
+    );
+    assert!(!output.stdout.contains("b.rs:1"), "{}", output.stdout);
+    assert!(!output.stdout.contains("notes.md:"), "{}", output.stdout);
+    assert!(
+        output.stdout.contains("slice: `git diff HEAD -- b.rs`\n"),
+        "{}",
+        output.stdout
+    );
+    assert!(!output.stdout.contains("```diff"), "{}", output.stdout);
+}
+
+/// ast-grep scans the whole file, so its matches on unchanged lines have
+/// to be dropped from the list, or `start here` points at old code.
+#[test]
+fn an_ast_grep_hit_on_an_unchanged_line_is_not_listed() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(root.join("a.rs"), "fn main() {\n    let a = 1;\n}\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "a"]);
+    sandbox.record(&[
+        "--scope",
+        "language:rust",
+        "--matcher",
+        "let $A = $B;",
+        "--matcher-kind",
+        "ast_grep",
+        "--activate",
+    ]);
+    std::fs::write(
+        root.join("a.rs"),
+        "fn main() {\n    let a = 1;\n    let b = 2;\n}\n",
+    )
+    .unwrap();
+
+    let output = audit_with_ast_grep(&sandbox, &root, &[]);
+    output.assert_code(0);
+    assert!(
+        output
+            .stdout
+            .contains("start here:\n- a.rs:3  let b = 2;\n"),
+        "{}",
+        output.stdout
+    );
+    assert!(!output.stdout.contains("a.rs:2"), "{}", output.stdout);
+}
+
+/// A shape the change removed is listed at its old line, marked removed.
+#[test]
+fn an_ast_grep_hit_on_a_removed_line_is_listed_at_its_old_line() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(
+        root.join("a.ex"),
+        "defmodule A do\n  @spec value() :: integer()\n  def value, do: 1\nend\n",
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add spec"]);
+    sandbox.record(&[
+        "--scope",
+        "language:elixir",
+        "--matcher",
+        "@spec $A",
+        "--matcher-kind",
+        "ast_grep",
+        "--activate",
+    ]);
+    std::fs::write(
+        root.join("a.ex"),
+        "defmodule A do\n  def value, do: 1\nend\n",
+    )
+    .unwrap();
+
+    let output = audit_with_ast_grep(&sandbox, &root, &[]);
+    output.assert_code(0);
+    assert!(
+        output
+            .stdout
+            .contains("- a.ex:2 (removed)  @spec value() :: integer()\n"),
+        "{}",
+        output.stdout
+    );
+}
+
+/// The pre-image is the start of the audited range, not HEAD. A Stop hook
+/// audits from the merge-base, so a shape removed in an earlier commit on
+/// the branch is gone from HEAD and has to be read from the range's base.
+#[test]
+fn an_ast_grep_pre_image_is_read_at_the_start_of_the_range() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(
+        root.join("a.ex"),
+        "defmodule A do\n  @spec value() :: integer()\n  def value, do: 1\nend\n",
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add spec"]);
+    let base = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
+    sandbox.record(&[
+        "--scope",
+        "language:elixir",
+        "--matcher",
+        "@spec $A",
+        "--matcher-kind",
+        "ast_grep",
+        "--activate",
+    ]);
+    std::fs::write(
+        root.join("a.ex"),
+        "# one\n# two\n# three\ndefmodule A do\n  def value, do: 1\nend\n",
+    )
+    .unwrap();
+    git(&root, &["commit", "-qam", "drop spec"]);
+
+    let output = audit_with_ast_grep(&sandbox, &root, &["--diff", &base]);
+    output.assert_code(0);
+    assert!(
+        output
+            .stdout
+            .contains("- a.ex:2 (removed)  @spec value() :: integer()\n"),
+        "{}\n{}",
+        output.stdout,
+        output.stderr
+    );
+}
+
+/// Added hits come before removed ones across every path: what the change
+/// wrote is what a rule most often objects to.
+#[test]
+fn added_hits_are_listed_before_removed_ones() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(root.join("b.rs"), "// TODO gone\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "b"]);
+    sandbox.record(&["--matcher", "TODO", "--matcher-kind", "regex", "--activate"]);
+    std::fs::write(root.join("b.rs"), "").unwrap();
+    std::fs::write(root.join("c.rs"), "// TODO new\n").unwrap();
+    git(&root, &["add", "-N", "c.rs"]);
+
+    let output = sandbox.run_at(&root, &["audit"]);
+    output.assert_code(0);
+    assert!(
+        output
+            .stdout
+            .contains("start here:\n- c.rs:1  // TODO new\n- b.rs:1 (removed)  // TODO gone\n"),
+        "{}",
+        output.stdout
+    );
+}
+
+/// A rule with no matcher has nothing to point at but its slice.
+#[test]
+fn a_learning_with_no_matcher_carries_only_its_slice() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    sandbox.record(&["--activate"]);
+    std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+
+    let output = sandbox.run_at(&root, &["audit"]);
+    output.assert_code(0);
+    assert!(!output.stdout.contains("start here"), "{}", output.stdout);
+    assert!(
+        output.stdout.contains("slice: `git diff HEAD`\n"),
+        "{}",
+        output.stdout
+    );
+}
+
+/// A second audit of the same range, after the first was answered, names
+/// the commit it was answered at, the paths that changed since, and the
+/// rule that audit never carried. Spec 9.2, **Changed since your last
+/// answer**.
+#[test]
+fn a_second_audit_of_a_range_names_what_changed_since_the_answer() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    let base = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
+    let first = sandbox.record(&["--activate"]);
+    std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "work"]);
+    let answered_at = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
+
+    let output = sandbox.run_at(&root, &["audit", "--diff", &base]);
+    output.assert_code(0);
+    assert!(
+        !output.stdout.contains("Changed since"),
+        "{}",
+        output.stdout
+    );
+    let audit = output
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("audit-id: "))
+        .unwrap()
+        .to_string();
+    sandbox
+        .pipe(
+            &["audit", "--ingest"],
+            &format!(r#"{{"audit_id":"{audit}","findings":[]}}"#),
+        )
+        .assert_code(0);
+
+    // The fix, and a rule activated after the answer.
+    let second = sandbox.record(&["--activate"]);
+    std::fs::write(root.join("a.rs"), "fn main() { let y = 1; }\n").unwrap();
+    git(&root, &["commit", "-qam", "fix"]);
+
+    let output = sandbox.run_at(&root, &["audit", "--diff", &base]);
+    output.assert_code(0);
+    let expected = format!(
+        "## Changed since your last answer\n\n\
+         You answered audit {audit} at commit {answered_at}. These paths in the diff changed since then:\n\n\
+         - a.rs\n\n\
+         Read what changed: `git diff {answered_at} -- a.rs`\n"
+    );
+    assert!(output.stdout.contains(&expected), "{}", output.stdout);
+    assert!(
+        output
+            .stdout
+            .contains(&format!("id: {second}\nnew: not in audit {audit}\n")),
+        "{}",
+        output.stdout
+    );
+    assert!(
+        !output.stdout.contains(&format!("id: {first}\nnew:")),
+        "{}",
+        output.stdout
+    );
+}
+
 #[test]
 fn an_ast_grep_matcher_hits_a_shape_removed_from_the_working_tree() {
     let sandbox = Sandbox::new();
@@ -3333,8 +3601,8 @@ fn audit_id_of(text: &str) -> String {
         .to_string()
 }
 
-/// `--fetch` hands back the prompt the gate recorded, diff and all. The
-/// gate's stderr stays small; this is where the payload lives.
+/// `--fetch` hands back the prompt the gate recorded. The gate's stderr
+/// stays small; this is where the payload lives.
 #[test]
 fn fetch_returns_the_prompt_the_gate_recorded() {
     let sandbox = Sandbox::new();
@@ -3346,7 +3614,11 @@ fn fetch_returns_the_prompt_the_gate_recorded() {
     let fetched = sandbox.run_at(&root, &["audit", "--fetch", &audit_id]);
 
     fetched.assert_code(0);
-    assert!(fetched.stdout.contains("```diff"), "{}", fetched.stdout);
+    assert!(
+        fetched.stdout.contains("slice: `git diff"),
+        "{}",
+        fetched.stdout
+    );
     assert!(fetched.stdout.contains("prefer sd"), "{}", fetched.stdout);
     assert!(
         fetched.stdout.contains(&format!("audit-id: {audit_id}")),

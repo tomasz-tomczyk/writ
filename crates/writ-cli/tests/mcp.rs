@@ -321,10 +321,10 @@ fn the_audit_tool_fetches_the_prompt_a_gate_recorded() {
     assert!(raw.get("isError").is_none(), "{raw}");
     assert_eq!(raw["structuredContent"]["audit_id"], audit_id.as_str());
     // The document reaches the model as text, not as a JSON-escaped
-    // string it has to unescape a 100 KB diff out of.
+    // string it has to unescape.
     let text = raw["content"][0]["text"].as_str().unwrap();
     assert!(text.starts_with("# writ audit\n"), "{text}");
-    assert!(text.contains("```diff"), "{text}");
+    assert!(text.contains("slice: `git diff"), "{text}");
     assert!(text.contains(&format!("audit-id: {audit_id}")), "{text}");
 }
 

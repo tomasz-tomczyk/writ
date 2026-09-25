@@ -86,9 +86,8 @@ when the findings come back, not whether the agent reviews at all.
 What each protocol carries is a **pointer**: the audit id, and the two
 ways to fetch the document behind it. Not the document. Claude Code
 renders a blocked `Stop` hook's stderr into the transcript verbatim, and
-an audit prompt carries the whole diff, so pasting it puts the branch's
-full diff in front of you after every turn — for a document written for
-the agent.
+an audit prompt is a document written for the agent, so pasting it puts
+every rule and its hits in front of you after every turn.
 
 The agent fetches it by calling `writ_audit` with a `fetch` argument set
 to that audit id, which returns the diff, the learnings and the

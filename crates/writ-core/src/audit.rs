@@ -22,7 +22,57 @@ pub struct AuditScope {
     pub diff_range: String,
     /// [`diff_digest`] of the diff text this scope was built from.
     pub diff_digest: String,
+    /// The commit HEAD named when the audit was emitted, for the `audits`
+    /// row. `None` in a repository with no commit.
+    pub head: Option<String>,
+    /// The earlier audit of this range that was answered, and what changed
+    /// since. Spec section 9.2, **Changed since your last answer**.
+    pub since: Option<Since>,
 }
+
+/// An earlier audit of the same range that was answered, and what changed
+/// after it. Spec section 9.2, **Changed since your last answer**.
+///
+/// It changes no gate decision. It tells the agent where the new work is,
+/// because a gate that fires again on one range is usually firing on the
+/// agent's own fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Since {
+    /// The answered audit.
+    pub audit_id: String,
+    /// The commit HEAD named when it was emitted.
+    pub head: String,
+    /// The paths of this diff that changed since that commit. A superset:
+    /// uncommitted work already in the answered audit is listed again.
+    pub paths: Vec<String>,
+    /// The learnings that audit carried. A selected learning outside this
+    /// list has never been answered for this change.
+    pub learnings: Vec<String>,
+}
+
+/// One changed line a learning's matcher found. Spec section 9.2, **The
+/// prompt points at the diff, it does not carry it**.
+///
+/// It is where to look first, never a finding. A matcher is retrieval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    /// The path, as the diff names it.
+    pub path: String,
+    /// The line number: in the post-image for an added line, in the
+    /// pre-image for a removed one.
+    pub line: u32,
+    /// Whether the line is one the diff removed.
+    pub removed: bool,
+    /// The line's text.
+    pub text: String,
+}
+
+/// The most hits one learning shows. The rest are counted, not listed, so
+/// a loose pattern cannot grow the prompt back to the size of the diff.
+pub const MAX_HITS: usize = 5;
+
+/// The most characters of one hit's line the prompt shows.
+const MAX_HIT_CHARS: usize = 160;
 
 /// Hash the diff text a gate is about to audit. Spec section 9.2, **The
 /// gate does not re-nag a diff it already covered**.
@@ -187,6 +237,10 @@ pub struct Selected {
     pub learning: Learning,
     /// Its exemplars, oldest first.
     pub exemplars: Vec<Exemplar>,
+    /// What its matcher found on the lines the diff changed. `None` when
+    /// it has no matcher or the matcher could not be run; an empty list
+    /// when it matched only lines the diff did not change.
+    pub hits: Option<Vec<Hit>>,
 }
 
 /// Order candidates the way the budget spends on them. Spec 7.1 step 3.
@@ -263,8 +317,11 @@ pub fn rule_block(position: usize, selected: &Selected) -> String {
 
 /// The prompt `--format prompt` prints. Spec section 7.1 step 4.
 ///
-/// It carries the diff, then the selected rules, then what to do about
-/// each one and how to send that decision back.
+/// It names the diff rather than carrying it, then the selected rules,
+/// each with the changed lines its matcher found and the command that
+/// prints its slice, then what to do about each one and how to send that
+/// decision back. Spec section 9.2, **The prompt points at the diff, it
+/// does not carry it**.
 ///
 /// **It asks the agent to act.** A learning exists to change what the
 /// agent writes, so the prompt asks for the change and fixes only the
@@ -290,7 +347,7 @@ pub fn rule_block(position: usize, selected: &Selected) -> String {
 pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) -> String {
     let mut out = String::from("# writ audit\n\n");
     out.push_str(
-        "Check the diff below against the learnings below it. Report every \
+        "Check this diff against the learnings below. Report every \
          violation you find.\n\n",
     );
     out.push_str(&format!("audit-id: {audit_id}\n"));
@@ -303,9 +360,27 @@ pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) 
     }
     out.push_str(&format!("diff-range: {}\n", scope.diff_range));
 
-    out.push_str("\n## Diff\n\n```diff\n");
-    out.push_str(scope.diff.text.trim_end_matches('\n'));
-    out.push_str("\n```\n");
+    // The diff is named, not pasted. Spec 9.2, **The prompt points at the
+    // diff, it does not carry it**: it was 87% of an ordinary prompt, and
+    // the agent that wrote the change can read it with git.
+    out.push_str(&format!(
+        "\nThe diff is not pasted here. Read it with `git diff {}`. Each \
+         learning below names its slice: the part of the diff it applies \
+         to.\n",
+        shell_word(&scope.diff_range)
+    ));
+    if selected.iter().any(|one| one.hits.is_some()) {
+        out.push_str(
+            "\n`start here` lists changed lines a learning's matcher found. \
+             Look there first, but it is not a list of violations: a matcher \
+             can match code that obeys the rule, and miss a violation \
+             written another way. Check the whole slice.\n",
+        );
+    }
+
+    if let Some(since) = &scope.since {
+        out.push_str(&since_section(since));
+    }
 
     out.push_str("\n## Learnings\n");
     if selected.is_empty() {
@@ -313,7 +388,26 @@ pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) 
     } else {
         for (index, one) in selected.iter().enumerate() {
             out.push('\n');
-            out.push_str(&rule_block(index + 1, one));
+            let block = rule_block(index + 1, one);
+            // The `new` marker sits under the id, where a reviewer reads
+            // which rule this is. It is not rule text, so the budget,
+            // which measured `rule_block`, never counted it.
+            let new = scope
+                .since
+                .as_ref()
+                .filter(|since| !since.learnings.contains(&one.learning.id))
+                .map(|since| format!("new: not in audit {}\n", since.audit_id));
+            match (new, block.split_once("\nenforcement: ")) {
+                (Some(new), Some((top, rest))) => {
+                    out.push_str(top);
+                    out.push('\n');
+                    out.push_str(&new);
+                    out.push_str("enforcement: ");
+                    out.push_str(rest);
+                }
+                _ => out.push_str(&block),
+            }
+            out.push_str(&rule_pointers(one, scope));
         }
     }
 
@@ -365,14 +459,125 @@ pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) 
     out
 }
 
+/// The section naming what changed since the last answered audit.
+fn since_section(since: &Since) -> String {
+    let mut out = String::from("\n## Changed since your last answer\n\n");
+    if since.paths.is_empty() {
+        out.push_str(&format!(
+            "You answered audit {} at commit {}. No path in the diff changed \
+             since then.\n",
+            since.audit_id, since.head
+        ));
+    } else {
+        out.push_str(&format!(
+            "You answered audit {} at commit {}. These paths in the diff \
+             changed since then:\n\n",
+            since.audit_id, since.head
+        ));
+        for path in &since.paths {
+            out.push_str(&format!("- {path}\n"));
+        }
+        out.push_str(&format!(
+            "\nRead what changed: `git diff {} -- {}`\n",
+            shell_word(&since.head),
+            shell_words(&since.paths)
+        ));
+    }
+    out.push_str(
+        "\nA learning marked `new` below was not in that audit, so read its \
+         whole slice.\n",
+    );
+    out
+}
+
+/// Where one learning should look: its hits, then its slice.
+///
+/// Rendered after [`rule_block`] and not counted against `max_chars`,
+/// which bounds rule text. [`MAX_HITS`] per learning bounds it instead.
+fn rule_pointers(one: &Selected, scope: &AuditScope) -> String {
+    let mut out = String::new();
+    match &one.hits {
+        None => {}
+        Some(hits) if hits.is_empty() => out.push_str(
+            "start here: the matcher matched only lines this diff did not \
+             change. Read the slice.\n",
+        ),
+        Some(hits) => {
+            out.push_str("start here:\n");
+            for hit in hits.iter().take(MAX_HITS) {
+                let marker = if hit.removed { " (removed)" } else { "" };
+                out.push_str(&format!(
+                    "- {}:{}{marker}  {}\n",
+                    hit.path,
+                    hit.line,
+                    clip(hit.text.trim())
+                ));
+            }
+            if hits.len() > MAX_HITS {
+                out.push_str(&format!(
+                    "- and {} more in the slice\n",
+                    hits.len() - MAX_HITS
+                ));
+            }
+        }
+    }
+
+    // Every path of the diff is no narrowing at all, so the command names
+    // none — which is also what a `global` rule asks for.
+    let mut paths = matched_paths(&one.learning, &scope.diff);
+    let range = shell_word(&scope.diff_range);
+    if paths.len() == scope.diff.paths.len() {
+        out.push_str(&format!("slice: `git diff {range}`\n"));
+    } else {
+        paths.sort();
+        out.push_str(&format!(
+            "slice: `git diff {range} -- {}`\n",
+            shell_words(&paths)
+        ));
+    }
+    out
+}
+
+/// A line cut to [`MAX_HIT_CHARS`], so one minified line cannot fill the
+/// prompt.
+fn clip(text: &str) -> String {
+    if text.chars().count() <= MAX_HIT_CHARS {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(MAX_HIT_CHARS).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// A word a POSIX shell reads back as itself. The commands in the prompt
+/// are meant to be pasted, and a path with a space would otherwise split.
+fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_./@%+=:,-".contains(c));
+    if plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    }
+}
+
+fn shell_words(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|word| shell_word(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// What a gate emits in the host's protocol. Spec section 9.2, **The gate
 /// points, it does not paste**.
 ///
-/// The prompt carries the whole diff, and a host renders a Stop hook's
-/// block verbatim into the transcript. On a long-lived branch that is
-/// 100 KB of diff in front of the developer after every turn, for a
-/// document written for the agent. So the gate emits this instead: the
-/// audit id, and the two ways to fetch the document behind it.
+/// A host renders a Stop hook's block verbatim into the transcript, and
+/// the prompt is a document written for the agent: every selected rule,
+/// its hits, and how to report. So the gate emits this instead: the audit
+/// id, and the two ways to fetch the document behind it.
 ///
 /// Both paths are named for the same reason [`render_prompt`] names both:
 /// writ cannot see whether the host has MCP, and a pointer whose only path
@@ -410,8 +615,8 @@ pub fn render_pointer(audit_id: &str, sent: usize) -> String {
         "- Otherwise run `writ audit --fetch {audit_id}`.\n"
     ));
     out.push_str(
-        "\nWhat comes back carries the diff, the learnings, and how to report \
-         the findings. The audit is not finished until those findings reach \
+        "\nWhat comes back carries the learnings, where to look in the diff, \
+         and how to report the findings. The audit is not finished until those findings reach \
          writ.\n",
     );
     out
@@ -567,6 +772,8 @@ mod tests {
             diff: crate::diff::Diff::parse("diff --git a/a.rs b/a.rs\n+let x = 1;\n"),
             diff_range: "HEAD".into(),
             diff_digest: "d".into(),
+            head: None,
+            since: None,
         };
         let prompt = render_prompt("AUDIT", &scope, &[]);
 
@@ -592,6 +799,237 @@ mod tests {
             "{prompt}"
         );
         assert!(prompt.contains("Pick one for every finding."), "{prompt}");
+    }
+
+    const TWO_PATHS: &str = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -3,2 +3,2 @@
+-let old = sed();
++let x = sed();
+ keep
+diff --git a/web/b.ts b/web/b.ts
+--- a/web/b.ts
++++ b/web/b.ts
+@@ -1 +1 @@
+-a
++b
+";
+
+    fn scoped(id: &str, kind: ScopeKind, value: &str) -> Learning {
+        let mut one = learning(id, true);
+        one.title = format!("title {id}");
+        one.rule = format!("rule {id}");
+        one.rationale = format!("why {id}");
+        one.scopes = vec![Scope {
+            kind,
+            value: value.to_string(),
+        }];
+        one
+    }
+
+    fn hit(path: &str, line: u32, removed: bool, text: &str) -> Hit {
+        Hit {
+            path: path.into(),
+            line,
+            removed,
+            text: text.into(),
+        }
+    }
+
+    /// The prompt names the diff and the slice each rule applies to, and
+    /// carries no diff text. Spec 9.2, **The prompt points at the diff, it
+    /// does not carry it**.
+    #[test]
+    fn the_prompt_points_at_the_diff_and_carries_no_diff_text() {
+        let scope = AuditScope {
+            identity: crate::repo::RepoIdentity::Remote("github.com/o/r".into()),
+            diff: crate::diff::Diff::parse(TWO_PATHS),
+            diff_range: "041a89bc".into(),
+            diff_digest: "d".into(),
+            head: Some("5b3c9cc5".into()),
+            since: None,
+        };
+        let mut many = Vec::new();
+        for line in 1..=7 {
+            many.push(hit("src/a.rs", line, false, "  let x = sed();  "));
+        }
+        let selected = [
+            Selected {
+                learning: scoped("L1", ScopeKind::Language, "rust"),
+                exemplars: vec![],
+                hits: Some(vec![
+                    hit("src/a.rs", 4, false, "let x = sed();"),
+                    hit("src/a.rs", 3, true, "let old = sed();"),
+                ]),
+            },
+            Selected {
+                learning: scoped("L2", ScopeKind::Glob, "src/**"),
+                exemplars: vec![],
+                hits: Some(many),
+            },
+            Selected {
+                learning: scoped("L3", ScopeKind::Language, "rust"),
+                exemplars: vec![],
+                hits: Some(vec![]),
+            },
+            Selected {
+                learning: scoped("L4", ScopeKind::Global, ""),
+                exemplars: vec![],
+                hits: None,
+            },
+        ];
+        let prompt = render_prompt("AUDIT", &scope, &selected);
+        let head = prompt.split("\n## Report back").next().unwrap();
+        let expected = "\
+# writ audit
+
+Check this diff against the learnings below. Report every violation you find.
+
+audit-id: AUDIT
+repo: github.com/o/r
+diff-range: 041a89bc
+
+The diff is not pasted here. Read it with `git diff 041a89bc`. Each learning below names its slice: the part of the diff it applies to.
+
+`start here` lists changed lines a learning's matcher found. Look there first, but it is not a list of violations: a matcher can match code that obeys the rule, and miss a violation written another way. Check the whole slice.
+
+## Learnings
+
+### 1. title L1
+id: L1
+enforcement: blocking
+scopes: language:rust
+rule: rule L1
+why: why L1
+start here:
+- src/a.rs:4  let x = sed();
+- src/a.rs:3 (removed)  let old = sed();
+slice: `git diff 041a89bc -- src/a.rs`
+
+### 2. title L2
+id: L2
+enforcement: blocking
+scopes: glob:src/**
+rule: rule L2
+why: why L2
+start here:
+- src/a.rs:1  let x = sed();
+- src/a.rs:2  let x = sed();
+- src/a.rs:3  let x = sed();
+- src/a.rs:4  let x = sed();
+- src/a.rs:5  let x = sed();
+- and 2 more in the slice
+slice: `git diff 041a89bc -- src/a.rs`
+
+### 3. title L3
+id: L3
+enforcement: blocking
+scopes: language:rust
+rule: rule L3
+why: why L3
+start here: the matcher matched only lines this diff did not change. Read the slice.
+slice: `git diff 041a89bc -- src/a.rs`
+
+### 4. title L4
+id: L4
+enforcement: blocking
+scopes: global
+rule: rule L4
+why: why L4
+slice: `git diff 041a89bc`
+";
+        assert_eq!(head, expected);
+        assert!(!prompt.contains("```diff"), "{prompt}");
+        assert!(!prompt.contains("+let x"), "no diff text: {prompt}");
+    }
+
+    /// A gate that fires again on the same range names what changed since
+    /// the answered audit, and which rules that audit never asked about.
+    /// Spec 9.2, **Changed since your last answer**.
+    #[test]
+    fn the_prompt_names_what_changed_since_the_last_answer() {
+        let scope = AuditScope {
+            identity: crate::repo::RepoIdentity::Remote("github.com/o/r".into()),
+            diff: crate::diff::Diff::parse(TWO_PATHS),
+            diff_range: "041a89bc".into(),
+            diff_digest: "d".into(),
+            head: Some("5b3c9cc5".into()),
+            since: Some(Since {
+                audit_id: "PREV".into(),
+                head: "6622f6ce".into(),
+                paths: vec!["src/a.rs".into(), "web/my file.ts".into()],
+                learnings: vec!["L1".into()],
+            }),
+        };
+        let selected = [
+            Selected {
+                learning: scoped("L1", ScopeKind::Language, "rust"),
+                exemplars: vec![],
+                hits: None,
+            },
+            Selected {
+                learning: scoped("L2", ScopeKind::Language, "rust"),
+                exemplars: vec![],
+                hits: None,
+            },
+        ];
+        let prompt = render_prompt("AUDIT", &scope, &selected);
+        let expected = "\
+## Changed since your last answer
+
+You answered audit PREV at commit 6622f6ce. These paths in the diff changed since then:
+
+- src/a.rs
+- web/my file.ts
+
+Read what changed: `git diff 6622f6ce -- src/a.rs 'web/my file.ts'`
+
+A learning marked `new` below was not in that audit, so read its whole slice.
+
+## Learnings
+
+### 1. title L1
+id: L1
+enforcement: blocking
+scopes: language:rust
+rule: rule L1
+why: why L1
+slice: `git diff 041a89bc -- src/a.rs`
+
+### 2. title L2
+id: L2
+new: not in audit PREV
+enforcement: blocking
+";
+        assert!(prompt.contains(expected), "{prompt}");
+    }
+
+    /// Nothing changed since the answer, yet the gate fired: a rule is new.
+    #[test]
+    fn an_unchanged_diff_since_the_answer_says_so() {
+        let scope = AuditScope {
+            identity: crate::repo::RepoIdentity::Remote("github.com/o/r".into()),
+            diff: crate::diff::Diff::parse(TWO_PATHS),
+            diff_range: "HEAD".into(),
+            diff_digest: "d".into(),
+            head: Some("5b3c9cc5".into()),
+            since: Some(Since {
+                audit_id: "PREV".into(),
+                head: "5b3c9cc5".into(),
+                paths: vec![],
+                learnings: vec![],
+            }),
+        };
+        let prompt = render_prompt("AUDIT", &scope, &[]);
+        assert!(
+            prompt.contains(
+                "You answered audit PREV at commit 5b3c9cc5. No path in the diff changed since then.\n"
+            ),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("Read what changed"), "{prompt}");
     }
 
     fn candidate(id: &str, blocking: bool, outcomes: Outcomes) -> Candidate {
@@ -650,6 +1088,7 @@ mod tests {
         let both = Selected {
             learning: learning("a", true),
             exemplars: vec![],
+            hits: None,
         };
         let both_block = rule_block(1, &both);
         assert!(
@@ -664,6 +1103,7 @@ mod tests {
             &Selected {
                 learning: added,
                 exemplars: vec![],
+                hits: None,
             },
         );
         assert!(
@@ -700,6 +1140,7 @@ mod tests {
             &Selected {
                 learning: scoped.clone(),
                 exemplars: vec![exemplar(Some("rust"))],
+                hits: None,
             },
         );
         assert!(block.contains("```rust\n"), "{block}");
@@ -710,6 +1151,7 @@ mod tests {
             &Selected {
                 learning: scoped,
                 exemplars: vec![exemplar(None)],
+                hits: None,
             },
         );
         assert!(block.contains("```elixir\n"), "{block}");
@@ -723,6 +1165,7 @@ mod tests {
             &Selected {
                 learning: ambiguous,
                 exemplars: vec![exemplar(None)],
+                hits: None,
             },
         );
         assert!(block.contains("```\n"), "{block}");

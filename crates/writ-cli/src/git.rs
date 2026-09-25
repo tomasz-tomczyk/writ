@@ -105,6 +105,57 @@ pub fn diff(root: &Path, range: Option<&str>) -> Result<(String, String)> {
     Ok((String::from_utf8_lossy(&output.stdout).into_owned(), range))
 }
 
+/// The commit a range's removed lines come from.
+///
+/// `git diff A` compares A with the working tree and `git diff A..B`
+/// compares A with B, so both start at A. `git diff A...B` starts at the
+/// merge-base of A and B. An empty side means HEAD, as it does to git.
+pub fn range_base(root: &Path, range: &str) -> String {
+    let or_head = |side: &str| {
+        if side.is_empty() {
+            "HEAD".to_string()
+        } else {
+            side.to_string()
+        }
+    };
+    if let Some((left, right)) = range.split_once("...") {
+        let (left, right) = (or_head(left), or_head(right));
+        return run(root, &["merge-base", &left, &right]).unwrap_or(left);
+    }
+    if let Some((left, _)) = range.split_once("..") {
+        return or_head(left);
+    }
+    range.to_string()
+}
+
+/// The commit HEAD names, or nothing in a repository with no commit.
+pub fn head(root: &Path) -> Option<String> {
+    run(root, &["rev-parse", "--verify", "HEAD"])
+}
+
+/// The paths that differ between `commit` and the working tree.
+///
+/// Nothing when git cannot answer — the commit was garbage-collected or
+/// the history rewritten — so the caller leaves the section out rather
+/// than guess. P6. An empty list is an answer: nothing changed.
+pub fn changed_since(root: &Path, commit: &str) -> Option<Vec<String>> {
+    let output = Command::new("git")
+        .args(["diff", "--name-only", commit])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(
+        text.lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
 /// Raw bytes of a git object (`HEAD:path`, a blob oid, …).
 ///
 /// Unlike [`run`], this keeps the body untrimmed and allows non-UTF-8.

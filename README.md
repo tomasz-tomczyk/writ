@@ -93,9 +93,9 @@ the same verdict in each host's own gate protocol, so a turn that
 touched code the learnings cover does not hand over unreviewed.
 
 **The gate points, it does not paste.** Every host renders a blocked
-turn's message into the transcript verbatim, and an audit prompt carries
-the whole diff — 100 KB of it on a long-lived branch, in front of you
-after every turn, for a document written for the agent. So the gate
+turn's message into the transcript verbatim, and an audit prompt is a
+document written for the agent: every rule that applies, where to look,
+and how to report. Pasted, it lands in front of you after every turn. So the gate
 emits the audit id and how to fetch what is behind it:
 
 ```

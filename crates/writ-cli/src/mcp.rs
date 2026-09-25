@@ -58,8 +58,8 @@ that apply to it.
 The loop, in order:
 
 1. A gate blocks a turn with an audit id and nothing else. It never pastes \
-   the document, because that would put the whole diff in the transcript \
-   after every turn.
+   the document, because that would put it in the transcript after every \
+   turn.
 2. Fetch it: call writ_audit with `fetch` set to that audit id. This is a \
    read — it opens no audit and moves no counter.
 3. Decide what you will do about each learning the diff breaks, then send \
@@ -826,7 +826,7 @@ fn cause(error: writ_core::Error) -> String {
 ///
 /// `text` exists for the one answer that is a document rather than a
 /// record. `writ_audit`'s fetch returns the audit prompt, and handing a
-/// model a JSON-escaped 100 KB diff to unescape is a worse answer than
+/// model a JSON-escaped document to unescape is a worse answer than
 /// handing it the document. `structuredContent` still carries the object,
 /// so a caller that wants fields keeps them.
 struct Answer {
