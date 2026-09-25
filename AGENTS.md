@@ -136,7 +136,8 @@ range drags in the whole branch and, on a stacked branch, the parent's
 work too. The commit gate audits each commit as it is made.
 
 - **It lives in git config, not in `.git/hooks`.** `hook.writ.command`
-  and `hook.writ.event = pre-commit`, set globally by `writ install`.
+  and `hook.writ.event = pre-commit`, set by `writ install` in the global
+  config, or in the repository's own config for a project setup.
   That needs git 2.54, which is the first git with hooks in config. It
   runs alongside a repository's own hook file, Husky's `core.hooksPath`
   included, and one repository can opt out with `hook.writ.enabled

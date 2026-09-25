@@ -47,17 +47,25 @@ cargo install --path crates/writ-cli
 writ install
 ```
 
-One command, once per machine. It finds the coding agents in your home
-directory (Claude Code, Codex, Cursor, OpenCode), shows each change it
-would make and the file it goes in, and asks before writing it. It
-connects each agent to writ over MCP, adds the end-of-turn gate, and
-offers the git commit gate. Everything it writes is in your home
-directory or your global git config, so every repository and worktree
-on the machine is covered, including ones you clone later.
+One command. It asks three things:
 
-The commit gate needs git 2.54 or newer; `writ install` says so and
-skips it on an older git. `writ install --yes` accepts every change
-without asking. See [Agents](#agents) for what each piece does.
+1. **Global or project.** Global covers every repository and worktree on
+   the machine, including ones you clone later, and writes only to your
+   home directory and your global git config. Project covers the
+   repository you run it in: the agent files go in the repository, and
+   the commit gate goes in its own git config, which is never committed.
+   Outside a repository it is global without asking.
+2. **Which agents.** It lists the ones it found (Claude Code, Codex,
+   Cursor, OpenCode), shows every change and the file it goes in, and
+   asks once before writing. Each file is backed up first.
+3. **The git commit gate.** It checks each commit an agent makes.
+   Without it writ does not work fully: it checks only when a turn ends,
+   so committed work is reviewed afterwards, all at once. It needs git
+   2.54 or newer.
+
+`writ install --yes` answers global, every agent, and yes.
+`writ install --project` picks project without asking. See
+[Agents](#agents) for what each piece does.
 
 ## The loop
 

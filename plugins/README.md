@@ -3,11 +3,12 @@
 Four hosts, two things each: an MCP registration so the agent can find
 writ, and a gate so reading the learnings back is not optional.
 
-**Run `writ install`.** It finds every host in your home directory,
-shows each change, and asks before writing it. It also offers the git
-commit gate, which is not part of any host: it lives in your global git
-config and checks each commit an agent makes. `--yes` accepts every
-change without asking.
+**Run `writ install`.** It asks whether to set up every repository on
+the machine or only the current one, which of the hosts it found to
+set up, shows each change, and asks before writing it. It also offers
+the git commit gate, which is not part of any host: it lives in git
+config and checks each commit an agent makes. `--yes` answers global,
+every host, and yes; `--project` picks the current repository.
 
 Everything under this directory is the same configuration in the form
 each host distributes it, for a reader who would rather install a
@@ -26,7 +27,8 @@ writ install git
 `--print` shows the merged file and changes nothing. `--project` targets
 the repository instead of your home directory. `--force` replaces a writ
 entry that is already there and differs from what writ would write.
-`writ install git` needs git 2.54 or newer.
+`writ install git` needs git 2.54 or newer, and with `--project` it
+writes the repository's own git config instead of the global one.
 
 Every write merges. These files hold other tools, and none of them is
 overwritten: one key or one array element goes in, and the rest of the

@@ -1048,7 +1048,7 @@ pub fn run(args: &Args, roots: &Roots) -> Result<()> {
         return guided(args, roots);
     };
     let Some(host) = target.host() else {
-        let machine = crate::guide::Machine::here(roots.clone());
+        let machine = crate::guide::Machine::here(roots.clone(), args.project)?;
         print!("{}", crate::guide::install_git(&machine, args.print)?);
         return Ok(());
     };
@@ -1064,12 +1064,6 @@ pub fn run(args: &Args, roots: &Roots) -> Result<()> {
 fn guided(args: &Args, roots: &Roots) -> Result<()> {
     use std::io::{BufRead, IsTerminal, Write};
 
-    if args.project {
-        return Err(Error::Validation {
-            message: "writ install --project needs a host: writ install claude-code --project"
-                .to_string(),
-        });
-    }
     let interactive = std::io::stdin().is_terminal();
     if !args.yes && !interactive {
         return Err(Error::Validation {
@@ -1077,21 +1071,29 @@ fn guided(args: &Args, roots: &Roots) -> Result<()> {
                 .to_string(),
         });
     }
-    let machine = crate::guide::Machine::here(roots.clone());
+    let machine = crate::guide::Machine::here(roots.clone(), args.project)?;
     let yes = args.yes;
     // Each question is printed with everything before it, so the reader
-    // sees the change they are asked about.
-    let mut ask = |question: &str, out: &mut String| {
-        print!("{out}{question}");
+    // sees what they are asked about.
+    let mut ask = |question: crate::guide::Question, words: &str, out: &mut String| {
+        print!("{out}{words}");
         out.clear();
         let _ = std::io::stdout().flush();
         if yes {
-            println!("yes");
-            return true;
+            let answer = crate::guide::default_yes(question);
+            println!(
+                "{}",
+                if answer.is_empty() {
+                    "(default)"
+                } else {
+                    answer
+                }
+            );
+            return answer.to_string();
         }
         let mut line = String::new();
         let _ = std::io::stdin().lock().read_line(&mut line);
-        matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        line
     };
     let mut out = String::new();
     crate::guide::guide(&machine, &mut ask, &mut out)?;
