@@ -4043,6 +4043,71 @@ fn since_answer_with_no_remote_falls_back_to_the_working_tree() {
     assert_eq!(diff_range_of(&output.stdout), "HEAD");
 }
 
+/// An answered audit of the working tree, then a commit of exactly that
+/// tree on top of the branch point: the commit is what was reviewed, so
+/// Stop has nothing left to audit. This is how the commit gate lets a
+/// commit through on a Stop answer.
+#[test]
+fn since_answer_counts_a_commit_of_an_answered_working_tree_on_the_branch_point() {
+    let sandbox = Sandbox::new();
+    let (root, _) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+    let working = sandbox.run_at(&root, &["audit"]);
+    working.assert_code(0);
+    answer(&sandbox, &working.stdout);
+    commit_file(&root, "a.rs", "fn a() {}\n");
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(7);
+}
+
+/// The same commit on top of work nobody reviewed does not count: the
+/// answer point vouches for everything before it, and the working-tree
+/// audit saw none of that.
+#[test]
+fn since_answer_ignores_a_commit_of_an_answered_working_tree_on_unreviewed_work() {
+    let sandbox = Sandbox::new();
+    let (root, base) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "a.rs", "fn a() {}\n");
+    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+    let working = sandbox.run_at(&root, &["audit"]);
+    working.assert_code(0);
+    answer(&sandbox, &working.stdout);
+    commit_file(&root, "b.rs", "fn b() {}\n");
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(diff_range_of(&output.stdout), base);
+}
+
+/// The rule chains: a reviewed commit, then a commit of an answered
+/// working tree on it, then another. Each one's parent is covered, so
+/// the newest is the answer point.
+#[test]
+fn since_answer_chains_commits_of_answered_working_trees() {
+    let sandbox = Sandbox::new();
+    let (root, _) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "a.rs", "fn a() {}\n");
+    let range = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    range.assert_code(0);
+    answer(&sandbox, &range.stdout);
+    for name in ["b.rs", "c.rs"] {
+        std::fs::write(root.join(name), "fn x() {}\n").unwrap();
+        let working = sandbox.run_at(&root, &["audit"]);
+        working.assert_code(0);
+        answer(&sandbox, &working.stdout);
+        commit_file(&root, name, "fn x() {}\n");
+    }
+    std::fs::write(root.join("d.rs"), "fn d() {}\n").unwrap();
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(diff_range_of(&output.stdout), "HEAD");
+}
+
 #[test]
 fn the_claude_code_hook_blocks_with_exit_two_and_a_pointer_on_stderr() {
     let sandbox = Sandbox::new();
@@ -4252,6 +4317,99 @@ fn times_selected(sandbox: &Sandbox) -> i64 {
     sandbox.learnings()[0]["times_selected"]
         .as_i64()
         .expect("a count")
+}
+
+// --- re-pointing: section 9.2, *A gate re-points to an audit nobody has
+// answered yet* --------------------------------------------------------
+
+/// A blocked commit tried again without an answer gets the same audit.
+/// A second row would credit the rule with a reviewer nobody was.
+#[test]
+fn the_commit_gate_repoints_a_retry_to_the_unanswered_audit() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    git(&root, &["add", "-A"]);
+    let first = git_hook(&sandbox, &root, Some(("CLAUDECODE", "1")));
+    first.assert_code(1);
+
+    let second = git_hook(&sandbox, &root, Some(("CLAUDECODE", "1")));
+
+    second.assert_code(1);
+    assert_eq!(audit_id_of(&second.stderr), audit_id_of(&first.stderr));
+    assert_eq!(times_selected(&sandbox), 1);
+}
+
+/// Stop on the next turn, the retry cap cleared by the user's message,
+/// over the same unanswered work: the same audit, still blocking.
+#[test]
+fn the_stop_gate_repoints_the_next_turn_to_the_unanswered_audit() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let first = hook(&sandbox, &root, "claude-code", "{}");
+    first.assert_code(2);
+
+    let second = hook(&sandbox, &root, "claude-code", "{}");
+
+    second.assert_code(2);
+    assert_eq!(audit_id_of(&second.stderr), audit_id_of(&first.stderr));
+    assert_eq!(times_selected(&sandbox), 1);
+}
+
+/// The audit's commands name its tree. Another tree is another change,
+/// so it gets its own audit.
+#[test]
+fn a_gate_opens_a_new_audit_when_the_tree_changed() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let first = hook(&sandbox, &root, "claude-code", "{}");
+    first.assert_code(2);
+    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+
+    let second = hook(&sandbox, &root, "claude-code", "{}");
+
+    second.assert_code(2);
+    assert_ne!(audit_id_of(&second.stderr), audit_id_of(&first.stderr));
+}
+
+/// A rule activated since has no place in the old audit, so the old
+/// pointer would hide it.
+#[test]
+fn a_gate_opens_a_new_audit_when_the_selection_changed() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let first = hook(&sandbox, &root, "claude-code", "{}");
+    first.assert_code(2);
+    sandbox
+        .run(&[
+            "record",
+            "--title",
+            "second rule",
+            "--rule",
+            "name things plainly",
+            "--rationale",
+            "a reader should not guess",
+            "--activate",
+        ])
+        .assert_code(0);
+
+    let second = hook(&sandbox, &root, "claude-code", "{}");
+
+    second.assert_code(2);
+    assert_ne!(audit_id_of(&second.stderr), audit_id_of(&first.stderr));
+}
+
+/// `writ audit` by hand is asking for an audit and gets a new one.
+#[test]
+fn a_manual_audit_is_never_repointed() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let first = hook(&sandbox, &root, "claude-code", "{}");
+    first.assert_code(2);
+
+    let manual = sandbox.run_at(&root, &["audit"]);
+
+    manual.assert_code(0);
+    assert_ne!(audit_id_of(&manual.stdout), audit_id_of(&first.stderr));
 }
 
 /// P7: an id that names no audit is `not found`, not a usage error and

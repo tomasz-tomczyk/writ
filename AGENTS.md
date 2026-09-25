@@ -185,10 +185,15 @@ with no branch point to the working tree against HEAD.
 | --- | --- |
 | staged (`--cached`) | the commit whose tree it recorded |
 | over a range | the head it ran at, and a commit with its snapshot tree |
-| working tree against HEAD | **nothing** |
+| working tree against HEAD | a commit with its tree, **only** when that commit's parent is already covered |
 
 The last row is deliberate. A subagent's audit saw only uncommitted
-work; counting its head would mark every commit before it reviewed.
+work; counting its head would mark every commit before it reviewed. A
+commit of exactly its tree, on its head, holds the change it reviewed,
+but the answer point vouches for everything before it. So the commit
+counts only when its parent is an answer point or the branch point, and
+such commits chain. Without this, a commit let through on a working-tree
+answer sent the next Stop back to the branch point.
 
 A stacked branch needs no configuration: its parent's answered commits
 are in its history, so it starts after them. Everything before the
@@ -370,6 +375,24 @@ defect the retry cap had before it was hoisted above `select`.
 This buys nothing in selection cost, and no test may imply it does
 (invariant 5). Selection still runs in full. What is saved is the prompt
 render, the nag, and the counter.
+
+## A gate re-points to an unanswered audit
+
+A blocked commit retried without an answer used to open a new audit
+each time, and so did Stop on the next turn over the same unanswered
+work. Each one moved `times_selected` for rules no reviewer saw.
+
+After the coverage step, a gate looks for an audit with the same repo,
+`diff_range` and `tree`, no `ingested_at`, and the same learnings at the
+same slice digests in `audit_coverage`. When one exists, the gate emits
+that audit's pointer and still blocks. It opens no row and moves no
+counter.
+
+- **The tree is in the key** because the prompt's commands name it.
+- **The selection is in the key** so a rule activated since is not
+  hidden behind an old pointer.
+- **It is not a retry cap.** Nothing stops blocking.
+- **Gates only.** `writ audit` by hand and `--dry-run` never re-point.
 
 ## Two surfaces, one gate
 
