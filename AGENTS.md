@@ -157,7 +157,9 @@ work too. The commit gate audits each commit as it is made.
 ## An audit records what it reviewed
 
 A working-tree audit reads a **snapshot**: `git add -A` into a copy of
-the index, then `git write-tree`. The real index is never touched. The
+the index, then `git write-tree`. The real index is never touched. The copy keeps the index's mtime:
+stamped now, it makes git trust a same-size edit made in the second it
+was staged, and the snapshot drops it. That was a Linux-only CI flake. The
 diff is `git diff BASE TREE`, which for tracked files is the same text as
 `git diff BASE` and also carries new files git does not ignore — before
 this, a file the agent created and never staged was invisible to Stop.
