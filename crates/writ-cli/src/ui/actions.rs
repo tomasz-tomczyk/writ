@@ -439,6 +439,7 @@ mod tests {
                         diff_range: "private branch".into(),
                         diff_digest: "private digest".into(),
                         head: None,
+                        tree: None,
                         since: None,
                     },
                     1,

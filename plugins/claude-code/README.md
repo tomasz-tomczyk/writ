@@ -4,10 +4,14 @@ This plugin gives Claude Code two things: a way to write a learning
 down, and a gate that makes reading them back not optional.
 
 - **`/record`** binds to `writ record --activate`.
-- **A `Stop` hook** audits everything the branch changed, resolving a
-  `merge-base` against the remote's default branch first. Left at writ's
-  default the range is the working tree against HEAD, which is empty for
-  any agent that commits as it goes.
+- **A `Stop` hook** runs `writ audit --since-answer`: it audits from the
+  newest commit an answered audit already reviewed, or from the branch
+  point when nothing was answered yet. Left at writ's default the range
+  is the working tree against HEAD, which is empty for any agent that
+  commits as it goes.
+- **The commit gate** is not part of the plugin, because it lives in
+  git, not in Claude Code. `writ install` offers it, or run
+  `writ install git`.
 - **A `SubagentStop` hook** audits the working tree alone. A subagent has
   not committed, so that is exactly its own work; the branch point would
   hand a read-only subagent every violation its parent had committed.
@@ -26,10 +30,16 @@ The binary must be on `PATH`. Install it with
 /plugin install writ@writ
 ```
 
+Then run `writ install` once. With the plugin enabled it writes the MCP
+registration, leaves the gate to the plugin, and offers the git commit
+gate, which no Claude Code plugin can carry.
+
 ## Discovery, separately
 
 The hook is the gate. Discovery is MCP, and Claude Code reads its MCP
-configuration from `.mcp.json`, not from this plugin:
+configuration from `~/.claude.json` or `.mcp.json`, not from this
+plugin. `writ install` writes it, and leaves the gate to the plugin
+when the plugin is enabled. By hand, it is:
 
 ```json
 { "mcpServers": { "writ": { "command": "writ", "args": ["mcp"] } } }

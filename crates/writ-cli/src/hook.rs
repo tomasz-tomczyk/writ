@@ -47,6 +47,25 @@ pub enum Host {
     Codex,
     /// `stop` hook. `{"followup_message":...}` on stdout, exit 0.
     Cursor,
+    /// git's `pre-commit`. Exit 1 refuses the commit, pointer on stderr.
+    /// It gates only a commit an agent makes. Spec section 9.2, **The
+    /// commit gate**.
+    Git,
+}
+
+/// The variables a host sets in the shells its agent runs. A commit made
+/// with none of them set is the developer's own, and the git gate lets it
+/// through untouched.
+///
+/// Codex sets none that its documentation names, so its commits pass here
+/// and are audited at the next Stop instead.
+pub const AGENT_MARKERS: &[&str] = &["CLAUDECODE", "CURSOR_AGENT", "GEMINI_CLI"];
+
+/// Whether an agent is making this commit.
+fn under_agent() -> bool {
+    AGENT_MARKERS
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
 
 /// What the host said about the turn it is ending.
@@ -92,6 +111,9 @@ impl Retry {
         match host {
             Host::ClaudeCode | Host::Codex => self.stop_hook_active,
             Host::Cursor => self.loop_count >= loop_limit,
+            // A commit is retried by the agent, and the retry of an
+            // answered change is covered, so nothing loops.
+            Host::Git => false,
         }
     }
 }
@@ -103,7 +125,16 @@ pub fn run(
     db: &Path,
     config: &Config,
 ) -> Result<(ExitCode, TelemetryBatch)> {
-    let retry = Retry::parse(&read_payload());
+    // git passes a pre-commit hook no payload, and its stdin is whatever
+    // the committer had, so it is never read. P7.
+    let retry = if host == Host::Git {
+        if !under_agent() {
+            return Ok((ExitCode::SUCCESS, TelemetryBatch::default()));
+        }
+        Retry::default()
+    } else {
+        Retry::parse(&read_payload())
+    };
 
     // Before the selection, not after it. The cap is about to let this
     // turn stop, so selecting first would render the whole prompt, open
@@ -164,6 +195,7 @@ fn gate_counters(host: Host, result: GateResultMetric) -> [CounterMetric; 2] {
         Host::ClaudeCode => HookHostMetric::ClaudeCode,
         Host::Codex => HookHostMetric::Codex,
         Host::Cursor => HookHostMetric::Cursor,
+        Host::Git => HookHostMetric::Git,
     };
     [
         CounterMetric::HookHost(host),
@@ -208,6 +240,13 @@ fn emit(host: Host, run: &Selection) -> ExitCode {
         Host::Cursor => {
             write_json(&serde_json::json!({ "followup_message": pointer }));
             ExitCode::SUCCESS
+        }
+        // A failed commit's stderr is what the agent reads, so the pointer
+        // goes there, with what to do once the audit is answered.
+        Host::Git => {
+            eprint!("{pointer}");
+            eprintln!("\nThe commit was refused. Answer the audit, then commit again.");
+            ExitCode::from(1)
         }
     }
 }

@@ -9,6 +9,7 @@ pub mod audit;
 pub mod context;
 pub mod edit;
 pub mod git;
+pub mod guide;
 pub mod hook;
 pub mod inspect;
 pub mod install;

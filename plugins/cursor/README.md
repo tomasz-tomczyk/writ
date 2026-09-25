@@ -8,6 +8,9 @@ writ install cursor
 writ install cursor --project
 ```
 
+`writ install` with no host sets up every agent on the machine at once,
+and asks before each change. The commands above write this host alone.
+
 That merges `mcpServers.writ` into `mcp.json` and a `stop` entry into
 `hooks.json`, in `~/.cursor/` or in `<repo>/.cursor/`. The binary must
 be on `PATH`.

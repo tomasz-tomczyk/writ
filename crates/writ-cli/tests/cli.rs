@@ -3541,6 +3541,357 @@ fn hook(sandbox: &Sandbox, root: &Path, host: &str, stdin: &str) -> Output {
     run_with_stdin(command, stdin)
 }
 
+// --- the commit gate: `--cached` and `--hook git` ------------------------
+
+/// `--cached` audits what is staged and nothing else, and its slice
+/// commands say `--cached` so they print the same diff.
+#[test]
+fn cached_audits_the_staged_diff_only() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    sandbox.record(&["--matcher", "TODO", "--matcher-kind", "regex", "--activate"]);
+    std::fs::write(root.join("a.rs"), "fn main() {}\n// TODO staged\n").unwrap();
+    git(&root, &["add", "a.rs"]);
+    std::fs::write(root.join("b.rs"), "// TODO unstaged\n").unwrap();
+    git(&root, &["add", "-N", "b.rs"]);
+
+    let output = sandbox.run_at(&root, &["audit", "--cached"]);
+    output.assert_code(0);
+    assert!(
+        output.stdout.contains("diff-range: --cached\n"),
+        "{}",
+        output.stdout
+    );
+    assert!(
+        output
+            .stdout
+            .contains("start here:\n- a.rs:2  // TODO staged\n"),
+        "{}",
+        output.stdout
+    );
+    assert!(!output.stdout.contains("unstaged"), "{}", output.stdout);
+    assert!(
+        output.stdout.contains("slice: `git diff --cached`\n"),
+        "{}",
+        output.stdout
+    );
+}
+
+#[test]
+fn cached_and_diff_are_one_or_the_other() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    sandbox
+        .run_at(&root, &["audit", "--cached", "--diff", "HEAD"])
+        .assert_code(2);
+}
+
+/// Run `writ audit --hook git` in `root`, as git runs a hook: no payload,
+/// and an agent marker only when one is named.
+fn git_hook(sandbox: &Sandbox, root: &Path, agent: Option<(&str, &str)>) -> Output {
+    let mut command = sandbox.cmd_at(root.to_path_buf(), &["audit", "--hook", "git"]);
+    for name in ["CLAUDECODE", "CURSOR_AGENT", "GEMINI_CLI"] {
+        command.env_remove(name);
+    }
+    if let Some((name, value)) = agent {
+        command.env(name, value);
+    }
+    command.stdin(std::process::Stdio::null());
+    Output::from(command.output().unwrap())
+}
+
+/// A commit the developer makes is not gated. The hook exits 0, says
+/// nothing, and records nothing.
+#[test]
+fn the_git_hook_lets_a_commit_with_no_agent_through_untouched() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    git(&root, &["add", "-A"]);
+
+    let output = git_hook(&sandbox, &root, None);
+
+    output.assert_code(0);
+    assert!(output.stdout.is_empty(), "{}", output.stdout);
+    assert!(output.stderr.is_empty(), "{}", output.stderr);
+    assert_eq!(sandbox.learnings()[0]["times_selected"], 0);
+}
+
+/// Under an agent, a staged change a rule applies to refuses the commit,
+/// with the pointer on stderr, where the agent reads a failed commit.
+#[test]
+fn the_git_hook_refuses_an_agent_commit_with_the_pointer_on_stderr() {
+    for marker in [
+        ("CLAUDECODE", "1"),
+        ("CURSOR_AGENT", "1"),
+        ("GEMINI_CLI", "1"),
+    ] {
+        let sandbox = Sandbox::new();
+        let root = gated_repo(&sandbox, true);
+        git(&root, &["add", "-A"]);
+
+        let output = git_hook(&sandbox, &root, Some(marker));
+
+        output.assert_code(1);
+        assert!(output.stdout.is_empty(), "{}", output.stdout);
+        assert!(output.stderr.contains("audit-id: "), "{}", output.stderr);
+        assert!(
+            output.stderr.contains("The commit was refused"),
+            "{}",
+            output.stderr
+        );
+    }
+}
+
+/// Nothing staged is nothing to gate: `git commit --amend` with no change,
+/// or `--allow-empty`.
+#[test]
+fn the_git_hook_passes_when_nothing_is_staged() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    git_hook(&sandbox, &root, Some(("CLAUDECODE", "1"))).assert_code(0);
+}
+
+/// Answered once, the same staged change commits. Coverage is what lets
+/// the retried commit through, so there is no retry cap to keep.
+#[test]
+fn the_git_hook_lets_the_commit_through_once_the_audit_is_answered() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    git(&root, &["add", "-A"]);
+    let first = git_hook(&sandbox, &root, Some(("CLAUDECODE", "1")));
+    first.assert_code(1);
+    let audit = audit_id_of(&first.stderr);
+    sandbox
+        .pipe(
+            &["audit", "--ingest"],
+            &format!(r#"{{"audit_id":"{audit}","findings":[]}}"#),
+        )
+        .assert_code(0);
+
+    git_hook(&sandbox, &root, Some(("CLAUDECODE", "1"))).assert_code(0);
+}
+
+/// The whole path through git: a pre-commit hook that runs the gate makes
+/// `git commit` fail with the pointer in its output, and succeed once the
+/// audit is answered. A hook file is used rather than `hook.<name>` config
+/// so the test does not depend on git 2.54; the command is the same.
+#[test]
+fn a_real_commit_is_refused_then_accepted() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let hook = root.join(".git/hooks/pre-commit");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nexec '{}' --db '{}' --config '{}' audit --hook git\n",
+            env!("CARGO_BIN_EXE_writ"),
+            sandbox.db().display(),
+            sandbox.config().display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&hook).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&hook, permissions).unwrap();
+    git(&root, &["add", "-A"]);
+
+    let commit = |root: &Path| {
+        Command::new("git")
+            .args(["commit", "-qm", "work"])
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "writ tests")
+            .env("GIT_AUTHOR_EMAIL", "tests@example.com")
+            .env("GIT_COMMITTER_NAME", "writ tests")
+            .env("GIT_COMMITTER_EMAIL", "tests@example.com")
+            .env("CLAUDECODE", "1")
+            .output()
+            .unwrap()
+    };
+
+    let refused = commit(&root);
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(!refused.status.success(), "{stderr}");
+    assert!(stderr.contains("The commit was refused"), "{stderr}");
+    let audit = audit_id_of(&stderr);
+    sandbox
+        .pipe(
+            &["audit", "--ingest"],
+            &format!(r#"{{"audit_id":"{audit}","findings":[]}}"#),
+        )
+        .assert_code(0);
+
+    let accepted = commit(&root);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+}
+
+// --- `--since-answer`: where the Stop gate starts -------------------------
+
+/// A repository whose `origin/main` sits at its first commit, so the
+/// branch point is that commit. No network: the remote-tracking ref is
+/// written directly.
+fn branched_repo(sandbox: &Sandbox) -> (PathBuf, String) {
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let base = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
+    git(&root, &["checkout", "-qb", "feature"]);
+    (root, base)
+}
+
+fn head(root: &Path) -> String {
+    git(root, &["rev-parse", "HEAD"]).trim().to_string()
+}
+
+fn commit_file(root: &Path, name: &str, text: &str) -> String {
+    std::fs::write(root.join(name), text).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", name]);
+    head(root)
+}
+
+fn diff_range_of(prompt: &str) -> String {
+    prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("diff-range: "))
+        .expect("a diff-range line")
+        .to_string()
+}
+
+fn answer(sandbox: &Sandbox, prompt: &str) {
+    let audit = audit_id_of(prompt);
+    sandbox
+        .pipe(
+            &["audit", "--ingest"],
+            &format!(r#"{{"audit_id":"{audit}","findings":[]}}"#),
+        )
+        .assert_code(0);
+}
+
+/// Nothing answered yet: start at the branch point, as the Stop hook's
+/// shell used to.
+#[test]
+fn since_answer_starts_at_the_branch_point_when_nothing_was_answered() {
+    let sandbox = Sandbox::new();
+    let (root, base) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "a.rs", "fn a() {}\n");
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(diff_range_of(&output.stdout), base);
+}
+
+/// An answered audit over a range marks the commit it saw. The next one
+/// starts there, so the branch is not reviewed again.
+#[test]
+fn since_answer_starts_at_the_last_answered_commit() {
+    let sandbox = Sandbox::new();
+    let (root, _) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    let answered = commit_file(&root, "a.rs", "fn a() {}\n");
+    let first = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    first.assert_code(0);
+    answer(&sandbox, &first.stdout);
+    commit_file(&root, "b.rs", "fn b() {}\n");
+
+    let second = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    second.assert_code(0);
+    assert_eq!(diff_range_of(&second.stdout), answered);
+}
+
+/// A commit the git gate audited and the agent answered is covered, so a
+/// Stop right after it has nothing left to audit.
+#[test]
+fn since_answer_starts_after_a_commit_the_git_gate_answered() {
+    let sandbox = Sandbox::new();
+    let (root, _) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+    git(&root, &["add", "-A"]);
+    let gate = git_hook(&sandbox, &root, Some(("CLAUDECODE", "1")));
+    gate.assert_code(1);
+    answer(&sandbox, &gate.stderr);
+    git(&root, &["commit", "-qm", "a"]);
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(7);
+}
+
+/// A subagent's audit covers only its uncommitted work, so the commit it
+/// saw is not an answer for the commits before it.
+#[test]
+fn since_answer_ignores_an_answered_audit_of_the_working_tree_alone() {
+    let sandbox = Sandbox::new();
+    let (root, base) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "a.rs", "fn a() {}\n");
+    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+    git(&root, &["add", "-N", "b.rs"]);
+    let subagent = sandbox.run_at(&root, &["audit"]);
+    subagent.assert_code(0);
+    answer(&sandbox, &subagent.stdout);
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(diff_range_of(&output.stdout), base);
+}
+
+/// A branch cut from another branch starts where the parent's work was
+/// answered, not at main, so the parent is not reviewed again.
+#[test]
+fn since_answer_on_a_stacked_branch_skips_the_answered_parent() {
+    let sandbox = Sandbox::new();
+    let (root, _) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    let parent = commit_file(&root, "a.rs", "fn a() {}\n");
+    let on_parent = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    answer(&sandbox, &on_parent.stdout);
+    git(&root, &["checkout", "-qb", "child"]);
+    commit_file(&root, "b.rs", "fn b() {}\n");
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(diff_range_of(&output.stdout), parent);
+}
+
+/// Work answered on a branch this one does not contain says nothing
+/// about this one.
+#[test]
+fn since_answer_ignores_an_answer_outside_the_history() {
+    let sandbox = Sandbox::new();
+    let (root, base) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "a.rs", "fn a() {}\n");
+    let elsewhere = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    answer(&sandbox, &elsewhere.stdout);
+    git(&root, &["checkout", "-qb", "sibling", &base]);
+    commit_file(&root, "c.rs", "fn c() {}\n");
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(diff_range_of(&output.stdout), base);
+}
+
+/// No remote-tracking branch and nothing answered: the working tree
+/// against HEAD, as a plain audit reads it. P6.
+#[test]
+fn since_answer_with_no_remote_falls_back_to_the_working_tree() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", None);
+    sandbox.record(&["--activate"]);
+    std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(diff_range_of(&output.stdout), "HEAD");
+}
+
 #[test]
 fn the_claude_code_hook_blocks_with_exit_two_and_a_pointer_on_stderr() {
     let sandbox = Sandbox::new();
@@ -4512,4 +4863,21 @@ fn a_dry_run_records_no_coverage() {
         .query_row("SELECT COUNT(*) FROM audit_coverage", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 0);
+}
+
+/// The guided setup asks on a terminal and nowhere else. Piped, with no
+/// `--yes`, it refuses before it writes anything, and it does not wait.
+/// P7.
+#[test]
+fn guided_install_without_a_terminal_or_yes_refuses_and_writes_nothing() {
+    let sandbox = Sandbox::new();
+    let home = sandbox.path("home");
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let mut command = sandbox.cmd(&["install"]);
+    command.env("HOME", &home);
+    let output = run_with_stdin(command, "y\n");
+
+    output.assert_code(2);
+    assert!(output.stderr.contains("--yes"), "{}", output.stderr);
+    assert!(!home.join(".codex/hooks.json").exists());
 }

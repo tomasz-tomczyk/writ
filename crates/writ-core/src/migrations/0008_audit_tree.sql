@@ -1,0 +1,12 @@
+-- The tree a staged audit looked at. Spec section 9.2, **The Stop gate
+-- starts at the last answer**.
+--
+-- A commit gate audits the index, and the commit it lets through records
+-- that index as its tree. So the tree is what ties an answered staged
+-- audit to the commit it answered for: a Stop that finds a commit with
+-- this tree in its history knows the change up to it was reviewed.
+-- `head` cannot say that, because the commit did not exist yet when the
+-- audit ran.
+--
+-- Nullable: only a staged audit has one, and older rows recorded none.
+ALTER TABLE audits ADD COLUMN tree TEXT;

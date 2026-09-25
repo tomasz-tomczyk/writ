@@ -3,20 +3,32 @@
 Four hosts, two things each: an MCP registration so the agent can find
 writ, and a gate so reading the learnings back is not optional.
 
-`writ install <host>` writes both. Everything under this directory is
-the same configuration in the form each host distributes it, for a
-reader who would rather install a plugin than run a command.
+**Run `writ install`.** It asks whether to set up every repository on
+the machine or only the current one, which of the hosts it found to
+set up, shows each change, and asks before writing it. It also offers
+the git commit gate, which is not part of any host: it lives in git
+config and checks each commit an agent makes. `--yes` answers global,
+every host, and yes; `--project` picks the current repository.
+
+Everything under this directory is the same configuration in the form
+each host distributes it, for a reader who would rather install a
+plugin than run a command.
+
+To write one target without the questions, name it:
 
 ```
 writ install claude-code
 writ install codex --project
 writ install cursor --print
 writ install opencode
+writ install git
 ```
 
 `--print` shows the merged file and changes nothing. `--project` targets
 the repository instead of your home directory. `--force` replaces a writ
 entry that is already there and differs from what writ would write.
+`writ install git` needs git 2.54 or newer, and with `--project` it
+writes the repository's own git config instead of the global one.
 
 Every write merges. These files hold other tools, and none of them is
 overwritten: one key or one array element goes in, and the rest of the
@@ -31,6 +43,7 @@ is printed. Running the command twice adds nothing the second time.
 | Codex CLI | `Stop` hook | `{"decision":"block","reason":...}`, exit 0 | `.codex-plugin/plugin.json` |
 | Cursor | `stop` hook | `{"followup_message":...}`, exit 0 | `.cursor-plugin/plugin.json` |
 | OpenCode | **none** | — | `.opencode/plugins/*.ts` |
+| git | `pre-commit`, agent commits only | exit 1, pointer on stderr | global git config (`hook.writ.*`) |
 
 **OpenCode cannot enforce a gate.** Every hook in its plugin API returns
 `Promise<void>`, and `session.idle` reaches only the fire-and-forget

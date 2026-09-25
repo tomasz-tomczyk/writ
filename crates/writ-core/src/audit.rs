@@ -25,6 +25,11 @@ pub struct AuditScope {
     /// The commit HEAD named when the audit was emitted, for the `audits`
     /// row. `None` in a repository with no commit.
     pub head: Option<String>,
+    /// The tree of the index, for a staged audit only. The commit that
+    /// records this index has this tree, which is how a later Stop knows
+    /// the commit was reviewed. Spec section 9.2, **The Stop gate starts
+    /// at the last answer**.
+    pub tree: Option<String>,
     /// The earlier audit of this range that was answered, and what changed
     /// since. Spec section 9.2, **Changed since your last answer**.
     pub since: Option<Since>,
@@ -773,6 +778,7 @@ mod tests {
             diff_range: "HEAD".into(),
             diff_digest: "d".into(),
             head: None,
+            tree: None,
             since: None,
         };
         let prompt = render_prompt("AUDIT", &scope, &[]);
@@ -849,6 +855,7 @@ diff --git a/web/b.ts b/web/b.ts
             diff_range: "041a89bc".into(),
             diff_digest: "d".into(),
             head: Some("5b3c9cc5".into()),
+            tree: None,
             since: None,
         };
         let mut many = Vec::new();
@@ -956,6 +963,7 @@ slice: `git diff 041a89bc`
             diff_range: "041a89bc".into(),
             diff_digest: "d".into(),
             head: Some("5b3c9cc5".into()),
+            tree: None,
             since: Some(Since {
                 audit_id: "PREV".into(),
                 head: "6622f6ce".into(),
@@ -1015,6 +1023,7 @@ enforcement: blocking
             diff_range: "HEAD".into(),
             diff_digest: "d".into(),
             head: Some("5b3c9cc5".into()),
+            tree: None,
             since: Some(Since {
                 audit_id: "PREV".into(),
                 head: "5b3c9cc5".into(),

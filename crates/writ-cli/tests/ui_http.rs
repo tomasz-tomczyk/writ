@@ -2009,6 +2009,7 @@ fn audit_scope() -> writ_core::AuditScope {
         diff_range: "HEAD".into(),
         diff_digest: "test digest".into(),
         head: None,
+        tree: None,
         since: None,
     }
 }

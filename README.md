@@ -41,6 +41,32 @@ From a checkout:
 cargo install --path crates/writ-cli
 ```
 
+### Set it up
+
+```
+writ install
+```
+
+One command. It asks three things:
+
+1. **Global or project.** Global covers every repository and worktree on
+   the machine, including ones you clone later, and writes only to your
+   home directory and your global git config. Project covers the
+   repository you run it in: the agent files go in the repository, and
+   the commit gate goes in its own git config, which is never committed.
+   Outside a repository it is global without asking.
+2. **Which agents.** It lists the ones it found (Claude Code, Codex,
+   Cursor, OpenCode), shows every change and the file it goes in, and
+   asks once before writing. Each file is backed up first.
+3. **The git commit gate.** It checks each commit an agent makes.
+   Without it writ does not work fully: it checks only when a turn ends,
+   so committed work is reviewed afterwards, all at once. It needs git
+   2.54 or newer.
+
+`writ install --yes` answers global, every agent, and yes.
+`writ install --project` picks project without asking. See
+[Agents](#agents) for what each piece does.
+
 ## The loop
 
 ```
@@ -114,17 +140,35 @@ counter, because emitting the pointer already did both.
 | Codex CLI | `Stop` hook | no such event |
 | Cursor | `stop` hook | no such event |
 | OpenCode | **none — it cannot enforce one** | — |
+| git | `pre-commit`, for commits an agent makes | — |
 
-The turn's gate audits everything the branch changed, resolving a
-`merge-base` against the remote's default branch first. Left at the
-`--diff` default — the working tree against HEAD — it would see an
-empty diff and pass for any agent that commits as it goes. The subagent
-gate keeps that default on purpose: a subagent has not committed, so the
-working tree is exactly its own work.
+**The commit gate** runs as git's `pre-commit` hook and audits the
+staged change, `writ audit --cached`. When a learning applies, the
+commit is refused and the pointer is in the commit's output; the agent
+answers the audit and commits again. It acts only when an agent is
+making the commit (Claude Code, Cursor or Gemini CLI set a variable in
+their shells), so your own commits are not touched. It is defined in
+git config, so it needs git 2.54 or newer, and it runs alongside any
+hook a repository already has.
 
-`writ install <host>` writes all of this. It merges rather than
-replaces, backs up first, and `--print` shows the entry it would add
-rather than reprinting your configuration file.
+The turn's gate runs `writ audit --since-answer`: it audits from the
+newest commit on the branch that an answered audit already reviewed, or
+from where the branch left the remote's default branch when nothing was
+answered yet. A commit the commit gate answered counts, so the turn's
+gate sees only what is left. Left at the `--diff` default — the working
+tree against HEAD — it would see an empty diff and pass for any agent
+that commits as it goes. The subagent gate keeps that default on
+purpose: a subagent has not committed, so the working tree is exactly
+its own work.
+
+`writ install` sets all of this up. It finds the agents on your machine,
+shows each change and where it goes, and asks before writing it. It
+merges rather than replaces, and backs up each file first. `--yes`
+accepts every change without asking.
+
+`writ install <host>` writes one host without asking, and
+`writ install git` adds the commit gate alone. `--print` shows the
+entry either would add rather than reprinting your configuration file.
 
 **OpenCode cannot enforce a gate.** Every one of its plugin hooks
 returns `Promise<void>`, so nothing there can block a turn or inject a

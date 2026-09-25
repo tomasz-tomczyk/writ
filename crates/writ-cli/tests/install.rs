@@ -435,16 +435,14 @@ fn claude_code_gates_the_subagent_stop_too() {
 /// tree alone: the branch point would hand a read-only subagent every
 /// violation its parent had already committed.
 #[test]
-fn the_turn_gate_reaches_the_branch_point_and_the_subagent_gate_does_not() {
+fn the_turn_gate_reaches_back_to_the_last_answer_and_the_subagent_gate_does_not() {
     let sandbox = sandbox();
     let home = sandbox.roots.home.clone().expect("home");
     install(&sandbox.roots, Host::ClaudeCode, false, false);
     let settings = home.join(".claude").join("settings.json");
 
     let turn = gate_commands(&settings, "Stop").remove(0);
-    assert!(turn.contains("merge-base"), "{turn}");
-    assert!(turn.contains("--diff"), "{turn}");
-    assert!(turn.contains("--hook claude-code"), "{turn}");
+    assert_eq!(turn, "writ audit --hook claude-code --since-answer");
 
     let subagent = gate_commands(&settings, "SubagentStop").remove(0);
     assert_eq!(subagent, "writ audit --hook claude-code");
@@ -491,7 +489,7 @@ fn codex_gets_the_turn_gate_and_no_subagent_gate() {
 /// Every host's turn gate has the same empty-diff problem. Cursor and
 /// Codex agents commit as they go too.
 #[test]
-fn every_host_turn_gate_reaches_the_branch_point() {
+fn every_host_turn_gate_reaches_back_to_the_last_answer() {
     for (host, file, event) in [
         (Host::ClaudeCode, vec![".claude", "settings.json"], "Stop"),
         (Host::Codex, vec![".codex", "hooks.json"], "Stop"),
@@ -503,10 +501,10 @@ fn every_host_turn_gate_reaches_the_branch_point() {
         let path = file.iter().fold(home, |acc, part| acc.join(part));
 
         let command = gate_commands(&path, event).remove(0);
-        assert!(command.contains("merge-base"), "{host:?}: {command}");
-        assert!(
-            command.contains(&format!("--hook {}", host.as_str())),
-            "{host:?}: {command}"
+        assert_eq!(
+            command,
+            format!("writ audit --hook {} --since-answer", host.as_str()),
+            "{host:?}"
         );
     }
 }
@@ -603,4 +601,378 @@ fn a_disabled_plugin_entry_does_not_stop_the_installer() {
     install(&sandbox.roots, Host::ClaudeCode, false, false);
 
     assert_eq!(gate_commands(&settings, "Stop").len(), 1);
+}
+
+// --- the guided setup: `writ install` with no host ----------------------
+
+mod guided {
+    use super::*;
+    use writ_cli::guide::{GitConfig, Machine, Question, Scope, guide, install_git};
+
+    /// What the reader types at each kind of question.
+    #[derive(Clone, Copy)]
+    struct Answers<'a> {
+        scope: &'a str,
+        agents: &'a str,
+        confirm: bool,
+    }
+
+    const YES: Answers<'static> = Answers {
+        scope: "",
+        agents: "",
+        confirm: true,
+    };
+    const NO: Answers<'static> = Answers {
+        scope: "",
+        agents: "",
+        confirm: false,
+    };
+
+    fn home(sandbox: &Sandbox) -> PathBuf {
+        sandbox.roots.home.clone().expect("home")
+    }
+
+    fn repo(sandbox: &Sandbox) -> PathBuf {
+        sandbox.roots.project.clone().expect("repo")
+    }
+
+    /// A machine with no repository around it, and the global git config
+    /// in a file under the sandbox home.
+    fn machine(sandbox: &Sandbox, git: Option<(u32, u32)>) -> Machine {
+        Machine {
+            roots: Roots {
+                home: sandbox.roots.home.clone(),
+                project: None,
+            },
+            git_version: git,
+            git_config: GitConfig::File(home(sandbox).join(".gitconfig")),
+            scope: None,
+        }
+    }
+
+    /// The same, inside a git repository.
+    fn in_repo(sandbox: &Sandbox) -> Machine {
+        repo_git(&repo(sandbox), &["init", "-q", "."]);
+        Machine {
+            roots: sandbox.roots.clone(),
+            ..machine(sandbox, Some((2, 55)))
+        }
+    }
+
+    /// Run the guide and return what it printed and the questions it asked.
+    fn run(machine: &Machine, answers: Answers) -> (String, Vec<Question>) {
+        let mut asked = Vec::new();
+        let mut out = String::new();
+        guide(
+            machine,
+            &mut |question: Question, words: &str, out: &mut String| {
+                asked.push(question);
+                out.push_str(words);
+                out.push('\n');
+                match question {
+                    Question::Scope => answers.scope.to_string(),
+                    Question::Agents => answers.agents.to_string(),
+                    Question::Confirm => if answers.confirm { "y" } else { "n" }.to_string(),
+                }
+            },
+            &mut out,
+        )
+        .expect("guide");
+        (out, asked)
+    }
+
+    fn git_file(machine: &Machine, key: &str) -> Vec<String> {
+        let GitConfig::File(path) = &machine.git_config else {
+            unreachable!()
+        };
+        let output = std::process::Command::new("git")
+            .args(["config", "--file"])
+            .arg(path)
+            .args(["--get-all", key])
+            .output()
+            .expect("git config");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn repo_git(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn it_sets_up_every_agent_found_and_the_git_gate_when_told_yes() {
+        let sandbox = sandbox();
+        std::fs::create_dir_all(home(&sandbox).join(".claude")).unwrap();
+        std::fs::create_dir_all(home(&sandbox).join(".codex")).unwrap();
+        let machine = machine(&sandbox, Some((2, 55)));
+
+        let (out, asked) = run(&machine, YES);
+
+        // No repository around it, so no scope question.
+        assert_eq!(
+            asked,
+            [Question::Agents, Question::Confirm, Question::Confirm],
+            "{out}"
+        );
+        assert!(out.contains("Not inside a repository"), "{out}");
+        assert_eq!(
+            gate_commands(&home(&sandbox).join(".claude/settings.json"), "Stop"),
+            vec!["writ audit --hook claude-code --since-answer".to_string()]
+        );
+        assert_eq!(
+            gate_commands(&home(&sandbox).join(".codex/hooks.json"), "Stop"),
+            vec!["writ audit --hook codex --since-answer".to_string()]
+        );
+        assert_eq!(
+            git_file(&machine, "hook.writ.command"),
+            ["writ audit --hook git"]
+        );
+        assert_eq!(git_file(&machine, "hook.writ.event"), ["pre-commit"]);
+
+        // A second run finds everything in place and asks only which agents.
+        let (again, asked) = run(&machine, YES);
+        assert_eq!(asked, [Question::Agents], "{again}");
+        assert_eq!(again.matches("Already set up.").count(), 3, "{again}");
+    }
+
+    #[test]
+    fn only_the_agents_picked_are_set_up() {
+        let sandbox = sandbox();
+        std::fs::create_dir_all(home(&sandbox).join(".claude")).unwrap();
+        std::fs::create_dir_all(home(&sandbox).join(".codex")).unwrap();
+        let machine = machine(&sandbox, None);
+
+        let (out, _) = run(&machine, Answers { agents: "2", ..YES });
+
+        assert!(out.contains("1  Claude Code"), "{out}");
+        assert!(out.contains("2  Codex"), "{out}");
+        assert!(home(&sandbox).join(".codex/hooks.json").exists(), "{out}");
+        assert!(
+            !home(&sandbox).join(".claude/settings.json").exists(),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_number_not_on_the_list_is_named_and_ignored() {
+        let sandbox = sandbox();
+        std::fs::create_dir_all(home(&sandbox).join(".codex")).unwrap();
+        let machine = machine(&sandbox, None);
+
+        let (out, _) = run(
+            &machine,
+            Answers {
+                agents: "1, 7",
+                ..YES
+            },
+        );
+
+        assert!(out.contains("`7` is not on the list"), "{out}");
+        assert!(home(&sandbox).join(".codex/hooks.json").exists(), "{out}");
+    }
+
+    /// The commit gate is offered with what the setup loses without it.
+    #[test]
+    fn the_git_gate_says_what_is_lost_without_it() {
+        let sandbox = sandbox();
+        let machine = machine(&sandbox, Some((2, 55)));
+
+        let (out, _) = run(&machine, NO);
+
+        assert!(
+            out.contains("Without it, writ does not work fully"),
+            "{out}"
+        );
+        assert!(
+            out.contains("hook.writ.command = writ audit --hook git"),
+            "{out}"
+        );
+        assert!(out.contains("Your own commits are not touched"), "{out}");
+        assert!(out.contains("--remove-section hook.writ"), "{out}");
+        assert!(git_file(&machine, "hook.writ.command").is_empty());
+    }
+
+    #[test]
+    fn a_no_writes_nothing() {
+        let sandbox = sandbox();
+        std::fs::create_dir_all(home(&sandbox).join(".codex")).unwrap();
+        let machine = machine(&sandbox, Some((2, 55)));
+
+        let (out, _) = run(&machine, NO);
+
+        assert!(out.contains("Nothing written."), "{out}");
+        assert!(!home(&sandbox).join(".codex/hooks.json").exists(), "{out}");
+        assert!(git_file(&machine, "hook.writ.command").is_empty());
+    }
+
+    #[test]
+    fn it_leaves_the_claude_code_gate_to_an_enabled_plugin() {
+        let sandbox = sandbox();
+        let settings = home(&sandbox).join(".claude/settings.json");
+        write(&settings, r#"{"enabledPlugins":{"writ@writ":true}}"#);
+        let machine = machine(&sandbox, None);
+
+        let (out, _) = run(&machine, YES);
+
+        assert!(out.contains("the writ@writ plugin provides it"), "{out}");
+        assert!(gate_commands(&settings, "Stop").is_empty(), "{out}");
+    }
+
+    #[test]
+    fn it_offers_to_replace_an_older_writ_gate() {
+        let sandbox = sandbox();
+        let hooks = home(&sandbox).join(".codex/hooks.json");
+        write(
+            &hooks,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"base=\"\"; writ audit --hook codex --diff \"$base\""}]}]}}"#,
+        );
+        write(
+            &home(&sandbox).join(".codex/config.toml"),
+            "[mcp_servers.writ]\ncommand = \"writ\"\nargs = [\"mcp\"]\n",
+        );
+        let machine = machine(&sandbox, None);
+
+        let (out, _) = run(&machine, YES);
+
+        assert!(out.contains("--since-answer"), "{out}");
+        assert_eq!(
+            gate_commands(&hooks, "Stop"),
+            vec!["writ audit --hook codex --since-answer".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_old_git_is_named_and_skipped_without_a_question() {
+        let sandbox = sandbox();
+        let machine = machine(&sandbox, Some((2, 50)));
+
+        let (out, asked) = run(&machine, YES);
+
+        assert!(asked.is_empty(), "{out}");
+        assert!(out.contains("Needs git 2.54 or newer"), "{out}");
+        assert!(out.contains("This git is 2.50"), "{out}");
+        assert!(
+            out.contains("Without it, writ does not work fully"),
+            "{out}"
+        );
+    }
+
+    // --- scope ----------------------------------------------------------
+
+    /// Inside a repository it asks first, and Enter means global.
+    #[test]
+    fn inside_a_repository_it_asks_global_or_project_and_enter_is_global() {
+        let sandbox = sandbox();
+        std::fs::create_dir_all(home(&sandbox).join(".codex")).unwrap();
+        let machine = in_repo(&sandbox);
+
+        let (out, asked) = run(&machine, YES);
+
+        assert_eq!(asked[0], Question::Scope, "{out}");
+        assert!(out.contains("Global or project?"), "{out}");
+        assert!(home(&sandbox).join(".codex/hooks.json").exists(), "{out}");
+        assert!(!repo(&sandbox).join(".codex/hooks.json").exists(), "{out}");
+        assert_eq!(
+            git_file(&machine, "hook.writ.command"),
+            ["writ audit --hook git"]
+        );
+    }
+
+    /// Project writes the repository and its own git config, and says
+    /// that committed agent files apply to the whole team.
+    #[test]
+    fn project_writes_the_repository_and_not_the_home_directory() {
+        let sandbox = sandbox();
+        std::fs::create_dir_all(home(&sandbox).join(".codex")).unwrap();
+        let machine = in_repo(&sandbox);
+
+        let (out, _) = run(&machine, Answers { scope: "p", ..YES });
+
+        assert_eq!(
+            gate_commands(&repo(&sandbox).join(".codex/hooks.json"), "Stop"),
+            vec!["writ audit --hook codex --since-answer".to_string()],
+            "{out}"
+        );
+        assert!(!home(&sandbox).join(".codex/hooks.json").exists(), "{out}");
+        assert_eq!(
+            repo_git(
+                &repo(&sandbox),
+                &["config", "--local", "--get", "hook.writ.command"]
+            ),
+            "writ audit --hook git"
+        );
+        assert!(git_file(&machine, "hook.writ.command").is_empty(), "{out}");
+        assert!(
+            out.contains("git config --local --remove-section hook.writ"),
+            "{out}"
+        );
+        assert!(out.contains("applies to everyone who works on it"), "{out}");
+    }
+
+    /// `--project` names the scope, so it is not asked.
+    #[test]
+    fn a_named_scope_is_not_asked() {
+        let sandbox = sandbox();
+        let machine = Machine {
+            scope: Some(Scope::Project),
+            ..in_repo(&sandbox)
+        };
+
+        let (out, asked) = run(&machine, YES);
+
+        assert!(!asked.contains(&Question::Scope), "{out}");
+        assert!(out.contains("Project setup"), "{out}");
+    }
+
+    /// The plugin is enabled in the home settings and gates every
+    /// repository, so a project setup must not add a second gate.
+    #[test]
+    fn a_plugin_enabled_at_home_still_owns_the_gate_in_a_project() {
+        let sandbox = sandbox();
+        write(
+            &home(&sandbox).join(".claude/settings.json"),
+            r#"{"enabledPlugins":{"writ@writ":true}}"#,
+        );
+        let machine = in_repo(&sandbox);
+
+        let (out, _) = run(&machine, Answers { scope: "p", ..YES });
+
+        assert!(out.contains("the writ@writ plugin provides it"), "{out}");
+        assert!(
+            !repo(&sandbox).join(".claude/settings.json").exists(),
+            "{out}"
+        );
+        assert!(repo(&sandbox).join(".mcp.json").exists(), "{out}");
+    }
+
+    #[test]
+    fn install_git_writes_the_gate_and_print_does_not() {
+        let sandbox = sandbox();
+        let machine = machine(&sandbox, Some((2, 55)));
+
+        let printed = install_git(&machine, true).expect("print");
+        assert!(printed.contains("would set hook.writ.command"), "{printed}");
+        assert!(git_file(&machine, "hook.writ.command").is_empty());
+
+        install_git(&machine, false).expect("write");
+        assert_eq!(
+            git_file(&machine, "hook.writ.command"),
+            ["writ audit --hook git"]
+        );
+
+        let old = Machine {
+            git_version: Some((2, 53)),
+            ..machine
+        };
+        assert!(install_git(&old, false).is_err());
+    }
 }

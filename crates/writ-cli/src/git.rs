@@ -111,6 +111,10 @@ pub fn diff(root: &Path, range: Option<&str>) -> Result<(String, String)> {
 /// compares A with B, so both start at A. `git diff A...B` starts at the
 /// merge-base of A and B. An empty side means HEAD, as it does to git.
 pub fn range_base(root: &Path, range: &str) -> String {
+    // The index is compared with HEAD.
+    if range == CACHED {
+        return "HEAD".to_string();
+    }
     let or_head = |side: &str| {
         if side.is_empty() {
             "HEAD".to_string()
@@ -154,6 +158,87 @@ pub fn changed_since(root: &Path, commit: &str) -> Option<Vec<String>> {
             .map(str::to_string)
             .collect(),
     )
+}
+
+/// What a staged audit records as its range, and what its slice commands
+/// pass to `git diff`, so they print the same diff.
+pub const CACHED: &str = "--cached";
+
+/// Read the staged diff: the index against HEAD, which is what a commit is
+/// about to record. A repository with no commit yet is compared with the
+/// empty tree, which is what `git diff --cached` does by itself.
+///
+/// A hook git runs during `git commit -a` or `git commit PATH` sees a
+/// temporary index through `GIT_INDEX_FILE`. git reads that variable
+/// itself, so this reads the index the commit will actually use.
+pub fn diff_cached(root: &Path) -> Result<(String, String)> {
+    let output = Command::new("git")
+        .args(["diff", CACHED])
+        .current_dir(root)
+        .output()
+        .map_err(|error| Error::Command {
+            program: "git".into(),
+            message: error.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(Error::Validation {
+            message: format!(
+                "git diff --cached failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok((
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        CACHED.to_string(),
+    ))
+}
+
+/// The tree the index holds: what a commit made now would record.
+///
+/// `git write-tree` stores the tree object, which is what `git commit`
+/// does next anyway, and changes nothing else.
+pub fn index_tree(root: &Path) -> Option<String> {
+    run(root, &["write-tree"])
+}
+
+/// How far back `--since-answer` looks for an answered commit before it
+/// falls back to the branch point.
+pub const HISTORY_DEPTH: usize = 500;
+
+/// HEAD's first-parent history, newest first, as commit and tree pairs.
+///
+/// First-parent, so a merge of main into the branch does not walk into
+/// main's history and find someone else's answer there.
+pub fn first_parent_history(root: &Path, depth: usize) -> Vec<(String, String)> {
+    let depth = format!("-n{depth}");
+    run(
+        root,
+        &["log", "--first-parent", &depth, "--format=%H %T", "HEAD"],
+    )
+    .map(|text| {
+        text.lines()
+            .filter_map(|line| line.split_once(' '))
+            .map(|(commit, tree)| (commit.to_string(), tree.to_string()))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Where this branch left the remote's default branch.
+///
+/// The remote's `HEAD` first, then `origin/main`, then `origin/master`.
+/// Nothing when there is no such ref or no common history, and the caller
+/// then reads the working tree against HEAD. P6.
+pub fn branch_point(root: &Path) -> Option<String> {
+    let remote_head = run(
+        root,
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+    );
+    remote_head
+        .into_iter()
+        .chain(["origin/main".to_string(), "origin/master".to_string()])
+        .find_map(|candidate| run(root, &["merge-base", "HEAD", &candidate]))
 }
 
 /// Raw bytes of a git object (`HEAD:path`, a blob oid, …).
