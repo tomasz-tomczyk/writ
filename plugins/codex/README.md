@@ -8,6 +8,9 @@ writ install codex
 writ install codex --project
 ```
 
+`writ install` with no host sets up every agent on the machine at once,
+and asks before each change. The commands above write this host alone.
+
 That merges `[mcp_servers.writ]` into `config.toml` and a `Stop` entry
 into `hooks.json`, in `~/.codex/` or in `<repo>/.codex/`. The binary
 must be on `PATH`.

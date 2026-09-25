@@ -7,6 +7,9 @@ writ install opencode
 writ install opencode --project
 ```
 
+`writ install` with no host sets up every agent on the machine at once,
+and asks before each change. The commands above write this host alone.
+
 That merges `mcp.writ` into `~/.config/opencode/opencode.json`, or into
 `opencode.json` at the repository root. Note the shape: `command` is one
 array, not a command plus args. The binary must be on `PATH`.

@@ -41,6 +41,24 @@ From a checkout:
 cargo install --path crates/writ-cli
 ```
 
+### Set it up
+
+```
+writ install
+```
+
+One command, once per machine. It finds the coding agents in your home
+directory (Claude Code, Codex, Cursor, OpenCode), shows each change it
+would make and the file it goes in, and asks before writing it. It
+connects each agent to writ over MCP, adds the end-of-turn gate, and
+offers the git commit gate. Everything it writes is in your home
+directory or your global git config, so every repository and worktree
+on the machine is covered, including ones you clone later.
+
+The commit gate needs git 2.54 or newer; `writ install` says so and
+skips it on an older git. `writ install --yes` accepts every change
+without asking. See [Agents](#agents) for what each piece does.
+
 ## The loop
 
 ```
