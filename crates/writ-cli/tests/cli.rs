@@ -2420,6 +2420,43 @@ fn the_prompts_diff_command_prints_the_audited_diff() {
     assert!(printed.contains("+fn b() {}"), "{printed}");
 }
 
+/// A file rewritten at the same size in the same second it was staged
+/// keeps its stat entry, and git re-reads it only because the entry is
+/// not older than the index file. The snapshot's copy of the index has to
+/// keep that mtime, or git trusts the entry and the change vanishes. On
+/// macOS `std::fs::copy` keeps it anyway; on Linux it does not.
+#[test]
+fn the_snapshot_sees_a_same_size_edit_in_the_same_second() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    // Linux git compares ctime to the second, so a rewrite in the same
+    // second leaves it matching. Elsewhere it may not: take ctime out.
+    git(&root, &["config", "core.trustctime", "false"]);
+    sandbox.record(&["--activate"]);
+    // Staged, then rewritten, in one second that is already past, so the
+    // snapshot's copy of the index cannot share it by accident.
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    let backdate = |path: &Path| {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
+    };
+    std::fs::write(root.join("a.rs"), "fn a() { 0 }\n").unwrap();
+    backdate(&root.join("a.rs"));
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "a"]);
+    std::fs::write(root.join("a.rs"), "fn a() { 1 }\n").unwrap();
+    backdate(&root.join("a.rs"));
+    backdate(&root.join(".git/index"));
+
+    let output = sandbox.run_at(&root, &["audit"]);
+
+    output.assert_code(0);
+}
+
 /// Answered at Stop, a new file then staged and committed as it was is
 /// covered: one answer counts at both gates.
 #[test]
