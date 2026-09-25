@@ -25,10 +25,14 @@ pub struct AuditScope {
     /// The commit HEAD named when the audit was emitted, for the `audits`
     /// row. `None` in a repository with no commit.
     pub head: Option<String>,
-    /// The tree of the index, for a staged audit only. The commit that
-    /// records this index has this tree, which is how a later Stop knows
-    /// the commit was reviewed. Spec section 9.2, **The Stop gate starts
-    /// at the last answer**.
+    /// The tree this audit reviewed. Spec section 9.2, **An audit records
+    /// what it reviewed**.
+    ///
+    /// For a staged audit it is the index: the commit that records that
+    /// index has this tree, which is how a later Stop knows the commit was
+    /// reviewed. For a working-tree audit it is a snapshot of the working
+    /// tree, new files included, and the diff is read against it. `None`
+    /// for a two-point range, whose post-image is a commit already.
     pub tree: Option<String>,
     /// The earlier audit of this range that was answered, and what changed
     /// since. Spec section 9.2, **Changed since your last answer**.
@@ -45,10 +49,12 @@ pub struct AuditScope {
 pub struct Since {
     /// The answered audit.
     pub audit_id: String,
-    /// The commit HEAD named when it was emitted.
-    pub head: String,
-    /// The paths of this diff that changed since that commit. A superset:
-    /// uncommitted work already in the answered audit is listed again.
+    /// The tree it reviewed.
+    pub from: String,
+    /// The tree this audit reviews.
+    pub to: String,
+    /// The paths of this diff that differ between the two trees. Exact:
+    /// both trees are what was actually reviewed.
     pub paths: Vec<String>,
     /// The learnings that audit carried. A selected learning outside this
     /// list has never been answered for this change.
@@ -372,7 +378,7 @@ pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) 
         "\nThe diff is not pasted here. Read it with `git diff {}`. Each \
          learning below names its slice: the part of the diff it applies \
          to.\n",
-        shell_word(&scope.diff_range)
+        diff_args(scope)
     ));
     if selected.iter().any(|one| one.hits.is_some()) {
         out.push_str(
@@ -464,29 +470,44 @@ pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) 
     out
 }
 
+/// What `git diff` is given to print this audit's diff: `--cached` for a
+/// staged audit, the range and the reviewed tree for a working-tree audit,
+/// and the range alone otherwise.
+fn diff_args(scope: &AuditScope) -> String {
+    match &scope.tree {
+        Some(tree) if scope.diff_range != "--cached" => {
+            format!("{} {}", shell_word(&scope.diff_range), shell_word(tree))
+        }
+        _ => shell_word(&scope.diff_range),
+    }
+}
+
 /// The section naming what changed since the last answered audit.
 fn since_section(since: &Since) -> String {
     let mut out = String::from("\n## Changed since your last answer\n\n");
     if since.paths.is_empty() {
         out.push_str(&format!(
-            "You answered audit {} at commit {}. No path in the diff changed \
-             since then.\n",
-            since.audit_id, since.head
+            "You answered audit {}. Nothing in the diff changed since then.\n",
+            since.audit_id
         ));
     } else {
         out.push_str(&format!(
-            "You answered audit {} at commit {}. These paths in the diff \
-             changed since then:\n\n",
-            since.audit_id, since.head
+            "You answered audit {}. Only these paths changed since then:\n\n",
+            since.audit_id
         ));
         for path in &since.paths {
             out.push_str(&format!("- {path}\n"));
         }
         out.push_str(&format!(
-            "\nRead what changed: `git diff {} -- {}`\n",
-            shell_word(&since.head),
+            "\nRead what changed: `git diff {} {} -- {}`\n",
+            shell_word(&since.from),
+            shell_word(&since.to),
             shell_words(&since.paths)
         ));
+        out.push_str(
+            "\nThe rest of the diff is what you already reviewed. The learnings \
+             still apply to all of it.\n",
+        );
     }
     out.push_str(
         "\nA learning marked `new` below was not in that audit, so read its \
@@ -530,7 +551,7 @@ fn rule_pointers(one: &Selected, scope: &AuditScope) -> String {
     // Every path of the diff is no narrowing at all, so the command names
     // none — which is also what a `global` rule asks for.
     let mut paths = matched_paths(&one.learning, &scope.diff);
-    let range = shell_word(&scope.diff_range);
+    let range = diff_args(scope);
     if paths.len() == scope.diff.paths.len() {
         out.push_str(&format!("slice: `git diff {range}`\n"));
     } else {
@@ -952,6 +973,47 @@ slice: `git diff 041a89bc`
         assert!(!prompt.contains("+let x"), "no diff text: {prompt}");
     }
 
+    /// A working-tree audit reads a snapshot of the tree it reviewed, so its
+    /// commands name that tree and print exactly what was audited, new
+    /// files included. A staged audit names `--cached`.
+    #[test]
+    fn the_diff_commands_name_the_reviewed_tree() {
+        let mut scope = AuditScope {
+            identity: crate::repo::RepoIdentity::Remote("github.com/o/r".into()),
+            diff: crate::diff::Diff::parse(TWO_PATHS),
+            diff_range: "041a89bc".into(),
+            diff_digest: "d".into(),
+            head: None,
+            tree: Some("42e6283c".into()),
+            since: None,
+        };
+        let selected = [Selected {
+            learning: scoped("L1", ScopeKind::Language, "rust"),
+            exemplars: vec![],
+            hits: None,
+        }];
+        let prompt = render_prompt("AUDIT", &scope, &selected);
+        assert!(
+            prompt.contains("Read it with `git diff 041a89bc 42e6283c`."),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("slice: `git diff 041a89bc 42e6283c -- src/a.rs`\n"),
+            "{prompt}"
+        );
+
+        scope.diff_range = "--cached".into();
+        let prompt = render_prompt("AUDIT", &scope, &selected);
+        assert!(
+            prompt.contains("Read it with `git diff --cached`."),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("slice: `git diff --cached -- src/a.rs`\n"),
+            "{prompt}"
+        );
+    }
+
     /// A gate that fires again on the same range names what changed since
     /// the answered audit, and which rules that audit never asked about.
     /// Spec 9.2, **Changed since your last answer**.
@@ -966,7 +1028,8 @@ slice: `git diff 041a89bc`
             tree: None,
             since: Some(Since {
                 audit_id: "PREV".into(),
-                head: "6622f6ce".into(),
+                from: "aaaa1111".into(),
+                to: "bbbb2222".into(),
                 paths: vec!["src/a.rs".into(), "web/my file.ts".into()],
                 learnings: vec!["L1".into()],
             }),
@@ -987,12 +1050,14 @@ slice: `git diff 041a89bc`
         let expected = "\
 ## Changed since your last answer
 
-You answered audit PREV at commit 6622f6ce. These paths in the diff changed since then:
+You answered audit PREV. Only these paths changed since then:
 
 - src/a.rs
 - web/my file.ts
 
-Read what changed: `git diff 6622f6ce -- src/a.rs 'web/my file.ts'`
+Read what changed: `git diff aaaa1111 bbbb2222 -- src/a.rs 'web/my file.ts'`
+
+The rest of the diff is what you already reviewed. The learnings still apply to all of it.
 
 A learning marked `new` below was not in that audit, so read its whole slice.
 
@@ -1026,16 +1091,15 @@ enforcement: blocking
             tree: None,
             since: Some(Since {
                 audit_id: "PREV".into(),
-                head: "5b3c9cc5".into(),
+                from: "cccc3333".into(),
+                to: "cccc3333".into(),
                 paths: vec![],
                 learnings: vec![],
             }),
         };
         let prompt = render_prompt("AUDIT", &scope, &[]);
         assert!(
-            prompt.contains(
-                "You answered audit PREV at commit 5b3c9cc5. No path in the diff changed since then.\n"
-            ),
+            prompt.contains("You answered audit PREV. Nothing in the diff changed since then.\n"),
             "{prompt}"
         );
         assert!(!prompt.contains("Read what changed"), "{prompt}");

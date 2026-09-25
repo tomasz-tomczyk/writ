@@ -1962,9 +1962,24 @@ fn the_prompt_is_asserted_byte_for_byte() {
     let actual = output
         .stdout
         .replace(&audit_id, "<AUDIT>")
-        .replace(&learning, "<LEARNING>");
+        .replace(&learning, "<LEARNING>")
+        .replace(&tree_of(&output.stdout), "<TREE>");
     let expected = include_str!("golden/audit_prompt.txt");
     assert_eq!(actual, expected, "the prompt is a contract");
+}
+
+/// The snapshot tree a working-tree prompt names, from its first command.
+fn tree_of(prompt: &str) -> String {
+    prompt
+        .lines()
+        .find_map(|line| {
+            line.split_once("Read it with `git diff ")
+                .map(|(_, rest)| rest)
+        })
+        .and_then(|rest| rest.split('`').next())
+        .and_then(|args| args.split_whitespace().nth(1))
+        .expect("a snapshot tree in the prompt")
+        .to_string()
 }
 
 /// The P3 contract, as the number section 11 asks for. A database of a
@@ -2201,7 +2216,10 @@ fn a_regex_hit_is_listed_by_line_and_only_on_a_changed_line() {
     assert!(!output.stdout.contains("b.rs:1"), "{}", output.stdout);
     assert!(!output.stdout.contains("notes.md:"), "{}", output.stdout);
     assert!(
-        output.stdout.contains("slice: `git diff HEAD -- b.rs`\n"),
+        output.stdout.contains(&format!(
+            "slice: `git diff HEAD {} -- b.rs`\n",
+            tree_of(&output.stdout)
+        )),
         "{}",
         output.stdout
     );
@@ -2350,6 +2368,130 @@ fn added_hits_are_listed_before_removed_ones() {
     );
 }
 
+// --- an audit records what it reviewed ----------------------------------
+
+/// A file the agent created and never staged is part of the change. The
+/// audit reads a snapshot of the working tree, so it sees the file, and the
+/// real index is left exactly as it was.
+#[test]
+fn a_new_untracked_file_is_audited_and_the_index_is_untouched() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    sandbox.record(&["--matcher", "TODO", "--matcher-kind", "regex", "--activate"]);
+    std::fs::write(root.join("new.rs"), "// TODO new\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "ignored.rs\n").unwrap();
+    std::fs::write(root.join("ignored.rs"), "// TODO ignored\n").unwrap();
+    let before = git(&root, &["status", "--porcelain"]);
+
+    let output = sandbox.run_at(&root, &["audit"]);
+
+    output.assert_code(0);
+    assert!(
+        output.stdout.contains("- new.rs:1  // TODO new\n"),
+        "{}",
+        output.stdout
+    );
+    assert!(!output.stdout.contains("ignored.rs"), "{}", output.stdout);
+    assert_eq!(git(&root, &["status", "--porcelain"]), before);
+}
+
+/// The command in the prompt prints exactly what was audited, new file
+/// included.
+#[test]
+fn the_prompts_diff_command_prints_the_audited_diff() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    sandbox.record(&["--activate"]);
+    std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+    std::fs::write(root.join("new.rs"), "fn b() {}\n").unwrap();
+
+    let output = sandbox.run_at(&root, &["audit"]);
+    output.assert_code(0);
+    let command = output
+        .stdout
+        .lines()
+        .find_map(|line| line.split_once("Read it with `").map(|(_, rest)| rest))
+        .and_then(|rest| rest.split_once('`').map(|(command, _)| command))
+        .expect("a diff command")
+        .to_string();
+    let args: Vec<&str> = command.split_whitespace().skip(1).collect();
+    let printed = git(&root, &args);
+    assert!(printed.contains("+fn main() { let x = 1; }"), "{printed}");
+    assert!(printed.contains("+fn b() {}"), "{printed}");
+}
+
+/// Answered at Stop, a new file then staged and committed as it was is
+/// covered: one answer counts at both gates.
+#[test]
+fn a_new_file_answered_at_stop_is_covered_at_the_commit_gate() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    sandbox.record(&["--activate"]);
+    std::fs::write(root.join("new.rs"), "fn b() {}\n").unwrap();
+    let stop = hook(&sandbox, &root, "claude-code", "{}");
+    stop.assert_code(2);
+    answer(&sandbox, &stop.stderr);
+    git(&root, &["add", "-A"]);
+
+    let gate = git_hook(&sandbox, &root, Some(("CLAUDECODE", "1")));
+
+    gate.assert_code(0);
+    assert!(
+        gate.stderr.contains("already audited and answered"),
+        "{}",
+        gate.stderr
+    );
+}
+
+/// Answered at Stop, then edited again: the commit gate reviews the whole
+/// staged change, and names the one path that changed since the answer.
+#[test]
+fn the_commit_gate_names_what_changed_since_the_stop_answer() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    sandbox.record(&["--activate"]);
+    std::fs::write(root.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+    let stop = hook(&sandbox, &root, "claude-code", "{}");
+    answer(&sandbox, &stop.stderr);
+    std::fs::write(root.join("a.rs"), "fn main() { let y = 2; }\n").unwrap();
+    git(&root, &["add", "-A"]);
+
+    let gate = git_hook(&sandbox, &root, Some(("CLAUDECODE", "1")));
+    gate.assert_code(1);
+    let prompt = sandbox
+        .run_at(&root, &["audit", "--fetch", &audit_id_of(&gate.stderr)])
+        .stdout;
+
+    let stop_audit = audit_id_of(&stop.stderr);
+    assert!(
+        prompt.contains(&format!(
+            "You answered audit {stop_audit}. Only these paths changed since then:\n\n- a.rs\n\n"
+        )),
+        "{prompt}"
+    );
+    assert!(prompt.contains("diff-range: --cached"), "{prompt}");
+}
+
+/// A subagent's audit covered only the working tree at its head. A later
+/// audit that reaches further back does not take it as the last answer,
+/// or it would call the older commits reviewed.
+#[test]
+fn a_narrower_answered_audit_is_not_the_last_answer_for_a_wider_one() {
+    let sandbox = Sandbox::new();
+    let (root, _) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "a.rs", "fn a() {}\n");
+    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+    let subagent = sandbox.run_at(&root, &["audit"]);
+    answer(&sandbox, &subagent.stdout);
+
+    let wider = sandbox.run_at(&root, &["audit", "--since-answer"]);
+
+    wider.assert_code(0);
+    assert!(!wider.stdout.contains("Changed since"), "{}", wider.stdout);
+}
+
 /// A rule with no matcher has nothing to point at but its slice.
 #[test]
 fn a_learning_with_no_matcher_carries_only_its_slice() {
@@ -2362,7 +2504,10 @@ fn a_learning_with_no_matcher_carries_only_its_slice() {
     output.assert_code(0);
     assert!(!output.stdout.contains("start here"), "{}", output.stdout);
     assert!(
-        output.stdout.contains("slice: `git diff HEAD`\n"),
+        output.stdout.contains(&format!(
+            "slice: `git diff HEAD {}`\n",
+            tree_of(&output.stdout)
+        )),
         "{}",
         output.stdout
     );
@@ -2411,11 +2556,17 @@ fn a_second_audit_of_a_range_names_what_changed_since_the_answer() {
 
     let output = sandbox.run_at(&root, &["audit", "--diff", &base]);
     output.assert_code(0);
+    // The tree clean at each audit is the commit's own tree, so the two
+    // snapshots are the two commits' trees.
+    let from = git(&root, &["rev-parse", &format!("{answered_at}^{{tree}}")])
+        .trim()
+        .to_string();
+    let to = git(&root, &["rev-parse", "HEAD^{tree}"]).trim().to_string();
     let expected = format!(
         "## Changed since your last answer\n\n\
-         You answered audit {audit} at commit {answered_at}. These paths in the diff changed since then:\n\n\
+         You answered audit {audit}. Only these paths changed since then:\n\n\
          - a.rs\n\n\
-         Read what changed: `git diff {answered_at} -- a.rs`\n"
+         Read what changed: `git diff {from} {to} -- a.rs`\n"
     );
     assert!(output.stdout.contains(&expected), "{}", output.stdout);
     assert!(

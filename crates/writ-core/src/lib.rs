@@ -37,7 +37,7 @@ pub use model::{
 };
 pub use paths::{Env, Paths, resolve_paths};
 pub use repo::{RepoIdentity, normalize_remote};
-pub use store::Store;
+pub use store::{AnsweredAudit, Store};
 pub use telemetry::{
     BUCKET_EDGES, BucketMetric, BucketRow, CommandMetric, CounterMetric, CounterRow,
     FindingOutcomeMetric, GateResultMetric, HealthActionMetric, HookHostMetric, LanguageMetric,

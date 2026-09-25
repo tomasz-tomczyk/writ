@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, Row, Transaction, functions::FunctionFlags, params};
+use rusqlite::{Connection, Row, Transaction, functions::FunctionFlags, params};
 
 use crate::audit::{
     AuditScope, Budget, Candidate, FindingsInput, Ingested, Outcome, Outcomes, Selected,
@@ -47,6 +47,20 @@ fn placeholders(count: usize) -> String {
     std::iter::repeat_n("?", count)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// An answered audit and the tree it reviewed. Spec section 9.2, **An
+/// audit records what it reviewed**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnsweredAudit {
+    /// The audit.
+    pub id: String,
+    /// The range it recorded: `--cached`, `HEAD`, or a commit.
+    pub diff_range: String,
+    /// The commit HEAD named when it ran.
+    pub head: Option<String>,
+    /// The tree it reviewed.
+    pub tree: String,
 }
 
 /// An open writ database.
@@ -621,42 +635,45 @@ impl Store {
         Ok(id)
     }
 
-    /// The newest audit of `diff_range` in this repository that was
-    /// answered and recorded a commit: its id, that commit, and the
-    /// learnings it carried. Spec section 9.2, **Changed since your last
-    /// answer**.
+    /// Answered audits in this repository that recorded the tree they
+    /// reviewed, newest first, at most `limit` of them. Spec section 9.2,
+    /// **An audit records what it reviewed**.
     ///
     /// Answered means ingested against, for the reason coverage requires
     /// it: an audit nobody answered tells the agent nothing about what it
-    /// already checked. The learnings come from `audit_coverage`, which
-    /// records what each audit asked about.
-    pub fn last_answer(
+    /// already checked.
+    pub fn answered_audits(
         &self,
         identity: &RepoIdentity,
-        diff_range: &str,
-    ) -> Result<Option<(String, String, Vec<String>)>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT id, head FROM audits
-                  WHERE repo IS ?1 AND diff_range = ?2
-                    AND ingested_at IS NOT NULL AND head IS NOT NULL
-                  ORDER BY id DESC
-                  LIMIT 1",
-                params![identity.value(), diff_range],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        let Some((id, head)) = row else {
-            return Ok(None);
-        };
+        limit: usize,
+    ) -> Result<Vec<AnsweredAudit>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, diff_range, head, tree FROM audits
+              WHERE repo IS ?1 AND ingested_at IS NOT NULL AND tree IS NOT NULL
+              ORDER BY id DESC
+              LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![identity.value(), limit as i64], |row| {
+            Ok(AnsweredAudit {
+                id: row.get(0)?,
+                diff_range: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                head: row.get(2)?,
+                tree: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The learnings one audit carried, from `audit_coverage`, which
+    /// records what each audit asked about.
+    pub fn audit_learnings(&self, audit_id: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT learning_id FROM audit_coverage WHERE audit_id = ?1")?;
         let learnings = stmt
-            .query_map([&id], |row| row.get::<_, String>(0))?
+            .query_map([audit_id], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(Some((id, head, learnings)))
+        Ok(learnings)
     }
 
     /// The commits and trees answered audits in this repository reviewed up
@@ -667,7 +684,9 @@ impl Store {
     /// - a staged audit answers for the commit that records its index, so
     ///   its **tree** counts;
     /// - an audit over a range answers for everything from the range's
-    ///   start to the commit it ran at, so its **head** counts;
+    ///   start to the commit it ran at, so its **head** counts, and so does
+    ///   its snapshot **tree**: a commit that records exactly what it
+    ///   reviewed was reviewed;
     /// - an audit of the working tree against HEAD — a subagent's, or a
     ///   plain `writ audit` — saw only uncommitted work. The commits
     ///   before its head were never in front of it, so its head does not
@@ -691,10 +710,15 @@ impl Store {
         })?;
         for row in rows {
             let (head, tree, range) = row?;
+            // The default range saw only what was uncommitted at its head.
+            if matches!(range.as_deref(), None | Some("HEAD")) {
+                continue;
+            }
             if let Some(tree) = tree {
                 trees.push(tree);
-            } else if let Some(head) = head
-                && !matches!(range.as_deref(), None | Some("HEAD") | Some("--cached"))
+            }
+            if let Some(head) = head
+                && range.as_deref() != Some("--cached")
             {
                 heads.push(head);
             }
@@ -1633,43 +1657,36 @@ mod tests {
         );
     }
 
-    /// The last audit of a range that was answered, with the commit it was
-    /// emitted at and the learnings it carried. Spec 9.2, **Changed since
-    /// your last answer**.
+    /// Answered audits that recorded what they reviewed, newest first,
+    /// with the learnings each carried. Spec 9.2, **An audit records what
+    /// it reviewed**.
     #[test]
-    fn the_last_answer_is_the_newest_ingested_audit_of_the_same_range() {
+    fn answered_audits_are_the_ingested_ones_with_a_tree_newest_first() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&dir.path().join("learnings.db")).unwrap();
         let first = active(&mut store, "first", &["global"]);
-        let second = active(&mut store, "second", &["global"]);
         let identity = RepoIdentity::Remote("github.com/o/r".into());
-        let scope = |range: &str, head: Option<&str>| AuditScope {
+        let scope = |range: &str, head: Option<&str>, tree: Option<&str>| AuditScope {
             identity: identity.clone(),
             diff: Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n"),
             diff_range: range.into(),
             diff_digest: "d".into(),
             head: head.map(str::to_string),
-            tree: None,
+            tree: tree.map(str::to_string),
             since: None,
         };
-        let selected = |ids: &[&String]| -> Vec<Selected> {
-            ids.iter()
-                .map(|id| Selected {
-                    learning: store.get(id).unwrap(),
-                    exemplars: Vec::new(),
-                    hits: None,
-                })
-                .collect()
-        };
-        let one = selected(&[&first]);
-        let both = selected(&[&first, &second]);
-        let open = |store: &mut Store, scope: &AuditScope, sel: &[Selected]| {
+        let one = vec![Selected {
+            learning: store.get(&first).unwrap(),
+            exemplars: Vec::new(),
+            hits: None,
+        }];
+        let open = |store: &mut Store, scope: &AuditScope| {
             store
                 .start_audit(
                     scope,
                     1,
-                    sel,
-                    &crate::audit::slice_digests(&scope.diff, sel),
+                    &one,
+                    &crate::audit::slice_digests(&scope.diff, &one),
                 )
                 .unwrap()
         };
@@ -1682,31 +1699,74 @@ mod tests {
                 .unwrap();
         };
 
-        assert_eq!(store.last_answer(&identity, "base").unwrap(), None);
-
-        let older = open(&mut store, &scope("base", Some("aaa")), &one);
+        let older = open(&mut store, &scope("base", Some("h1"), Some("t1")));
         answer(&mut store, &older);
-        let newer = open(&mut store, &scope("base", Some("bbb")), &both);
+        let newer = open(&mut store, &scope("--cached", Some("h2"), Some("t2")));
         answer(&mut store, &newer);
-        // Not answered, so not an answer.
-        open(&mut store, &scope("base", Some("ccc")), &one);
-        // Another range, and a row with no head, are not candidates.
-        let other = open(&mut store, &scope("HEAD", Some("ddd")), &one);
-        answer(&mut store, &other);
-        let headless = open(&mut store, &scope("base", None), &one);
-        answer(&mut store, &headless);
+        // Not answered, and no tree: neither is listed.
+        open(&mut store, &scope("base", Some("h3"), Some("t3")));
+        let treeless = open(&mut store, &scope("a..b", Some("h4"), None));
+        answer(&mut store, &treeless);
 
-        let (audit, head, mut learnings) = store.last_answer(&identity, "base").unwrap().unwrap();
-        learnings.sort();
-        let mut expected = vec![first.clone(), second.clone()];
-        expected.sort();
-        assert_eq!(
-            (audit, head, learnings),
-            (newer, "bbb".to_string(), expected)
-        );
+        let listed = store.answered_audits(&identity, 10).unwrap();
+        let ids: Vec<&str> = listed.iter().map(|one| one.id.as_str()).collect();
+        assert_eq!(ids, [newer.as_str(), older.as_str()]);
+        assert_eq!(listed[0].tree, "t2");
+        assert_eq!(listed[0].head.as_deref(), Some("h2"));
+        assert_eq!(listed[0].diff_range, "--cached");
+        assert_eq!(store.audit_learnings(&newer).unwrap(), vec![first.clone()]);
 
         let elsewhere = RepoIdentity::Remote("github.com/o/other".into());
-        assert_eq!(store.last_answer(&elsewhere, "base").unwrap(), None);
+        assert!(store.answered_audits(&elsewhere, 10).unwrap().is_empty());
+    }
+
+    /// A working-tree audit of the default range saw only uncommitted work,
+    /// so neither its head nor its snapshot tree marks a commit reviewed.
+    #[test]
+    fn a_default_range_audit_is_no_answer_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("learnings.db")).unwrap();
+        let first = active(&mut store, "first", &["global"]);
+        let identity = RepoIdentity::Remote("github.com/o/r".into());
+        let one = vec![Selected {
+            learning: store.get(&first).unwrap(),
+            exemplars: Vec::new(),
+            hits: None,
+        }];
+        let mut answered = |range: &str, head: &str, tree: &str| {
+            let scope = AuditScope {
+                identity: identity.clone(),
+                diff: Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n"),
+                diff_range: range.into(),
+                diff_digest: "d".into(),
+                head: Some(head.into()),
+                tree: Some(tree.into()),
+                since: None,
+            };
+            let audit = store
+                .start_audit(
+                    &scope,
+                    1,
+                    &one,
+                    &crate::audit::slice_digests(&scope.diff, &one),
+                )
+                .unwrap();
+            store
+                .ingest(&FindingsInput {
+                    audit_id: audit,
+                    findings: Vec::new(),
+                })
+                .unwrap();
+        };
+        answered("HEAD", "h-default", "t-default");
+        answered("--cached", "h-cached", "t-cached");
+        answered("base", "h-range", "t-range");
+
+        let (heads, trees) = store.answered_points(&identity).unwrap();
+        assert_eq!(heads, ["h-range"]);
+        let mut trees = trees;
+        trees.sort();
+        assert_eq!(trees, ["t-cached", "t-range"]);
     }
 
     /// Both halves of the coverage condition, at the store, now keyed per
