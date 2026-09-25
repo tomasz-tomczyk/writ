@@ -438,11 +438,14 @@ mod tests {
                         diff: Diff::parse("--- a/private.rs\n+++ b/private.rs\n+private line\n"),
                         diff_range: "private branch".into(),
                         diff_digest: "private digest".into(),
+                        head: None,
+                        since: None,
                     },
                     1,
                     &[Selected {
                         learning,
                         exemplars: Vec::new(),
+                        hits: None,
                     }],
                     &["private digest".to_string()],
                 )

@@ -79,6 +79,14 @@ pub struct Diff {
     /// order, so the digest a slice hashes to does not depend on the order
     /// git happened to name the files in.
     pub sections: BTreeMap<String, String>,
+    /// Each path's added lines, by their line number in the post-image.
+    ///
+    /// A matcher hit is shown only when it lands on a line the diff
+    /// changed, and it is shown the way an editor numbers it. Spec section
+    /// 9.2, **The prompt points at the diff, it does not carry it**.
+    pub added_lines: BTreeMap<String, BTreeMap<u32, String>>,
+    /// Each path's removed lines, by their line number in the pre-image.
+    pub removed_lines: BTreeMap<String, BTreeMap<u32, String>>,
 }
 
 impl Diff {
@@ -97,6 +105,11 @@ impl Diff {
         // `diff --git` line, so the buffer fills before it has a key.
         let mut buffer = String::new();
         let mut buffer_path: Option<String> = None;
+        let mut added_lines: BTreeMap<String, BTreeMap<u32, String>> = BTreeMap::new();
+        let mut removed_lines: BTreeMap<String, BTreeMap<u32, String>> = BTreeMap::new();
+        // The next line number on each side of the open hunk.
+        let mut old_line: u32 = 0;
+        let mut new_line: u32 = 0;
 
         // Close the open section, if a header has named one.
         macro_rules! flush {
@@ -133,6 +146,7 @@ impl Diff {
             }
             if line.starts_with("@@") {
                 in_hunk = true;
+                (old_line, new_line) = hunk_starts(line);
                 continue;
             }
             if !in_hunk {
@@ -163,9 +177,26 @@ impl Diff {
             if let Some(rest) = line.strip_prefix('+') {
                 added.push_str(rest);
                 added.push('\n');
+                if in_hunk && let Some(path) = &buffer_path {
+                    added_lines
+                        .entry(path.clone())
+                        .or_default()
+                        .insert(new_line, rest.to_string());
+                }
+                new_line += 1;
             } else if let Some(rest) = line.strip_prefix('-') {
                 removed.push_str(rest);
                 removed.push('\n');
+                if in_hunk && let Some(path) = &buffer_path {
+                    removed_lines
+                        .entry(path.clone())
+                        .or_default()
+                        .insert(old_line, rest.to_string());
+                }
+                old_line += 1;
+            } else if in_hunk && line.starts_with(' ') {
+                old_line += 1;
+                new_line += 1;
             }
         }
 
@@ -177,6 +208,8 @@ impl Diff {
             added,
             removed,
             sections,
+            added_lines,
+            removed_lines,
         }
     }
 
@@ -226,6 +259,31 @@ impl Diff {
     pub fn matches_glob(&self, pattern: &str) -> bool {
         self.paths.iter().any(|path| glob_match(pattern, path))
     }
+}
+
+/// The first line number on each side of a hunk, from its header.
+///
+/// `@@ -3,4 +3,5 @@` starts the old side at 3 and the new side at 3. A
+/// count of one may be left out, so `@@ -1 +1 @@` is read too. A header
+/// that does not parse numbers from 0, which only mislabels the lines of
+/// a diff git did not print.
+fn hunk_starts(header: &str) -> (u32, u32) {
+    let mut old = 0;
+    let mut new = 0;
+    for field in header.split_whitespace().skip(1).take(2) {
+        let start = |rest: &str| {
+            rest.split(',')
+                .next()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0)
+        };
+        if let Some(rest) = field.strip_prefix('-') {
+            old = start(rest);
+        } else if let Some(rest) = field.strip_prefix('+') {
+            new = start(rest);
+        }
+    }
+    (old, new)
 }
 
 /// Take the path out of a `+++ b/src/main.rs` line.
@@ -357,6 +415,72 @@ diff --git a/q.sql b/q.sql
         assert!(Diff::parse("").is_empty());
         assert!(Diff::parse("   \n").is_empty());
         assert!(!Diff::parse(SAMPLE).is_empty());
+    }
+
+    /// A hit is shown only on a line the diff changed, so the diff has to
+    /// say which lines those are, numbered the way an editor numbers them:
+    /// the post-image for an added line, the pre-image for a removed one.
+    #[test]
+    fn changed_lines_carry_their_line_numbers() {
+        let text = "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -3,4 +3,5 @@ fn main() {
+ keep one
+-old four
++new four
++new five
+ keep six
+@@ -20,1 +21,1 @@
+-old twenty
++new twenty-one
+";
+        let diff = Diff::parse(text);
+        let added: Vec<(u32, &str)> = diff.added_lines["a.rs"]
+            .iter()
+            .map(|(line, text)| (*line, text.as_str()))
+            .collect();
+        assert_eq!(
+            added,
+            [(4, "new four"), (5, "new five"), (21, "new twenty-one")]
+        );
+        let removed: Vec<(u32, &str)> = diff.removed_lines["a.rs"]
+            .iter()
+            .map(|(line, text)| (*line, text.as_str()))
+            .collect();
+        assert_eq!(removed, [(4, "old four"), (20, "old twenty")]);
+    }
+
+    /// A hunk header may leave out a count of one, and a file with no
+    /// trailing newline carries a marker line that is not content.
+    #[test]
+    fn a_short_hunk_header_and_a_newline_marker_are_read() {
+        let text = "\
+diff --git a/b.txt b/b.txt
+--- a/b.txt
++++ b/b.txt
+@@ -1 +1 @@
+-one
+\\ No newline at end of file
++uno
+\\ No newline at end of file
+";
+        let diff = Diff::parse(text);
+        assert_eq!(diff.added_lines["b.txt"].get(&1).unwrap(), "uno");
+        assert_eq!(diff.removed_lines["b.txt"].get(&1).unwrap(), "one");
+        assert_eq!(diff.added_lines["b.txt"].len(), 1);
+    }
+
+    /// A deleted file has only a pre-image, so its lines are keyed by the
+    /// old name, which is the only name it has.
+    #[test]
+    fn a_deleted_file_keys_its_removed_lines_by_its_old_name() {
+        let text = "diff --git a/gone.rs b/gone.rs\n--- a/gone.rs\n+++ /dev/null\n\
+                    @@ -1,2 +0,0 @@\n-one\n-two\n";
+        let diff = Diff::parse(text);
+        assert_eq!(diff.removed_lines["gone.rs"].len(), 2);
+        assert!(!diff.added_lines.contains_key("gone.rs"));
     }
 
     #[test]

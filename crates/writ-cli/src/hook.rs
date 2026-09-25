@@ -182,9 +182,9 @@ fn gate_telemetry(host: Host, result: GateResultMetric) -> TelemetryBatch {
 ///
 /// What it writes is the **pointer**, not the prompt. Spec section 9.2,
 /// **The gate points, it does not paste**. Every host renders its block
-/// message into the transcript verbatim, so pasting a prompt that carries
-/// the whole diff puts 100 KB of a long branch in front of the developer
-/// after every turn. The pointer is three lines; the document behind it
+/// message into the transcript verbatim, so pasting the prompt puts a
+/// document written for the agent in front of the developer after every
+/// turn. The pointer is three lines; the document behind it
 /// reaches the agent through `writ_audit`, which the host collapses.
 fn emit(host: Host, run: &Selection) -> ExitCode {
     let pointer = run.pointer();

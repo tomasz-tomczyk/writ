@@ -359,6 +359,7 @@ fn select_learning(store: &mut Store, learning_id: &str) {
     let selected = vec![Selected {
         learning,
         exemplars,
+        hits: None,
     }];
     let audit_id = store
         .start_audit(
@@ -701,6 +702,7 @@ fn finding_with_path(
     let selected = vec![Selected {
         learning,
         exemplars,
+        hits: None,
     }];
     let audit_id = store
         .start_audit(
@@ -2006,5 +2008,7 @@ fn audit_scope() -> writ_core::AuditScope {
         diff: writ_core::Diff::parse("--- a/a.rs\n+++ b/a.rs\n+let x = 1;\n"),
         diff_range: "HEAD".into(),
         diff_digest: "test digest".into(),
+        head: None,
+        since: None,
     }
 }

@@ -11,8 +11,9 @@ use std::process::ExitCode;
 
 use writ_core::{
     AuditScope, BucketMetric, Budget, Config, CounterMetric, Diff, Error, FindingOutcomeMetric,
-    GateResultMetric, Ingested, LanguageMetric, MatcherResultMetric, Outcome, Result, Selected,
-    Store, TelemetryBatch, diff_digest, parse_findings, rank, render_pointer, render_prompt,
+    GateResultMetric, Hit, Ingested, LanguageMetric, MatcherResultMetric, Outcome, Result,
+    Selected, Since, Store, TelemetryBatch, diff_digest, parse_findings, rank, render_pointer,
+    render_prompt,
 };
 
 use crate::git;
@@ -326,11 +327,13 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
             .push(CounterMetric::Language(LanguageMetric::from_path(path)));
     }
 
-    let scope = AuditScope {
+    let mut scope = AuditScope {
         identity: repo.identity,
         diff,
         diff_range: range,
         diff_digest: diff_digest(&text),
+        head: git::head(&repo.root),
+        since: None,
     };
     let budget = Budget {
         max_rules: args.max_rules.unwrap_or(config.audit.max_rules),
@@ -342,18 +345,20 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     let mut candidates = store.candidates(&scope)?;
     let considered = candidates.len();
     let mut notices = Vec::new();
+    let mut hits: std::collections::HashMap<String, Vec<Hit>> = std::collections::HashMap::new();
+    let base = git::range_base(&repo.root, &scope.diff_range);
 
     // A matcher hit selects a learning. It never creates a finding.
     candidates.retain(|candidate| {
         telemetry
             .counters
             .push(CounterMetric::MatcherKind(candidate.learning.matcher_kind));
-        let verdict = evaluate(&candidate.learning, &scope.diff, &repo.root);
+        let verdict = evaluate(&candidate.learning, &scope.diff, &repo.root, &base);
         if candidate.learning.matcher_kind.is_some() {
             telemetry
                 .counters
                 .push(CounterMetric::MatcherResult(match &verdict {
-                    Verdict::Hit => MatcherResultMetric::Hit,
+                    Verdict::Hit(_) | Verdict::Scope => MatcherResultMetric::Hit,
                     Verdict::Miss | Verdict::MissWithNotice(_) => MatcherResultMetric::Miss,
                     Verdict::Unevaluable(_) => MatcherResultMetric::Unevaluable,
                 }));
@@ -370,11 +375,20 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
                 candidate.learning.id
             ));
         }
-        verdict.keeps()
+        let keeps = verdict.keeps();
+        if let Some(found) = verdict.hits() {
+            hits.insert(candidate.learning.id.clone(), found);
+        }
+        keeps
     });
 
     rank(&mut candidates);
-    let selected = store.take_budget(&candidates, &budget)?;
+    let mut selected = store.take_budget(&candidates, &budget)?;
+    // What each matcher found on the changed lines, for `start here`. The
+    // budget measured rule text alone, so this is attached after it.
+    for one in &mut selected {
+        one.hits = hits.remove(&one.learning.id);
+    }
     telemetry
         .buckets
         .push(BucketMetric::AuditConsidered(considered as u64));
@@ -423,6 +437,11 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
         });
     }
 
+    // Where the new work is, when this range was audited and answered
+    // before. It changes no decision above: coverage has already said the
+    // gate fires. Spec section 9.2, **Changed since your last answer**.
+    scope.since = since(&store, &scope, &repo.root)?;
+
     // A dry run writes nothing: no `audits` row and no `times_selected`.
     // Seeing what an audit would select had no cost-free path before, and
     // emit moves up to `max_rules` counters. The placeholder is not an id
@@ -454,6 +473,35 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
         run.prompt().chars().count() as u64
     ));
     Ok(run)
+}
+
+/// The last answered audit of this range, and the paths of this diff that
+/// changed after it.
+///
+/// Nothing when there is no such audit, or when git can no longer compare
+/// against its commit. P6: the prompt is whole without the section.
+fn since(store: &Store, scope: &AuditScope, root: &Path) -> Result<Option<Since>> {
+    let Some((audit_id, head, learnings)) =
+        store.last_answer(&scope.identity, &scope.diff_range)?
+    else {
+        return Ok(None);
+    };
+    let Some(changed) = git::changed_since(root, &head) else {
+        return Ok(None);
+    };
+    let paths = scope
+        .diff
+        .paths
+        .iter()
+        .filter(|path| changed.contains(path))
+        .cloned()
+        .collect();
+    Ok(Some(Since {
+        audit_id,
+        head,
+        paths,
+        learnings,
+    }))
 }
 
 /// Steps 5 and 6: write the findings, then gate on them.
