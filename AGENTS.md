@@ -157,7 +157,9 @@ work too. The commit gate audits each commit as it is made.
 ## An audit records what it reviewed
 
 A working-tree audit reads a **snapshot**: `git add -A` into a copy of
-the index, then `git write-tree`. The real index is never touched. The
+the index, then `git write-tree`. The real index is never touched. The copy keeps the index's mtime:
+stamped now, it makes git trust a same-size edit made in the second it
+was staged, and the snapshot drops it. That was a Linux-only CI flake. The
 diff is `git diff BASE TREE`, which for tracked files is the same text as
 `git diff BASE` and also carries new files git does not ignore — before
 this, a file the agent created and never staged was invisible to Stop.
@@ -185,10 +187,15 @@ with no branch point to the working tree against HEAD.
 | --- | --- |
 | staged (`--cached`) | the commit whose tree it recorded |
 | over a range | the head it ran at, and a commit with its snapshot tree |
-| working tree against HEAD | **nothing** |
+| working tree against HEAD | a commit with its tree, **only** when that commit's parent is already covered |
 
 The last row is deliberate. A subagent's audit saw only uncommitted
-work; counting its head would mark every commit before it reviewed.
+work; counting its head would mark every commit before it reviewed. A
+commit of exactly its tree, on its head, holds the change it reviewed,
+but the answer point vouches for everything before it. So the commit
+counts only when its parent is an answer point or the branch point, and
+such commits chain. Without this, a commit let through on a working-tree
+answer sent the next Stop back to the branch point.
 
 A stacked branch needs no configuration: its parent's answered commits
 are in its history, so it starts after them. Everything before the
@@ -370,6 +377,24 @@ defect the retry cap had before it was hoisted above `select`.
 This buys nothing in selection cost, and no test may imply it does
 (invariant 5). Selection still runs in full. What is saved is the prompt
 render, the nag, and the counter.
+
+## A gate re-points to an unanswered audit
+
+A blocked commit retried without an answer used to open a new audit
+each time, and so did Stop on the next turn over the same unanswered
+work. Each one moved `times_selected` for rules no reviewer saw.
+
+After the coverage step, a gate looks for an audit with the same repo,
+`diff_range` and `tree`, no `ingested_at`, and the same learnings at the
+same slice digests in `audit_coverage`. When one exists, the gate emits
+that audit's pointer and still blocks. It opens no row and moves no
+counter.
+
+- **The tree is in the key** because the prompt's commands name it.
+- **The selection is in the key** so a rule activated since is not
+  hidden behind an old pointer.
+- **It is not a retry cap.** Nothing stops blocking.
+- **Gates only.** `writ audit` by hand and `--dry-run` never re-point.
 
 ## Two surfaces, one gate
 

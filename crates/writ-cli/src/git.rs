@@ -206,8 +206,26 @@ pub fn snapshot(root: &Path) -> Option<String> {
         ],
     )?);
     // A repository with no commit and nothing staged has no index yet.
+    //
+    // The copy keeps the index's mtime. git re-reads a file whose stat
+    // entry is not older than the index, because it may have changed in
+    // the second it was staged. A copy stamped now makes every entry look
+    // older, so git trusts a same-size edit made in that second and the
+    // snapshot drops it. `std::fs::copy` keeps the mtime on macOS and not
+    // on Linux.
     if index.is_file() {
         std::fs::copy(&index, &scratch).ok()?;
+        let modified = std::fs::metadata(&index).and_then(|meta| meta.modified());
+        let kept = modified.and_then(|time| {
+            std::fs::File::options()
+                .write(true)
+                .open(&scratch)?
+                .set_modified(time)
+        });
+        if kept.is_err() {
+            let _ = std::fs::remove_file(&scratch);
+            return None;
+        }
     }
     let in_scratch = |args: &[&str]| {
         Command::new("git")

@@ -487,8 +487,21 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     // emit moves up to `max_rules` counters. The placeholder is not an id
     // on purpose, so an ingest of a dry run fails with exit 5 rather than
     // attaching findings to some other audit.
+    //
+    // A gate that selected exactly what an unanswered audit of this tree
+    // already asked about points at that audit again. It still blocks, but
+    // opens no row and moves no counter: nobody has reviewed anything
+    // since. Spec section 9.2, **A gate re-points to an audit nobody has
+    // answered yet**.
+    let unanswered = if args.hook.is_some() && !args.dry_run {
+        store.unanswered_audit(&scope, &selected, &slice_digests)?
+    } else {
+        None
+    };
     let audit_id = if args.dry_run {
         DRY_RUN_ID.to_string()
+    } else if let Some(id) = unanswered {
+        id
     } else {
         store.start_audit(&scope, considered, &selected, &slice_digests)?
     };
@@ -525,19 +538,38 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
 /// branch cut from another branch starts after the parent's reviewed work
 /// without anyone naming the parent.
 ///
+/// A commit whose tree an answered working-tree audit saw, sitting on
+/// that audit's head, counts too, but only when its parent is covered: an
+/// answer point itself, or the branch point. That audit saw the commit's
+/// change and nothing before it, and the answer point vouches for
+/// everything before it. So the history is walked oldest first, and such
+/// commits chain.
+///
 /// With no such commit, the branch point against the remote's default
 /// branch, and with no branch point, `None`: the working tree against HEAD.
 /// An answer at HEAD itself is the same thing, so it is `None` as well.
 fn since_answer(store: &Store, repo: &git::Repo) -> Result<Option<String>> {
-    let (heads, trees) = store.answered_points(&repo.identity)?;
+    let points = store.answered_points(&repo.identity)?;
     let history = git::first_parent_history(&repo.root, git::HISTORY_DEPTH);
-    let answered = history
-        .iter()
-        .position(|(commit, tree)| heads.contains(commit) || trees.contains(tree));
-    let base = match answered {
+    let branch_point = std::cell::OnceCell::new();
+    let branch_point = || branch_point.get_or_init(|| git::branch_point(&repo.root));
+    let mut covered = vec![false; history.len()];
+    for index in (0..history.len()).rev() {
+        let (commit, tree) = &history[index];
+        let on_covered_parent = history.get(index + 1).is_some_and(|(parent, _)| {
+            points
+                .working
+                .iter()
+                .any(|(head, seen)| head == parent && seen == tree)
+                && (covered[index + 1] || branch_point().as_ref() == Some(parent))
+        });
+        covered[index] =
+            points.heads.contains(commit) || points.trees.contains(tree) || on_covered_parent;
+    }
+    let base = match covered.iter().position(|covered| *covered) {
         Some(0) => return Ok(None),
         Some(index) => Some(history[index].0.clone()),
-        None => git::branch_point(&repo.root),
+        None => branch_point().clone(),
     };
     Ok(base.filter(|base| history.first().map(|(head, _)| head) != Some(base)))
 }

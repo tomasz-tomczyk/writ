@@ -49,6 +49,20 @@ fn placeholders(count: usize) -> String {
         .join(", ")
 }
 
+/// What answered audits in one repository reviewed up to. Spec section
+/// 9.2, **The Stop gate starts at the last answer**.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnsweredPoints {
+    /// Commits an answered range audit ran at.
+    pub heads: Vec<String>,
+    /// Trees an answered staged or range audit reviewed.
+    pub trees: Vec<String>,
+    /// The head and tree of each answered working-tree audit. The tree
+    /// counts only on a commit that sits on that head, and only when the
+    /// head is itself covered.
+    pub working: Vec<(String, String)>,
+}
+
 /// An answered audit and the tree it reviewed. Spec section 9.2, **An
 /// audit records what it reviewed**.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -573,6 +587,65 @@ impl Store {
         Ok(true)
     }
 
+    /// An audit nobody has answered yet that asked about exactly this: the
+    /// same repo, range and tree, and the same learnings at the same slice
+    /// digests. Spec section 9.2, **A gate re-points to an audit nobody has
+    /// answered yet**.
+    ///
+    /// The tree is part of the key because the audit's commands name it.
+    /// The selection is part of the key because a rule activated since has
+    /// no row in the old audit, and pointing at it would hide that rule.
+    pub fn unanswered_audit(
+        &self,
+        scope: &AuditScope,
+        selected: &[Selected],
+        slice_digests: &[String],
+    ) -> Result<Option<String>> {
+        debug_assert_eq!(selected.len(), slice_digests.len());
+        let Some(tree) = &scope.tree else {
+            return Ok(None);
+        };
+        let mut wanted: Vec<(&str, &str)> = selected
+            .iter()
+            .zip(slice_digests)
+            .map(|(one, digest)| (one.learning.id.as_str(), digest.as_str()))
+            .collect();
+        wanted.sort_unstable();
+        let mut audits = self.conn.prepare_cached(
+            "SELECT id FROM audits
+              WHERE repo IS ?1 AND diff_range IS ?2 AND tree = ?3
+                AND ingested_at IS NULL
+              ORDER BY id DESC",
+        )?;
+        let ids = audits
+            .query_map(
+                params![scope.identity.value(), &scope.diff_range, tree],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut coverage = self.conn.prepare_cached(
+            "SELECT learning_id, slice_digest FROM audit_coverage WHERE audit_id = ?1",
+        )?;
+        for id in ids {
+            let mut asked = coverage
+                .query_map([&id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            asked.sort_unstable();
+            let same = asked.len() == wanted.len()
+                && asked.iter().zip(&wanted).all(
+                    |((learning, digest), (want_learning, want_digest))| {
+                        learning == want_learning && digest == want_digest
+                    },
+                );
+            if same {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
     /// Open an `audits` row, stamp the rules it sent, and return its id.
     /// Spec section 7.1 step 4.
     ///
@@ -679,7 +752,7 @@ impl Store {
     /// The commits and trees answered audits in this repository reviewed up
     /// to. Spec section 9.2, **The Stop gate starts at the last answer**.
     ///
-    /// Two kinds of audit count, and one does not:
+    /// Each kind of audit counts for something different:
     ///
     /// - a staged audit answers for the commit that records its index, so
     ///   its **tree** counts;
@@ -690,17 +763,18 @@ impl Store {
     /// - an audit of the working tree against HEAD — a subagent's, or a
     ///   plain `writ audit` — saw only uncommitted work. The commits
     ///   before its head were never in front of it, so its head does not
-    ///   count.
+    ///   count on its own. It goes in `working` with its tree, and the
+    ///   caller counts a commit of that tree on that head only when the
+    ///   head is covered some other way.
     ///
     /// Answered means ingested against, as for coverage.
-    pub fn answered_points(&self, identity: &RepoIdentity) -> Result<(Vec<String>, Vec<String>)> {
+    pub fn answered_points(&self, identity: &RepoIdentity) -> Result<AnsweredPoints> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT head, tree, diff_range FROM audits
               WHERE repo IS ?1 AND ingested_at IS NOT NULL
                 AND (head IS NOT NULL OR tree IS NOT NULL)",
         )?;
-        let mut heads = Vec::new();
-        let mut trees = Vec::new();
+        let mut points = AnsweredPoints::default();
         let rows = stmt.query_map([identity.value()], |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
@@ -712,18 +786,21 @@ impl Store {
             let (head, tree, range) = row?;
             // The default range saw only what was uncommitted at its head.
             if matches!(range.as_deref(), None | Some("HEAD")) {
+                if let (Some(head), Some(tree)) = (head, tree) {
+                    points.working.push((head, tree));
+                }
                 continue;
             }
             if let Some(tree) = tree {
-                trees.push(tree);
+                points.trees.push(tree);
             }
             if let Some(head) = head
                 && range.as_deref() != Some("--cached")
             {
-                heads.push(head);
+                points.heads.push(head);
             }
         }
-        Ok((heads, trees))
+        Ok(points)
     }
 
     /// The prompt this audit sent. Spec section 9.2, **The gate points, it
@@ -1762,11 +1839,15 @@ mod tests {
         answered("--cached", "h-cached", "t-cached");
         answered("base", "h-range", "t-range");
 
-        let (heads, trees) = store.answered_points(&identity).unwrap();
-        assert_eq!(heads, ["h-range"]);
-        let mut trees = trees;
+        let points = store.answered_points(&identity).unwrap();
+        assert_eq!(points.heads, ["h-range"]);
+        let mut trees = points.trees;
         trees.sort();
         assert_eq!(trees, ["t-cached", "t-range"]);
+        assert_eq!(
+            points.working,
+            [("h-default".to_string(), "t-default".to_string())]
+        );
     }
 
     /// Both halves of the coverage condition, at the store, now keyed per
