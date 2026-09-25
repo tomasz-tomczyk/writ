@@ -332,10 +332,27 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     } else {
         args.diff.clone()
     };
-    let (text, range) = if cached {
-        git::diff_cached(&repo.root)?
+    // A working-tree audit reads a snapshot, so a new file the agent never
+    // staged is part of the change, and the tree it reviewed is recorded.
+    // A two-point range already names its post-image. Spec section 9.2,
+    // **An audit records what it reviewed**.
+    let (text, range, tree) = if cached {
+        let (text, range) = git::diff_cached(&repo.root)?;
+        (text, range, git::index_tree(&repo.root))
     } else {
-        git::diff(&repo.root, range.as_deref())?
+        let base = range
+            .clone()
+            .unwrap_or_else(|| git::default_base(&repo.root));
+        match (base.contains(".."), git::snapshot(&repo.root)) {
+            (false, Some(tree)) => {
+                let text = git::diff_to_tree(&repo.root, &base, &tree)?;
+                (text, base, Some(tree))
+            }
+            _ => {
+                let (text, range) = git::diff(&repo.root, range.as_deref())?;
+                (text, range, None)
+            }
+        }
     };
     let diff = Diff::parse(&text);
     if diff.is_empty() {
@@ -357,11 +374,7 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
         diff_range: range,
         diff_digest: diff_digest(&text),
         head: git::head(&repo.root),
-        tree: if cached {
-            git::index_tree(&repo.root)
-        } else {
-            None
-        },
+        tree,
         since: None,
     };
     let budget = Budget {
@@ -529,38 +542,70 @@ fn since_answer(store: &Store, repo: &git::Repo) -> Result<Option<String>> {
     Ok(base.filter(|base| history.first().map(|(head, _)| head) != Some(base)))
 }
 
-/// The last answered audit of this range, and the paths of this diff that
-/// changed after it.
+/// How many answered audits `since` looks through for the last answer.
+const SINCE_LOOKBACK: usize = 50;
+
+/// What changed since the last answer. Spec section 9.2, **Changed since
+/// your last answer**.
 ///
-/// Nothing when there is no such audit, or when git can no longer compare
-/// against its commit. P6: the prompt is whole without the section.
+/// The last answer is the newest answered audit that reviewed the same
+/// line of work from no later a start:
+///
+/// - its head is HEAD or in HEAD's history, so it is not a sibling
+///   branch's audit, whose tree would differ everywhere;
+/// - its start is this audit's start or before it. A subagent's audit
+///   started at its own head; taking it as the answer for a range that
+///   starts further back would call the commits in between reviewed.
+///
+/// Both trees are what was reviewed, so the paths between them are exact.
+/// Nothing when there is no such audit or git cannot read its tree. P6.
 fn since(store: &Store, scope: &AuditScope, root: &Path) -> Result<Option<Since>> {
-    // A staged diff is compared with the index, not the working tree, so
-    // "what changed since that commit" would describe the wrong thing.
-    if scope.diff_range == git::CACHED {
+    let (Some(to), Some(head)) = (&scope.tree, &scope.head) else {
         return Ok(None);
+    };
+    let Some(start) = audit_start(root, &scope.diff_range, head) else {
+        return Ok(None);
+    };
+    for answered in store.answered_audits(&scope.identity, SINCE_LOOKBACK)? {
+        let Some(then) = &answered.head else {
+            continue;
+        };
+        let Some(then_start) = audit_start(root, &answered.diff_range, then) else {
+            continue;
+        };
+        if !git::is_ancestor(root, then, head) || !git::is_ancestor(root, &then_start, &start) {
+            continue;
+        }
+        let Some(changed) = git::changed_between(root, &answered.tree, to) else {
+            return Ok(None);
+        };
+        let paths = scope
+            .diff
+            .paths
+            .iter()
+            .filter(|path| changed.contains(path))
+            .cloned()
+            .collect();
+        return Ok(Some(Since {
+            learnings: store.audit_learnings(&answered.id)?,
+            audit_id: answered.id,
+            from: answered.tree,
+            to: to.clone(),
+            paths,
+        }));
     }
-    let Some((audit_id, head, learnings)) =
-        store.last_answer(&scope.identity, &scope.diff_range)?
-    else {
-        return Ok(None);
-    };
-    let Some(changed) = git::changed_since(root, &head) else {
-        return Ok(None);
-    };
-    let paths = scope
-        .diff
-        .paths
-        .iter()
-        .filter(|path| changed.contains(path))
-        .cloned()
-        .collect();
-    Ok(Some(Since {
-        audit_id,
-        head,
-        paths,
-        learnings,
-    }))
+    Ok(None)
+}
+
+/// The commit an audit's diff starts from: HEAD for a staged or default
+/// audit, the commit its range names otherwise. Nothing for a two-point
+/// range or a start git cannot resolve, such as the empty tree.
+fn audit_start(root: &Path, range: &str, head: &str) -> Option<String> {
+    match range {
+        "HEAD" | git::CACHED => Some(head.to_string()),
+        range if range.contains("..") => None,
+        range => git::resolve(root, range),
+    }
 }
 
 /// Steps 5 and 6: write the findings, then gate on them.

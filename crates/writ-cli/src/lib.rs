@@ -63,7 +63,8 @@ pub enum Command {
     Ui(ui::Args),
     /// Run the MCP server on stdio
     Mcp(mcp::Args),
-    /// Write the MCP registration and the gate hook into a host's config
+    /// Set writ up for your coding agents and git. With no target it asks
+    /// what to set up, shows each change, and asks before writing it
     Install(install::Args),
     /// Inspect or control opt-in local-only aggregate telemetry
     Telemetry(telemetry::Args),

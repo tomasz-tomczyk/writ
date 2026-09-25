@@ -137,29 +137,6 @@ pub fn head(root: &Path) -> Option<String> {
     run(root, &["rev-parse", "--verify", "HEAD"])
 }
 
-/// The paths that differ between `commit` and the working tree.
-///
-/// Nothing when git cannot answer — the commit was garbage-collected or
-/// the history rewritten — so the caller leaves the section out rather
-/// than guess. P6. An empty list is an answer: nothing changed.
-pub fn changed_since(root: &Path, commit: &str) -> Option<Vec<String>> {
-    let output = Command::new("git")
-        .args(["diff", "--name-only", commit])
-        .current_dir(root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    Some(
-        text.lines()
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect(),
-    )
-}
-
 /// What a staged audit records as its range, and what its slice commands
 /// pass to `git diff`, so they print the same diff.
 pub const CACHED: &str = "--cached";
@@ -192,6 +169,120 @@ pub fn diff_cached(root: &Path) -> Result<(String, String)> {
         String::from_utf8_lossy(&output.stdout).into_owned(),
         CACHED.to_string(),
     ))
+}
+
+/// What `git diff` compares with when no range is named: HEAD, or the
+/// empty tree in a repository with no commit yet.
+pub fn default_base(root: &Path) -> String {
+    if run(root, &["rev-parse", "--verify", "HEAD"]).is_some() {
+        "HEAD".to_string()
+    } else {
+        EMPTY_TREE.to_string()
+    }
+}
+
+/// A tree holding the working tree as it is now: tracked changes, deleted
+/// files, and new files git does not ignore. Spec section 9.2, **An audit
+/// records what it reviewed**.
+///
+/// It is built in a copy of the index, so the real index — what the
+/// developer has staged — is never touched. Copying rather than starting
+/// empty keeps git's record of which files are unchanged, so only the
+/// files that changed are read. The objects it writes are the ones
+/// `git add` would write, and nothing refers to them but the audit.
+///
+/// Nothing when any step fails, and the caller reads the diff without it.
+/// P6.
+pub fn snapshot(root: &Path) -> Option<String> {
+    let index = std::env::var_os("GIT_INDEX_FILE")
+        .map(PathBuf::from)
+        .or_else(|| run(root, &["rev-parse", "--git-path", "index"]).map(|path| root.join(path)))?;
+    let scratch = root.join(run(
+        root,
+        &[
+            "rev-parse",
+            "--git-path",
+            &format!("writ-snapshot-{}.index", std::process::id()),
+        ],
+    )?);
+    // A repository with no commit and nothing staged has no index yet.
+    if index.is_file() {
+        std::fs::copy(&index, &scratch).ok()?;
+    }
+    let in_scratch = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_INDEX_FILE", &scratch)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+    };
+    let tree = in_scratch(&["add", "-A"])
+        .and_then(|_| in_scratch(&["write-tree"]))
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|text| text.trim().to_string())
+        .filter(|tree| !tree.is_empty());
+    let _ = std::fs::remove_file(&scratch);
+    tree
+}
+
+/// The diff from `base` to a tree: what a working-tree audit reads once it
+/// has a snapshot. For tracked files it is the same text `git diff BASE`
+/// prints; it also carries the new files.
+pub fn diff_to_tree(root: &Path, base: &str, tree: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(["diff", base, tree])
+        .current_dir(root)
+        .output()
+        .map_err(|error| Error::Command {
+            program: "git".into(),
+            message: error.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(Error::Validation {
+            message: format!(
+                "git diff {base} {tree} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The paths that differ between two trees. Nothing when git cannot read
+/// one of them — a tree collected as garbage, say. P6.
+pub fn changed_between(root: &Path, from: &str, to: &str) -> Option<Vec<String>> {
+    let output = Command::new("git")
+        .args(["diff", "--name-only", from, to])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Whether `ancestor` is `descendant` or in its history.
+pub fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(root)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// The commit a revision names.
+pub fn resolve(root: &Path, revision: &str) -> Option<String> {
+    run(
+        root,
+        &["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
+    )
 }
 
 /// The tree the index holds: what a commit made now would record.

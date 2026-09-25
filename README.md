@@ -155,7 +155,10 @@ The turn's gate runs `writ audit --since-answer`: it audits from the
 newest commit on the branch that an answered audit already reviewed, or
 from where the branch left the remote's default branch when nothing was
 answered yet. A commit the commit gate answered counts, so the turn's
-gate sees only what is left. Left at the `--diff` default — the working
+gate sees only what is left. It reads a snapshot of the working tree,
+so a new file the agent never staged is audited too, and your index is
+left as it was. When a gate fires after an answered audit, the prompt
+names exactly what changed since that answer. Left at the `--diff` default — the working
 tree against HEAD — it would see an empty diff and pass for any agent
 that commits as it goes. The subagent gate keeps that default on
 purpose: a subagent has not committed, so the working tree is exactly

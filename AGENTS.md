@@ -154,6 +154,26 @@ work too. The commit gate audits each commit as it is made.
   it lets through has that tree, which is how Stop knows the commit was
   reviewed.
 
+## An audit records what it reviewed
+
+A working-tree audit reads a **snapshot**: `git add -A` into a copy of
+the index, then `git write-tree`. The real index is never touched. The
+diff is `git diff BASE TREE`, which for tracked files is the same text as
+`git diff BASE` and also carries new files git does not ignore — before
+this, a file the agent created and never staged was invisible to Stop.
+The tree goes on the `audits` row, and the prompt's commands name it, so
+they print exactly what was audited. A staged audit's tree is the index.
+
+Because both gates now record the tree they reviewed, **"Changed since
+your last answer" works at every gate**, and exactly: it diffs the last
+answer's tree against this one. The last answer is the newest answered
+audit whose head is in HEAD's history and whose start is at or before
+this audit's start. The second condition keeps a subagent's audit, which
+started at its own head, from vouching for commits before it.
+
+One answer counts at both gates: `git diff --cached` after `git add -A`
+is byte for byte `git diff HEAD TREE`, so the slice digests match.
+
 ## The Stop gate starts at the last answer
 
 `--since-answer` walks HEAD's first-parent history for the newest commit
@@ -164,7 +184,7 @@ with no branch point to the working tree against HEAD.
 | Answered audit | Counts for |
 | --- | --- |
 | staged (`--cached`) | the commit whose tree it recorded |
-| over a range | the head it ran at |
+| over a range | the head it ran at, and a commit with its snapshot tree |
 | working tree against HEAD | **nothing** |
 
 The last row is deliberate. A subagent's audit saw only uncommitted

@@ -6,7 +6,7 @@ audit-id: <AUDIT>
 repo: github.com/owner/repo
 diff-range: HEAD
 
-The diff is not pasted here. Read it with `git diff HEAD`. Each learning below names its slice: the part of the diff it applies to.
+The diff is not pasted here. Read it with `git diff HEAD <TREE>`. Each learning below names its slice: the part of the diff it applies to.
 
 ## Learnings
 
@@ -20,7 +20,7 @@ good:
 ```rust
 let y = 2;
 ```
-slice: `git diff HEAD`
+slice: `git diff HEAD <TREE>`
 
 ## Report back
 
