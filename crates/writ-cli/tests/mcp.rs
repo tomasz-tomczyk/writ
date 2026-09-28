@@ -439,6 +439,7 @@ fn an_agent_can_attach_an_exemplar_pair_through_mcp() {
             "rule": "use sd, not sed",
             "rationale": "sed -i takes an argument on BSD and not on GNU",
             "example_text": ["bad:sed -i '' s/a/b/ f", "good:sd a b f"],
+            "scope": ["global"],
             "activate": true,
         }),
     );
@@ -506,7 +507,7 @@ fn a_record_result_is_an_object_the_host_accepts() {
     let mut server = home.server();
     let raw = server.call_raw(
         "writ_record",
-        &json!({ "title": "t", "rule": "r", "rationale": "w", "activate": true }),
+        &json!({ "title": "t", "rule": "r", "rationale": "w", "scope": ["global"], "activate": true }),
     );
     server.close();
 
@@ -656,7 +657,12 @@ impl Sandbox {
     }
 
     fn record_json<S: AsRef<str>>(&self, args: &[S]) -> Value {
-        self.run_json(self.dir.path(), "record", args)
+        let mut all: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
+        // A scope is required. Most tests are about something else.
+        if !all.contains(&"--scope") {
+            all.extend(["--scope", "global"]);
+        }
+        self.run_json(self.dir.path(), "record", &all)
     }
 
     fn edit_json<S: AsRef<str>>(&self, args: &[S]) -> Value {

@@ -13,10 +13,26 @@ Record a learning when the user corrects an approach, states a
 convention, or rejects a pattern. Do not record a one-off instruction
 about the current task. A learning must be true again next week.
 
+## Is it worth recording
+
+An audit checks a learning against a code diff, and against nothing
+else. Record a learning only when all three hold:
+
+- **It will come up again.** Not a one-off instruction about this task.
+- **A reviewer can check it in a diff.** It is about code, config, or
+  files in the repository.
+- **It is specific.** A reviewer can say "this line breaks it" without
+  guessing.
+
+Do not record a rule about PR descriptions, commit messages, how to
+talk to the user, or how to run a tool. The diff does not carry them,
+so the audit selects the rule on every change and can never check it.
+Tell the user it belongs in `CLAUDE.md` or `AGENTS.md` instead.
+
 ## Write it
 
 ```
-writ record --title TITLE --rule RULE --rationale WHY --activate
+writ record --title TITLE --rule RULE --rationale WHY --scope KIND:VALUE --activate
 ```
 
 | Flag | What goes in it |
@@ -24,7 +40,7 @@ writ record --title TITLE --rule RULE --rationale WHY --activate
 | `--title` | A short name. A reviewer reads this first |
 | `--rule` | What to do, as an instruction |
 | `--rationale` | Why. Required, and never empty |
-| `--scope` | Where it applies. Repeat it for more than one |
+| `--scope` | Where it applies. Required. Repeat it for more than one |
 | `--advisory` | Report it, but never block the handoff |
 | `--example-text` | A snippet, as `good:TEXT` or `bad:TEXT`. Repeat it |
 | `--matcher` | A structural retrieval pattern. Default on for code-shape rules |
@@ -39,16 +55,25 @@ for review.
 
 ## Scope it
 
-`--scope` takes `KIND:VALUE`, and `global` on its own.
+`--scope` is required. It takes `KIND:VALUE`, or `global` on its own.
 
-- `global` — every repository.
-- `project:ID` — this repository, by its normalized remote.
-- `language:rust` — every file of that language.
 - `glob:crates/*/src/**` — the paths that match.
+- `language:rust` — every file of that language.
+- `project:ID` — this repository, by its normalized remote in lower
+  case, such as `github.com/owner/repo`.
+- `global` — every diff in every repository.
 
-No `--scope` means the learning is global. Prefer the narrowest scope
-that is true: a rule about this repository's test layout is not a rule
-about Rust.
+Use the narrowest scope that is true. Start from the files the
+correction was about and widen only as far as the rule still holds. A
+rule about this repository's test layout is not a rule about Rust.
+Kinds combine with AND, so `project:ID` plus `language:elixir` means
+Elixir files in that repository only.
+
+**Avoid `global`.** A global rule is put in front of a reviewer on
+every change in every repository, and a blocking one can refuse every
+commit. Use it only for a rule that is true for any code anywhere and
+costly to break, such as never committing a secret. Ask the user before
+you record one.
 
 ## Say why, properly
 
@@ -69,6 +94,7 @@ line as it should be.
 
 ```
 writ record --title T --rule R --rationale WHY --activate \
+  --scope language:bash \
   --example-text "bad:sed -i '' s/a/b/ f" \
   --example-text "good:sd a b f"
 ```

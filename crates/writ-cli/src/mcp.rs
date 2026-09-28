@@ -151,7 +151,9 @@ const RECORD_ARGS: &[ToolArg] = &[
         name: "scope",
         flag: "scope",
         kind: Kind::TextList,
-        about: "Where it applies: global, project:ID, language:LANG or glob:PAT",
+        about: "Where it applies: project:ID, language:LANG, glob:PAT, or global. \
+                Required. Use the narrowest that is true: global puts the rule in front \
+                of every change in every repository",
     },
     ToolArg {
         name: "advisory",

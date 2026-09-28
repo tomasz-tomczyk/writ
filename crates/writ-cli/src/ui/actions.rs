@@ -349,7 +349,7 @@ mod tests {
 
     use writ_core::{
         AuditScope, Config, Diff, FindingsInput, IncomingFinding, NewLearning, Outcome,
-        RepoIdentity, Selected, Store, TelemetryStore,
+        RepoIdentity, Scope, Selected, Store, TelemetryStore,
     };
 
     use super::*;
@@ -372,6 +372,7 @@ mod tests {
 
     fn active(store: &mut Store, title: &str) -> String {
         let mut learning = NewLearning::new(title, "rule", "rationale");
+        learning.scopes = vec![Scope::global()];
         learning.status = Some(Status::Active);
         store.record(&learning).unwrap().id
     }

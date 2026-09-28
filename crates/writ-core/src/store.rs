@@ -1238,7 +1238,7 @@ fn insert_learning(tx: &Transaction<'_>, learning: &NewLearning) -> Result<Recor
         ],
     )?;
 
-    for scope in learning.effective_scopes() {
+    for scope in &learning.scopes {
         tx.execute(
             "INSERT INTO learning_scopes (learning_id, kind, value, updated_at)
              VALUES (?1, ?2, ?3, COALESCE(?4, datetime('now')))",

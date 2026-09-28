@@ -48,7 +48,7 @@ mod tests {
     use super::*;
     use crate::model::{ExemplarKind, Sides, Status};
 
-    const ONE: &str = r#"{"title":"t","rule":"r","rationale":"why"}"#;
+    const ONE: &str = r#"{"title":"t","rule":"r","rationale":"why","scopes":["global"]}"#;
 
     #[test]
     fn a_minimal_line_parses() {

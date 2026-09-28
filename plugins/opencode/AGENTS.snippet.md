@@ -18,8 +18,18 @@ language, and use `regex` only as an escape hatch. Pass `sides` as
 fire on one half of the diff. Say the id back to
 the user afterwards.
 
+`scope` is required. Use the narrowest one that is true: `glob:PAT`
+for the paths the correction was about, `language:LANG`, or
+`project:ID` with the repository's remote in lower case, such as
+`github.com/owner/repo`. Avoid `global`: it puts the rule in front of
+every change in every repository, and a blocking one can refuse every
+commit. Use it only for a rule that holds for any code and is costly to
+break, and ask the user first.
+
 Do not record an instruction about only the task in hand. A learning
-must still be true next week. When the user says the lesson is already
+must still be true next week. The audit sees only the code diff, so do
+not record a rule about PR descriptions, commit messages, or how to
+work with the user: suggest `CLAUDE.md` or `AGENTS.md` for those. When the user says the lesson is already
 recorded, reinforce the id they name instead of writing a second row
 that says the same thing.
 

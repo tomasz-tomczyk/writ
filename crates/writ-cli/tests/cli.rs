@@ -142,6 +142,10 @@ impl Sandbox {
             "sed is terse",
         ];
         all.extend_from_slice(args);
+        // A scope is required. Most tests are about something else.
+        if !args.contains(&"--scope") {
+            all.extend(["--scope", "global"]);
+        }
         let output = self.run(&all);
         output.assert_code(0);
         output.stdout.split_whitespace().last().unwrap().to_string()
@@ -407,7 +411,7 @@ fn enabled_cli_paths_record_all_metrics_the_current_commands_can_observe() {
     sandbox
         .pipe(
             &["record", "--json"],
-            r#"{"title":"json","rule":"r","rationale":"why"}
+            r#"{"title":"json","rule":"r","rationale":"why","scopes":["global"]}
 "#,
         )
         .assert_code(0);
@@ -623,6 +627,8 @@ fn matcher_telemetry_distinguishes_hit_miss_and_unevaluable() {
     for (title, pattern) in [("hit", "changed"), ("miss", "absent"), ("bad", "(")] {
         let output = sandbox.run(&[
             "record",
+            "--scope",
+            "global",
             "--title",
             title,
             "--rule",
@@ -835,7 +841,7 @@ fn recording_writes_a_learning_and_says_what_it_wrote() {
 #[test]
 fn a_record_with_no_rationale_is_refused() {
     let sandbox = Sandbox::new();
-    let output = sandbox.run(&["record", "--title", "t", "--rule", "r"]);
+    let output = sandbox.run(&["record", "--scope", "global", "--title", "t", "--rule", "r"]);
     output.assert_code(2);
     assert!(output.stderr.contains("rationale"), "{}", output.stderr);
     assert!(sandbox.learnings().as_array().unwrap().is_empty());
@@ -846,6 +852,8 @@ fn an_empty_rationale_is_refused() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "t",
         "--rule",
@@ -905,6 +913,8 @@ fn a_write_cannot_ask_for_archived() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "t",
         "--rule",
@@ -924,6 +934,8 @@ fn activate_and_status_together_are_refused() {
     sandbox
         .run(&[
             "record",
+            "--scope",
+            "global",
             "--title",
             "t",
             "--rule",
@@ -937,10 +949,30 @@ fn activate_and_status_together_are_refused() {
         .assert_code(2);
 }
 
+/// Spec section 5: `--scope` has no default. Defaulting to `global` gave
+/// the smallest slip the widest blast radius: one forgotten flag and the
+/// rule blocks every commit in every repository.
 #[test]
-fn no_scope_means_global() {
+fn a_record_with_no_scope_is_refused() {
     let sandbox = Sandbox::new();
-    sandbox.record(&[]);
+    let output = sandbox.run(&[
+        "record",
+        "--title",
+        "t",
+        "--rule",
+        "r",
+        "--rationale",
+        "why",
+    ]);
+    output.assert_code(2);
+    assert!(output.stderr.contains("scope"), "{}", output.stderr);
+    assert!(sandbox.learnings().as_array().unwrap().is_empty());
+}
+
+#[test]
+fn global_is_written_only_when_asked_for() {
+    let sandbox = Sandbox::new();
+    sandbox.record(&["--scope", "global"]);
     assert_eq!(sandbox.learnings()[0]["scopes"][0], "global");
 }
 
@@ -1116,6 +1148,8 @@ fn an_example_text_with_no_kind_is_refused() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "t",
         "--rule",
@@ -1133,6 +1167,8 @@ fn an_empty_example_text_is_refused() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "t",
         "--rule",
@@ -1151,6 +1187,8 @@ fn an_example_with_no_kind_is_refused() {
     let path = sandbox.write_file("snippet.rs", "let x = 1;");
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "t",
         "--rule",
@@ -1168,6 +1206,8 @@ fn an_example_file_that_is_not_there_names_the_path() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "t",
         "--rule",
@@ -1190,6 +1230,8 @@ fn a_matcher_needs_its_kind() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "t",
         "--rule",
@@ -1249,6 +1291,8 @@ fn force_is_gone_and_is_now_a_usage_error() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "t",
         "--rule",
@@ -1268,6 +1312,8 @@ fn no_write_prints_a_near_match_warning() {
     sandbox.record(&[]);
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "prefer sd",
         "--rule",
@@ -1312,7 +1358,7 @@ fn the_author_stays_null_when_neither_answers() {
 
 // --- record --json ----------------------------------------------------
 
-const LINE: &str = r#"{"title":"imported","rule":"r","rationale":"why"}"#;
+const LINE: &str = r#"{"title":"imported","rule":"r","rationale":"why","scopes":["global"]}"#;
 
 #[test]
 fn a_json_stream_writes_every_line() {
@@ -1353,6 +1399,18 @@ fn a_json_line_missing_its_rationale_exits_two() {
     assert!(sandbox.learnings().as_array().unwrap().is_empty());
 }
 
+/// Spec section 7.2: `scopes` is required on the adapter contract too.
+#[test]
+fn a_json_line_missing_its_scopes_exits_two() {
+    let sandbox = Sandbox::new();
+    let bad = r#"{"title":"t","rule":"r","rationale":"why"}"#;
+    let output = sandbox.pipe(&["record", "--json"], &format!("{LINE}\n{bad}\n"));
+    output.assert_code(2);
+    assert!(output.stderr.contains("line 2"), "{}", output.stderr);
+    assert!(output.stderr.contains("scope"), "{}", output.stderr);
+    assert!(sandbox.learnings().as_array().unwrap().is_empty());
+}
+
 #[test]
 fn an_empty_json_stream_says_so() {
     let sandbox = Sandbox::new();
@@ -1365,7 +1423,7 @@ fn an_empty_json_stream_says_so() {
 fn a_json_import_keeps_the_timestamps_it_arrived_with() {
     // The one exception to invariant 7.
     let sandbox = Sandbox::new();
-    let line = r#"{"title":"t","rule":"r","rationale":"why",
+    let line = r#"{"title":"t","rule":"r","rationale":"why","scopes":["global"],
         "created_at":"2000-01-01 00:00:00","updated_at":"2000-01-02 00:00:00"}"#
         .replace('\n', " ");
     sandbox.pipe(&["record", "--json"], &line).assert_code(0);
@@ -1511,7 +1569,7 @@ fn a_rule_written_today_is_not_unused() {
 #[test]
 fn the_health_filters_skip_proposed_learnings_unless_asked() {
     let sandbox = Sandbox::new();
-    let line = r#"{"title":"old proposal","rule":"r","rationale":"why",
+    let line = r#"{"title":"old proposal","rule":"r","rationale":"why","scopes":["global"],
         "created_at":"2000-01-01 00:00:00","updated_at":"2000-01-01 00:00:00"}"#
         .replace('\n', " ");
     sandbox.pipe(&["record", "--json"], &line).assert_code(0);
@@ -1602,6 +1660,8 @@ fn search_treats_fts5_operators_as_text() {
     sandbox
         .run(&[
             "record",
+            "--scope",
+            "global",
             "--title",
             "non empty",
             "--rule",
@@ -1749,6 +1809,8 @@ fn a_malformed_config_file_names_itself() {
     sandbox.write_config("[audit\nmax_rules = 3\n");
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "t",
         "--rule",
@@ -1770,6 +1832,8 @@ fn a_misspelled_config_key_is_refused_rather_than_ignored() {
     sandbox.write_config("[audit]\nmax_rulez = 3\n");
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "t",
         "--rule",
@@ -2925,6 +2989,8 @@ fn an_unknown_sides_value_is_a_usage_error() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "t",
         "--rule",
@@ -4419,6 +4485,8 @@ fn a_gate_opens_a_new_audit_when_the_selection_changed() {
     sandbox
         .run(&[
             "record",
+            "--scope",
+            "global",
             "--title",
             "second rule",
             "--rule",
@@ -5129,6 +5197,8 @@ fn one_uncovered_learning_blocks_and_the_prompt_keeps_them_all() {
     // has never been covered, so the gate returns.
     let global_id = sandbox.run(&[
         "record",
+        "--scope",
+        "global",
         "--title",
         "no dbg",
         "--rule",
