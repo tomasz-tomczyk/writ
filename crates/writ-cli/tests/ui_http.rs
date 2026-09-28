@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use tower::ServiceExt;
 use writ_cli::ui::{AppState, router};
 use writ_core::{
-    Config, ExemplarKind, NewExemplar, NewLearning, Selected, Status, Store, TelemetryStore,
+    Config, ExemplarKind, NewExemplar, NewLearning, Scope, Selected, Status, Store, TelemetryStore,
 };
 
 const TEST_HOST: &str = "writ.local:4173";
@@ -133,6 +133,7 @@ fn config() -> Config {
 
 fn record_proposed(store: &mut Store, title: &str) {
     let mut learning = NewLearning::new(title, "rule", "rationale");
+    learning.scopes = vec![Scope::global()];
     learning.status = Some(Status::Proposed);
     store.record(&learning).unwrap();
 }
@@ -243,6 +244,7 @@ async fn collection_filters_exclude_review_and_cover_ledger_states() {
         store.set_status(&archived, Status::Archived).unwrap();
 
         let mut stale = NewLearning::new("stale rule", "rule", "rationale");
+        stale.scopes = vec![Scope::global()];
         stale.status = Some(Status::Active);
         stale.created_at = Some("2000-01-01 00:00:00".into());
         store.record(&stale).unwrap();
@@ -337,6 +339,7 @@ async fn embedded_assets_are_served() {
 
 fn proposed_with_exemplars(store: &mut Store, title: &str, snippet: &str) -> String {
     let mut learning = NewLearning::new(title, "rule", "rationale");
+    learning.scopes = vec![Scope::global()];
     learning.status = Some(Status::Proposed);
     learning.exemplars = vec![NewExemplar {
         kind: ExemplarKind::Good,
@@ -349,6 +352,7 @@ fn proposed_with_exemplars(store: &mut Store, title: &str, snippet: &str) -> Str
 
 fn active_learning(store: &mut Store, title: &str) -> String {
     let mut learning = NewLearning::new(title, "rule", "rationale");
+    learning.scopes = vec![Scope::global()];
     learning.status = Some(Status::Active);
     store.record(&learning).unwrap().id
 }
@@ -425,6 +429,7 @@ async fn main_htmx_inbox_and_health_contracts_are_preserved() {
         let approve_id = proposed_with_exemplars(&mut store, "approve over htmx", "s");
         proposed_with_exemplars(&mut store, "stay behind", "s2");
         let mut old = NewLearning::new("archive over htmx", "rule", "rationale");
+        old.scopes = vec![Scope::global()];
         old.status = Some(Status::Active);
         old.created_at = Some("2000-01-01 00:00:00".into());
         let archive_id = store.record(&old).unwrap().id;
@@ -1140,6 +1145,7 @@ async fn collection_empty_project_filter_keeps_clear_controls() {
 
 fn active_with_exemplar(store: &mut Store, title: &str) -> String {
     let mut learning = NewLearning::new(title, "rule", "rationale");
+    learning.scopes = vec![Scope::global()];
     learning.status = Some(Status::Active);
     learning.exemplars = vec![NewExemplar {
         kind: ExemplarKind::Good,
@@ -1626,6 +1632,7 @@ async fn health_lists_unused_rules() {
     {
         let mut store = Store::open(&db).unwrap();
         let mut learning = NewLearning::new("old and unused", "rule", "rationale");
+        learning.scopes = vec![Scope::global()];
         learning.status = Some(Status::Active);
         learning.created_at = Some("2000-01-01 00:00:00".into());
         store.record(&learning).unwrap();
@@ -1714,6 +1721,7 @@ async fn inbox_opens_learning_detail_from_proposal() {
     let id = {
         let mut store = Store::open(&db).unwrap();
         let mut learning = NewLearning::new("open me", "rule only", "why only");
+        learning.scopes = vec![Scope::global()];
         learning.status = Some(Status::Proposed);
         store.record(&learning).unwrap().id
     };
@@ -1829,6 +1837,7 @@ async fn health_archive_removes_from_health() {
     let id = {
         let mut store = Store::open(&db).unwrap();
         let mut learning = NewLearning::new("archive me", "rule", "rationale");
+        learning.scopes = vec![Scope::global()];
         learning.status = Some(Status::Active);
         learning.created_at = Some("2000-01-01 00:00:00".into());
         store.record(&learning).unwrap().id

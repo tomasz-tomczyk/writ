@@ -42,7 +42,8 @@ pub struct Args {
     )]
     rationale: Option<String>,
 
-    /// Where it applies: global, project:ID, language:LANG or glob:PAT
+    /// Where it applies: project:ID, language:LANG, glob:PAT, or global.
+    /// Required. Use the narrowest that is true
     #[arg(
         long = "scope",
         value_name = "KIND:VALUE",
@@ -203,12 +204,6 @@ fn observe_learning(batch: &mut TelemetryBatch, learning: &NewLearning) {
     batch
         .counters
         .push(CounterMetric::MatcherKind(learning.matcher_kind));
-    if learning.scopes.is_empty() {
-        batch
-            .counters
-            .push(CounterMetric::ScopeKind(ScopeKind::Global));
-        return;
-    }
     for scope in &learning.scopes {
         batch.counters.push(CounterMetric::ScopeKind(scope.kind));
         if scope.kind == ScopeKind::Language {

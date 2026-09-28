@@ -570,19 +570,6 @@ impl NewLearning {
         self.status.unwrap_or(Status::Proposed)
     }
 
-    /// The scopes this write stores. An empty list becomes `global`.
-    ///
-    /// A learning with no scope row would never be selected by an audit and
-    /// would never say so. That is the invisible failure P7 exists to
-    /// prevent, so the write refuses to produce one.
-    pub fn effective_scopes(&self) -> Vec<Scope> {
-        if self.scopes.is_empty() {
-            vec![Scope::global()]
-        } else {
-            self.scopes.clone()
-        }
-    }
-
     /// Refuse anything the schema or the CLI reference does not allow.
     pub fn validate(&self) -> Result<()> {
         for (field, value) in [
@@ -610,7 +597,16 @@ impl NewLearning {
             }
             _ => {}
         }
-        let mut scopes = self.effective_scopes();
+        // A learning with no scope row would never be selected and would
+        // never say so. Defaulting to `global` instead gives the smallest
+        // slip the widest blast radius, so the write refuses both.
+        if self.scopes.is_empty() {
+            return Err(Error::validation(
+                "a scope is required. Use the narrowest that is true: \
+                 project:ID, language:LANG, glob:PAT, or global",
+            ));
+        }
+        let mut scopes = self.scopes.clone();
         scopes.sort();
         let before = scopes.len();
         scopes.dedup();
@@ -812,14 +808,16 @@ mod tests {
     }
 
     #[test]
-    fn no_scope_means_global() {
+    fn a_write_with_no_scope_is_refused() {
         let learning = NewLearning::new("t", "r", "why");
-        assert_eq!(learning.effective_scopes(), vec![Scope::global()]);
+        let error = learning.validate().unwrap_err();
+        assert!(error.to_string().contains("scope"), "{error}");
     }
 
     #[test]
     fn an_empty_rationale_is_refused() {
         let mut learning = NewLearning::new("t", "r", "   ");
+        learning.scopes = vec![Scope::global()];
         let error = learning.validate().unwrap_err();
         assert!(error.to_string().contains("rationale"), "{error}");
         learning.rationale = "because".into();
@@ -829,6 +827,7 @@ mod tests {
     #[test]
     fn a_matcher_and_its_kind_travel_together() {
         let mut learning = NewLearning::new("t", "r", "why");
+        learning.scopes = vec![Scope::global()];
         learning.matcher = Some("$A == $A".into());
         assert!(learning.validate().is_err());
         learning.matcher_kind = Some(MatcherKind::AstGrep);
