@@ -15,6 +15,14 @@ down, and a gate that makes reading them back not optional.
 - **A `SubagentStop` hook** audits the working tree alone. A subagent has
   not committed, so that is exactly its own work; the branch point would
   hand a read-only subagent every violation its parent had committed.
+- **A `UserPromptSubmit` hook and a `PreToolUse` hook** run
+  `writ turn --hook claude-code`. They record the tree each repository
+  held when the turn first reached it: the one the session is in when
+  you send a prompt, and any other one before an edit or shell command
+  runs there. Both gates pass a repository whose tree the turn did not
+  change, so a session that only ran `cd` into a dirty worktree is not
+  sent to review someone else's work. They never block. Any failure
+  exits 1, which Claude Code shows and carries on past.
 
 Any learning that applies, blocking or advisory, sends the agent back
 with it before the turn hands over.
@@ -71,12 +79,13 @@ rule scoped to `.github/workflows/**`, while editing a workflow does.
 
 ## Do not also run `writ install claude-code`
 
-This plugin already registers both gates. Installing them into
+This plugin already registers both gates and the turn hooks. Installing them into
 `~/.claude/settings.json` as well runs two identical gates per turn:
 the pointer lands in your transcript twice and every rule is counted
 twice for one audit. `writ install` detects the enabled plugin and
 declines, but an install that predates that check leaves entries behind
-— delete the `writ audit` hooks from `settings.json` if you have both.
+— delete the `writ audit` and `writ turn` hooks from `settings.json` if
+you have both.
 
 ## What each host can enforce
 

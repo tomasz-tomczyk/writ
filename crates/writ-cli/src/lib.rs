@@ -19,6 +19,7 @@ pub mod mcp;
 pub mod output;
 pub mod record;
 pub mod telemetry;
+pub mod turn;
 pub mod ui;
 
 use std::path::{Path, PathBuf};
@@ -68,6 +69,9 @@ pub enum Command {
     Install(install::Args),
     /// Inspect or control opt-in local-only aggregate telemetry
     Telemetry(telemetry::Args),
+    /// Record where an agent's turn found each repository, so the gate
+    /// audits only what the turn changed. A host hook runs it
+    Turn(turn::Args),
 }
 
 impl Command {
@@ -87,6 +91,9 @@ impl Command {
             // Administration does not observe itself: dump/show must be a
             // stable disclosure, and purge must not recreate what it removed.
             Self::Telemetry(_) => return None,
+            // Plumbing a host runs on every prompt and tool call. Counting
+            // it would drown the commands a person runs.
+            Self::Turn(_) => return None,
         })
     }
 }
@@ -168,6 +175,7 @@ pub fn dispatch(cli: Cli) -> ExitCode {
         Command::Telemetry(args) => {
             telemetry::run(&args, &paths, &config).map(|code| (code, TelemetryBatch::default()))
         }
+        Command::Turn(args) => turn::run(&args, &paths.db),
     };
 
     match result {

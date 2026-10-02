@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{Connection, Row, Transaction, functions::FunctionFlags, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, functions::FunctionFlags, params};
 
 use crate::audit::{
     AuditScope, Budget, Candidate, FindingsInput, Ingested, Outcome, Outcomes, Selected,
@@ -62,6 +62,23 @@ pub struct AnsweredPoints {
     /// head is itself covered.
     pub working: Vec<(String, String)>,
 }
+
+/// Where a session's current turn found one repository. Spec section 9.2,
+/// **The Stop gate audits only what the turn changed**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnStart {
+    /// No turn is recorded for the session. The host does not record
+    /// turns, so the gate cannot tell what the turn changed.
+    Unknown,
+    /// The turn is recorded and never reached this repository.
+    Untouched,
+    /// The tree the repository held when the turn reached it, or `None`
+    /// when git could not snapshot it then.
+    At(Option<String>),
+}
+
+/// How long a session's turn rows are kept after its last prompt.
+const TURN_RETENTION: &str = "-7 days";
 
 /// An answered audit and the tree it reviewed. Spec section 9.2, **An
 /// audit records what it reviewed**.
@@ -767,11 +784,73 @@ impl Store {
     ///   caller counts a commit of that tree on that head only when the
     ///   head is covered some other way.
     ///
-    /// Answered means ingested against, as for coverage.
+    /// Start a session's turn. Spec section 9.2, **The Stop gate audits
+    /// only what the turn changed**.
+    ///
+    /// The session's earlier turn is replaced, so work from it is not this
+    /// turn's change. `start` is the repository the turn began in and the
+    /// tree it held, when the turn began in one. Sessions with no prompt
+    /// in a week are pruned here, which is the only write that sees them.
+    pub fn start_turn(&mut self, session: &str, start: Option<(&str, Option<&str>)>) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM turns WHERE session_id = ?1 OR started_at < datetime('now', ?2)",
+            params![session, TURN_RETENTION],
+        )?;
+        tx.execute("INSERT INTO turns (session_id) VALUES (?1)", [session])?;
+        if let Some((root, tree)) = start {
+            tx.execute(
+                "INSERT INTO turn_trees (session_id, root, tree) VALUES (?1, ?2, ?3)",
+                params![session, root, tree],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Where the session's current turn found the repository at `root`.
+    pub fn turn_start(&self, session: &str, root: &str) -> Result<TurnStart> {
+        let started: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM turns WHERE session_id = ?1)",
+            [session],
+            |row| row.get(0),
+        )?;
+        if !started {
+            return Ok(TurnStart::Unknown);
+        }
+        let tree = self
+            .conn
+            .query_row(
+                "SELECT tree FROM turn_trees WHERE session_id = ?1 AND root = ?2",
+                [session, root],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(tree.map_or(TurnStart::Untouched, TurnStart::At))
+    }
+
+    /// Record where the turn found a repository it reached after it began.
+    ///
+    /// Only the first call for a repository writes: the start is where the
+    /// turn found it, not where the last tool call left it. A session with
+    /// no recorded turn gets nothing, so the turn check stays off for it.
+    pub fn reach_in_turn(&self, session: &str, root: &str, tree: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO turn_trees (session_id, root, tree)
+             SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM turns WHERE session_id = ?1)",
+            params![session, root, tree],
+        )?;
+        Ok(())
+    }
+
+    /// Answered means ingested against, as for coverage, or sent nothing.
+    /// An audit that put no rule in front of anyone had nothing to answer,
+    /// and without it Stop audited from the branch point every commit the
+    /// commit gate had passed that way.
     pub fn answered_points(&self, identity: &RepoIdentity) -> Result<AnsweredPoints> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT head, tree, diff_range FROM audits
-              WHERE repo IS ?1 AND ingested_at IS NOT NULL
+              WHERE repo IS ?1 AND (ingested_at IS NOT NULL OR sent = 0)
                 AND (head IS NOT NULL OR tree IS NOT NULL)",
         )?;
         let mut points = AnsweredPoints::default();

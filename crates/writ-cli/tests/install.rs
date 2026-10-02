@@ -162,9 +162,21 @@ fn a_settings_file_full_of_other_hooks_keeps_all_of_them() {
     assert_eq!(after["model"], json!("opus"));
     assert_eq!(after["permissions"], original["permissions"]);
     for event in events {
-        // SubagentStop is a gate now, so it is expected to change. Every
-        // other event in the file has to come back byte for byte.
-        if event == "SubagentStop" {
+        // writ hooks these, so they are expected to change, and each keeps
+        // the other tool's entry first. Every other event in the file has
+        // to come back byte for byte.
+        if matches!(event, "SubagentStop" | "UserPromptSubmit" | "PreToolUse") {
+            let entries = after["hooks"][event].as_array().expect("array");
+            assert_eq!(
+                entries.len(),
+                2,
+                "the other tool's {event} entry was replaced"
+            );
+            assert_eq!(
+                entries[0]["hooks"][0]["command"],
+                json!(format!("{event}.sh")),
+                "the other tool's {event} entry must come first and survive"
+            );
             continue;
         }
         assert_eq!(
@@ -406,7 +418,27 @@ fn gate_commands(settings: &Path, event: &str) -> Vec<String> {
             None => vec![entry.clone()],
         })
         .filter_map(|hook| hook["command"].as_str().map(str::to_string))
-        .filter(|command| command.contains("writ audit"))
+        .filter(|command| command.contains("writ audit") || command.contains("writ turn"))
+        .collect()
+}
+
+/// The tool matcher of each writ group under `event`.
+fn gate_matchers(settings: &Path, event: &str) -> Vec<Option<String>> {
+    read_json(settings)["hooks"][event]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter(|entry| {
+            entry["hooks"].as_array().is_some_and(|handlers| {
+                handlers.iter().any(|hook| {
+                    hook["command"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("writ "))
+                })
+            })
+        })
+        .map(|entry| entry["matcher"].as_str().map(str::to_string))
         .collect()
 }
 
@@ -474,6 +506,49 @@ fn an_existing_turn_gate_still_gains_the_subagent_gate() {
     assert_eq!(gate_commands(&settings, "SubagentStop").len(), 1);
 }
 
+/// An install that predates the turn hooks gains them without `--force`,
+/// and the turn hook on tools carries the matcher that limits it to the
+/// tools that can write.
+#[test]
+fn an_existing_install_gains_the_turn_hooks() {
+    let sandbox = sandbox();
+    let home = sandbox.roots.home.clone().expect("home");
+    let settings = home.join(".claude").join("settings.json");
+    install(&sandbox.roots, Host::ClaudeCode, false, false);
+    let mut document = read_json(&settings);
+    let hooks = document["hooks"].as_object_mut().expect("hooks");
+    hooks.remove("UserPromptSubmit");
+    hooks.remove("PreToolUse");
+    write(&settings, &document.to_string());
+
+    install(&sandbox.roots, Host::ClaudeCode, false, false);
+
+    for event in ["UserPromptSubmit", "PreToolUse"] {
+        assert_eq!(
+            gate_commands(&settings, event),
+            vec!["writ turn --hook claude-code || exit 1".to_string()],
+            "{event}"
+        );
+    }
+    assert_eq!(
+        gate_matchers(&settings, "PreToolUse"),
+        vec![Some("Edit|Write|MultiEdit|NotebookEdit|Bash".to_string())]
+    );
+    assert_eq!(gate_commands(&settings, "Stop").len(), 1);
+}
+
+/// Codex has no turn hook. Its Stop gate audits as it always did.
+#[test]
+fn codex_gets_no_turn_hooks() {
+    let sandbox = sandbox();
+    let home = sandbox.roots.home.clone().expect("home");
+    install(&sandbox.roots, Host::Codex, false, false);
+    let hooks = home.join(".codex").join("hooks.json");
+
+    assert!(gate_commands(&hooks, "UserPromptSubmit").is_empty());
+    assert!(gate_commands(&hooks, "PreToolUse").is_empty());
+}
+
 /// Only Claude Code has a subagent-stop event. Section 9.2.
 #[test]
 fn codex_gets_the_turn_gate_and_no_subagent_gate() {
@@ -527,11 +602,17 @@ fn the_claude_code_plugin_ships_the_same_gate_the_installer_writes() {
     install(&sandbox.roots, Host::ClaudeCode, false, false);
     let settings = home.join(".claude").join("settings.json");
 
-    for event in ["Stop", "SubagentStop"] {
+    for event in ["Stop", "SubagentStop", "UserPromptSubmit", "PreToolUse"] {
+        assert!(!gate_commands(&plugin, event).is_empty(), "{event}");
         assert_eq!(
             gate_commands(&plugin, event),
             gate_commands(&settings, event),
             "the plugin and `writ install` disagree about {event}"
+        );
+        assert_eq!(
+            gate_matchers(&plugin, event),
+            gate_matchers(&settings, event),
+            "the plugin and `writ install` disagree about the {event} matcher"
         );
     }
 }
