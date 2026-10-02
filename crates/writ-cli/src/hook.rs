@@ -24,6 +24,7 @@ use writ_core::{
 };
 
 use crate::audit::{self, Args, Selection};
+use crate::turn;
 
 /// How many times Cursor may resubmit the turn before the gate gives up.
 ///
@@ -127,14 +128,15 @@ pub fn run(
 ) -> Result<(ExitCode, TelemetryBatch)> {
     // git passes a pre-commit hook no payload, and its stdin is whatever
     // the committer had, so it is never read. P7.
-    let retry = if host == Host::Git {
+    let payload = if host == Host::Git {
         if !under_agent() {
             return Ok((ExitCode::SUCCESS, TelemetryBatch::default()));
         }
-        Retry::default()
+        String::new()
     } else {
-        Retry::parse(&read_payload())
+        read_payload()
     };
+    let retry = Retry::parse(&payload);
 
     // Before the selection, not after it. The cap is about to let this
     // turn stop, so selecting first would render the whole prompt, open
@@ -154,6 +156,18 @@ pub fn run(
         return Ok((
             ExitCode::SUCCESS,
             gate_telemetry(host, GateResultMetric::RetryCapped),
+        ));
+    }
+
+    // A repository this turn did not change has nothing of the turn's to
+    // audit, whatever another session left in it. Before the selection,
+    // for the reason the cap is. Spec section 9.2, **The Stop gate audits
+    // only what the turn changed**.
+    if let Some(reason) = turn::unchanged(&payload, db)? {
+        eprintln!("writ: {reason}. Nothing to audit, so the gate passes.");
+        return Ok((
+            ExitCode::SUCCESS,
+            gate_telemetry(host, GateResultMetric::Pass),
         ));
     }
 
@@ -269,7 +283,7 @@ fn write_json(body: &serde_json::Value) {
 /// stdin is not an error here — the spec says a hook legitimately runs
 /// with no payload on some hosts — so the deadline yields "no retry
 /// signal" and the gate carries on.
-fn read_payload() -> String {
+pub(crate) fn read_payload() -> String {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
         return String::new();

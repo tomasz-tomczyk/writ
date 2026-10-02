@@ -163,7 +163,7 @@ two hooks that each start an audit. Spec section 9.2, **Two gates**.
 | --- | --- | --- |
 | fires | during the turn, at each `git commit` | at the end of every turn |
 | audits | that one commit | from the last answered commit to the working tree |
-| uncommitted work | no | yes |
+| uncommitted work | no | yes, in a repository the turn changed |
 | a commit by Codex or a human, one made with `--no-verify`, or any on git < 2.54 | no | yes |
 
 When the agent commits, the commit gate fires first and Stop last. Stop
@@ -227,6 +227,33 @@ A stacked branch needs no configuration: its parent's answered commits
 are in its history, so it starts after them. Everything before the
 answer point is taken as reviewed, so a commit made with `--no-verify`
 before an answered audit is not audited again.
+
+**An audit that sent nothing counts as answered here**, and only here.
+It had nothing to answer. Without this, two commits the commit gate
+passed with no rule selected sent the next Stop back to the branch
+point. Coverage and *Changed since your last answer* still need
+`ingested_at`.
+
+## Stop audits only what the turn changed
+
+Stop fires in the session's directory, and a Bash `cd` moves it. A
+session that only looked into a worktree another session had left dirty
+was sent to review that work. Spec section 9.2, **The Stop gate audits
+only what the turn changed**.
+
+In Claude Code, `writ turn --hook claude-code` runs on
+`UserPromptSubmit` and on `PreToolUse` for the tools that can write. It
+records the tree each repository held when the turn first reached it
+(`turns`, `turn_trees`, schema 9). Stop and SubagentStop pass a
+repository the turn never reached, or whose tree is unchanged, before
+selecting anything.
+
+- **Every gap audits as before**: no turn for the session, no session in
+  the payload, a failed snapshot. Never make a gap pass.
+- **The turn hooks never block.** Exit 2 erases a prompt or refuses a
+  tool, so the command ends `|| exit 1`.
+- The range is unchanged. The check decides only whether there is
+  anything to audit.
 
 ## The gate points, it does not paste
 

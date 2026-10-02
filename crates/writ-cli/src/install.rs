@@ -226,7 +226,7 @@ pub fn plan(host: Host, project: bool, roots: &Roots) -> Result<Plan> {
                 root.join(".claude").join("settings.json"),
                 Role::Gate,
                 Edit::StopGroups {
-                    events: &[GateEvent::Turn, GateEvent::Subagent],
+                    events: CLAUDE_CODE_EVENTS,
                 },
             ),
         ],
@@ -240,7 +240,7 @@ pub fn plan(host: Host, project: bool, roots: &Roots) -> Result<Plan> {
                 root.join(".claude").join("settings.json"),
                 Role::Gate,
                 Edit::StopGroups {
-                    events: &[GateEvent::Turn, GateEvent::Subagent],
+                    events: CLAUDE_CODE_EVENTS,
                 },
             ),
         ],
@@ -419,7 +419,17 @@ fn merge_named(existing: Option<&str>, force: bool, path: &[&str], value: Value)
     })
 }
 
-/// Which moment a gate entry sits at. They audit different ranges.
+/// Every event writ hooks in Claude Code. The two turn events record
+/// where the turn found each repository, so the gates audit only what the
+/// turn changed. Spec section 9.2.
+const CLAUDE_CODE_EVENTS: &[GateEvent] = &[
+    GateEvent::Turn,
+    GateEvent::Subagent,
+    GateEvent::Prompt,
+    GateEvent::Tool,
+];
+
+/// Which moment a hook entry sits at. The gates audit different ranges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateEvent {
     /// The end of a turn. The agent may have committed, so the range
@@ -428,7 +438,17 @@ pub enum GateEvent {
     /// The end of one subagent. Nothing is committed yet, so the
     /// working tree is exactly that subagent's own work.
     Subagent,
+    /// A prompt starts a turn. It records the repository the session is
+    /// in. Not a gate: it never blocks.
+    Prompt,
+    /// Before a tool that can write. It records a repository the turn
+    /// reaches after it began. Not a gate: it never blocks.
+    Tool,
 }
+
+/// The tools that can change a repository. An edit tool names its file,
+/// and a shell command runs in the session's directory.
+const WRITING_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash";
 
 impl GateEvent {
     /// The key this event goes under in a matcher-group document.
@@ -439,7 +459,14 @@ impl GateEvent {
         match self {
             Self::Turn => "Stop",
             Self::Subagent => "SubagentStop",
+            Self::Prompt => "UserPromptSubmit",
+            Self::Tool => "PreToolUse",
         }
+    }
+
+    /// The tool matcher of the group, for an event that has one.
+    fn matcher(self) -> Option<&'static str> {
+        (self == Self::Tool).then_some(WRITING_TOOLS)
     }
 }
 
@@ -457,11 +484,17 @@ impl GateEvent {
 /// committed, so the working tree is its own work; reaching further back
 /// would hand a read-only subagent every violation its parent had
 /// already committed and ask it to fix them.
+///
+/// The two turn events run `writ turn`. Exit 2 is Claude Code's block,
+/// which on a prompt erases it and on a tool refuses it, and a `writ` too
+/// old to know `turn` exits 2 as a usage error. So any failure becomes 1,
+/// which the host shows and carries on past.
 fn gate_command(host: &str, event: GateEvent) -> String {
     let audit = format!("writ audit --hook {host}");
     match event {
         GateEvent::Subagent => audit,
         GateEvent::Turn => format!("{audit} --since-answer"),
+        GateEvent::Prompt | GateEvent::Tool => format!("writ turn --hook {host} || exit 1"),
     }
 }
 
@@ -496,7 +529,7 @@ fn plugin_gates_here(document: &Map<String, Value>) -> bool {
         .unwrap_or(false)
 }
 
-/// True when this hook entry already runs writ's audit.
+/// True when this hook entry already runs writ.
 ///
 /// The test is the command, not an exact match on the whole entry, so a
 /// reader who added a timeout or a matcher keeps it.
@@ -504,7 +537,7 @@ fn is_writ_hook(entry: &Value) -> bool {
     entry
         .get("command")
         .and_then(Value::as_str)
-        .is_some_and(|command| command.contains("writ audit"))
+        .is_some_and(|command| command.contains("writ audit") || command.contains("writ turn"))
 }
 
 /// Merge a `Stop` matcher group. Claude Code and Codex share this shape:
@@ -527,8 +560,8 @@ fn merge_stop_groups(existing: Option<&str>, force: bool, events: &[GateEvent]) 
                     .iter()
                     .map(|event| event.key())
                     .collect::<Vec<_>>()
-                    .join(" and "),
-                if events.len() == 1 { "gate" } else { "gates" },
+                    .join(", "),
+                if events.len() == 1 { "hook" } else { "hooks" },
             )),
         });
     }
@@ -574,22 +607,28 @@ fn merge_stop_groups(existing: Option<&str>, force: bool, events: &[GateEvent]) 
         // placeholder and the caller substitutes. Keeping one
         // placeholder is simpler than threading the host through every
         // merge signature, and the substitution is asserted in a test.
-        group.push(json!({
-            "hooks": [{
+        let mut entry = Map::new();
+        if let Some(matcher) = event.matcher() {
+            entry.insert("matcher".to_string(), json!(matcher));
+        }
+        entry.insert(
+            "hooks".to_string(),
+            json!([{
                 "type": "command",
                 "command": gate_command(HOST_PLACEHOLDER, *event),
                 "timeout": 60
-            }]
-        }));
+            }]),
+        );
+        group.push(Value::Object(entry));
     }
 
     let text = render(&document)?;
     let note = (settled.len() == events.len()).then(|| {
         let which = match settled.as_slice() {
             [one] => format!("a {one} hook already runs"),
-            many => format!("the {} hooks already run", many.join(" and ")),
+            many => format!("the {} hooks already run", many.join(", ")),
         };
-        format!("{which} `writ audit`. Left alone. Pass --force to replace it")
+        format!("{which} writ. Left alone. Pass --force to replace it")
     });
     Ok(Merge {
         changed: text != original,

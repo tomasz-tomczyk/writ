@@ -1739,6 +1739,7 @@ const EVERY_SUBCOMMAND: &[&[&str]] = &[
     // reach the machine's own host configuration.
     &["install", "claude-code", "--print"],
     &["telemetry", "show"],
+    &["turn", "--hook", "claude-code"],
 ];
 
 #[test]
@@ -5296,4 +5297,291 @@ fn guided_install_without_a_terminal_or_yes_refuses_and_writes_nothing() {
     output.assert_code(2);
     assert!(output.stderr.contains("--yes"), "{}", output.stderr);
     assert!(!home.join(".codex/hooks.json").exists());
+}
+
+// --- the turn: Stop audits only a repository this turn changed ----------
+
+/// Run `writ turn --hook claude-code` in `dir` with a host payload.
+fn turn(sandbox: &Sandbox, dir: &Path, payload: &str) -> Output {
+    let command = sandbox.cmd_at(dir.to_path_buf(), &["turn", "--hook", "claude-code"]);
+    run_with_stdin(command, payload)
+}
+
+fn prompt_submitted(session: &str) -> String {
+    format!(r#"{{"session_id":"{session}","hook_event_name":"UserPromptSubmit","prompt":"go"}}"#)
+}
+
+fn before_tool(session: &str, tool: &str, input: serde_json::Value) -> String {
+    serde_json::json!({
+        "session_id": session,
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": input,
+    })
+    .to_string()
+}
+
+fn stop(session: &str) -> String {
+    format!(r#"{{"session_id":"{session}","hook_event_name":"Stop","stop_hook_active":false}}"#)
+}
+
+/// The defect this exists for: a session that only looked at a repository
+/// another session had left dirty was sent to review that work. The turn
+/// started there, nothing changed, so the gate passes and selects nothing.
+#[test]
+fn the_stop_gate_passes_a_turn_that_changed_nothing() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let started = turn(&sandbox, &root, &prompt_submitted("s1"));
+    started.assert_code(0);
+    assert!(started.stdout.is_empty(), "{}", started.stdout);
+
+    let gate = hook(&sandbox, &root, "claude-code", &stop("s1"));
+    gate.assert_code(0);
+    assert!(gate.stderr.contains("changed nothing"), "{}", gate.stderr);
+    assert_eq!(sandbox.learnings()[0]["times_selected"], 0);
+}
+
+/// A turn that changed a file in the repository is gated as before.
+#[test]
+fn the_stop_gate_audits_a_turn_that_changed_the_repository() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    turn(&sandbox, &root, &prompt_submitted("s1")).assert_code(0);
+    std::fs::write(root.join("a.rs"), "fn main() { let y = 2; }\n").unwrap();
+
+    let gate = hook(&sandbox, &root, "claude-code", &stop("s1"));
+
+    gate.assert_code(2);
+}
+
+/// The session started its turn outside any repository and then moved
+/// into one, which is how a Bash `cd` leaves it. Nothing it did touched
+/// that repository, so its Stop passes.
+#[test]
+fn the_stop_gate_passes_a_repository_the_turn_only_visited() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let outside = sandbox.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    turn(&sandbox, &outside, &prompt_submitted("s1")).assert_code(0);
+
+    let gate = hook(&sandbox, &root, "claude-code", &stop("s1"));
+
+    gate.assert_code(0);
+    assert_eq!(sandbox.learnings()[0]["times_selected"], 0);
+}
+
+/// An edit in a repository the turn did not start in records where that
+/// repository stood before the edit, so the edit is audited.
+#[test]
+fn an_edit_tool_records_the_start_of_a_repository_entered_this_turn() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let outside = sandbox.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    turn(&sandbox, &outside, &prompt_submitted("s1")).assert_code(0);
+
+    let file = root.join("a.rs");
+    let before = turn(
+        &sandbox,
+        &outside,
+        &before_tool(
+            "s1",
+            "Edit",
+            serde_json::json!({ "file_path": file.to_str().unwrap() }),
+        ),
+    );
+    before.assert_code(0);
+    assert!(before.stdout.is_empty(), "{}", before.stdout);
+    std::fs::write(&file, "fn main() { let y = 2; }\n").unwrap();
+
+    hook(&sandbox, &root, "claude-code", &stop("s1")).assert_code(2);
+}
+
+/// A new file in a directory that does not exist yet still names its
+/// repository.
+#[test]
+fn a_write_to_a_new_directory_records_its_repository() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let outside = sandbox.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    turn(&sandbox, &outside, &prompt_submitted("s1")).assert_code(0);
+
+    let file = root.join("new/deeper/b.rs");
+    turn(
+        &sandbox,
+        &outside,
+        &before_tool(
+            "s1",
+            "Write",
+            serde_json::json!({ "file_path": file.to_str().unwrap() }),
+        ),
+    )
+    .assert_code(0);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "fn b() {}\n").unwrap();
+
+    hook(&sandbox, &root, "claude-code", &stop("s1")).assert_code(2);
+}
+
+/// A shell command runs in the session's directory, so that repository's
+/// start is recorded before the command can change it.
+#[test]
+fn a_bash_tool_records_the_start_of_the_repository_it_runs_in() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let outside = sandbox.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    turn(&sandbox, &outside, &prompt_submitted("s1")).assert_code(0);
+
+    turn(
+        &sandbox,
+        &root,
+        &before_tool(
+            "s1",
+            "Bash",
+            serde_json::json!({ "command": "sd x y a.rs" }),
+        ),
+    )
+    .assert_code(0);
+    std::fs::write(root.join("a.rs"), "fn main() { let y = 2; }\n").unwrap();
+
+    hook(&sandbox, &root, "claude-code", &stop("s1")).assert_code(2);
+}
+
+/// A tool call never moves a start already recorded: the start is where
+/// the turn found the repository, not where the last edit left it.
+#[test]
+fn a_later_tool_call_keeps_the_recorded_start() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    turn(&sandbox, &root, &prompt_submitted("s1")).assert_code(0);
+    std::fs::write(root.join("a.rs"), "fn main() { let y = 2; }\n").unwrap();
+    turn(
+        &sandbox,
+        &root,
+        &before_tool("s1", "Bash", serde_json::json!({ "command": "true" })),
+    )
+    .assert_code(0);
+
+    hook(&sandbox, &root, "claude-code", &stop("s1")).assert_code(2);
+}
+
+/// Each prompt starts a new turn. Work from an earlier turn is not this
+/// turn's change.
+#[test]
+fn a_new_prompt_moves_the_start() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    turn(&sandbox, &root, &prompt_submitted("s1")).assert_code(0);
+    std::fs::write(root.join("a.rs"), "fn main() { let y = 2; }\n").unwrap();
+    turn(&sandbox, &root, &prompt_submitted("s1")).assert_code(0);
+
+    hook(&sandbox, &root, "claude-code", &stop("s1")).assert_code(0);
+}
+
+/// A session whose turns were never recorded — another host, or a
+/// Claude Code without the turn hook — is gated exactly as before.
+#[test]
+fn a_session_with_no_recorded_turn_is_gated_as_before() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    turn(&sandbox, &root, &prompt_submitted("s1")).assert_code(0);
+
+    hook(&sandbox, &root, "claude-code", &stop("s2")).assert_code(2);
+}
+
+/// Turns are per session. Another session's turn says nothing about this
+/// one, and one session's prompt does not clear another's start.
+#[test]
+fn turns_are_kept_per_session() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    turn(&sandbox, &root, &prompt_submitted("s1")).assert_code(0);
+    std::fs::write(root.join("a.rs"), "fn main() { let y = 2; }\n").unwrap();
+    turn(&sandbox, &root, &prompt_submitted("s2")).assert_code(0);
+
+    hook(&sandbox, &root, "claude-code", &stop("s1")).assert_code(2);
+    hook(&sandbox, &root, "claude-code", &stop("s2")).assert_code(0);
+}
+
+/// A payload with no session cannot name a turn, so it records nothing
+/// and says nothing on stdout, which Claude Code would add to the prompt.
+#[test]
+fn the_turn_hook_with_no_session_records_nothing() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+
+    let output = turn(&sandbox, &root, "{}");
+
+    output.assert_code(0);
+    assert!(output.stdout.is_empty(), "{}", output.stdout);
+    hook(&sandbox, &root, "claude-code", &stop("s1")).assert_code(2);
+}
+
+/// A tool call in a session whose turn was never recorded records
+/// nothing either. Recording a start there would arm the turn check for a
+/// session that never had one, and every other repository would pass.
+#[test]
+fn a_tool_call_without_a_turn_records_nothing() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    turn(
+        &sandbox,
+        &root,
+        &before_tool("s1", "Bash", serde_json::json!({ "command": "true" })),
+    )
+    .assert_code(0);
+
+    hook(&sandbox, &root, "claude-code", &stop("s1")).assert_code(2);
+}
+
+/// The hook reads its payload under a deadline, as the gate does. P7.
+#[test]
+fn the_turn_hook_does_not_wait_on_a_silent_stdin() {
+    let sandbox = Sandbox::new();
+    let root = gated_repo(&sandbox, true);
+    let mut child = sandbox
+        .cmd_at(root.clone(), &["turn", "--hook", "claude-code"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _held_open = child.stdin.take();
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "writ turn waited on stdin"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A commit the git gate let through with nothing selected had nothing to
+/// answer, so it is an answer point. Without this, Stop audited from the
+/// branch point every commit the commit gate had already passed.
+#[test]
+fn since_answer_starts_after_a_commit_the_git_gate_passed_with_nothing_selected() {
+    let sandbox = Sandbox::new();
+    let (root, _) = branched_repo(&sandbox);
+    sandbox.record(&["--activate", "--scope", "glob:docs/**"]);
+    std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git_hook(&sandbox, &root, Some(("CLAUDECODE", "1"))).assert_code(0);
+    git(&root, &["commit", "-qm", "a"]);
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/x.md"), "x\n").unwrap();
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(diff_range_of(&output.stdout), "HEAD");
 }

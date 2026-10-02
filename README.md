@@ -164,6 +164,16 @@ that commits as it goes. The subagent gate keeps that default on
 purpose: a subagent has not committed, so the working tree is exactly
 its own work.
 
+**In Claude Code, Stop audits only a repository the turn changed.** Two
+more hooks run `writ turn --hook claude-code`: one when you send a
+prompt, and one before each tool that can write. They record the tree
+each repository held when the turn first reached it. At the end of the
+turn, a repository whose tree is unchanged passes, so a session that
+only looked into a worktree another session left dirty is not asked to
+review that work. A commit the commit gate let through with no rule
+selected counts as answered, so Stop starts after it. Codex and Cursor
+have no such hooks yet, and their Stop gate audits as before.
+
 `writ install` sets all of this up. It finds the agents on your machine,
 shows each change and where it goes, and asks before writing it. It
 merges rather than replaces, and backs up each file first. `--yes`
