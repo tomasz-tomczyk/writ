@@ -87,6 +87,9 @@ pub struct Diff {
     pub added_lines: BTreeMap<String, BTreeMap<u32, String>>,
     /// Each path's removed lines, by their line number in the pre-image.
     pub removed_lines: BTreeMap<String, BTreeMap<u32, String>>,
+    /// The paths the diff creates. Their old side is `/dev/null`, so they
+    /// have no pre-image to read.
+    pub created: BTreeSet<String>,
 }
 
 impl Diff {
@@ -110,6 +113,9 @@ impl Diff {
         // The next line number on each side of the open hunk.
         let mut old_line: u32 = 0;
         let mut new_line: u32 = 0;
+        let mut created: BTreeSet<String> = BTreeSet::new();
+        // Whether the open file's `---` header was `/dev/null`.
+        let mut old_is_null = false;
 
         // Close the open section, if a header has named one.
         macro_rules! flush {
@@ -137,6 +143,7 @@ impl Diff {
             if line.starts_with("diff ") {
                 flush!();
                 in_hunk = false;
+                old_is_null = false;
             }
             buffer.push_str(line);
             buffer.push('\n');
@@ -155,6 +162,9 @@ impl Diff {
                         if !paths.iter().any(|seen| seen == path) {
                             paths.push(path.to_string());
                         }
+                        if old_is_null {
+                            created.insert(path.to_string());
+                        }
                         // The post-image name wins: a rename's hunk belongs
                         // to the file as it now exists, which is the name a
                         // `glob:` scope is written against.
@@ -163,6 +173,7 @@ impl Diff {
                     continue;
                 }
                 if let Some(rest) = line.strip_prefix("--- ") {
+                    old_is_null = strip_prefix_marker(rest).is_none();
                     // A deletion has `+++ /dev/null`, so the old side is the
                     // only place the path appears.
                     if let Some(path) = strip_prefix_marker(rest) {
@@ -210,6 +221,7 @@ impl Diff {
             sections,
             added_lines,
             removed_lines,
+            created,
         }
     }
 
@@ -347,6 +359,12 @@ mod tests {
     fn every_touched_path_is_read_once() {
         let diff = Diff::parse(SAMPLE);
         assert_eq!(diff.paths, ["src/main.rs", "lib/app.ex"]);
+    }
+
+    #[test]
+    fn a_file_whose_old_side_is_dev_null_is_created() {
+        let diff = Diff::parse(SAMPLE);
+        assert_eq!(diff.created.iter().collect::<Vec<_>>(), ["lib/app.ex"]);
     }
 
     #[test]

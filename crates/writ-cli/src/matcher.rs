@@ -192,7 +192,12 @@ fn ast_grep_verdict(
 
     let language_scope = language_scope(learning);
     let mut fallback_notices = Vec::new();
-    for path in &diff.paths {
+    // A created file has no pre-image. That is not a failure to read one.
+    for path in diff
+        .paths
+        .iter()
+        .filter(|path| !diff.created.contains(*path))
+    {
         let object = format!("{base}:{path}");
         // Once the learning is selected, a pre-image that cannot be read
         // costs only a hit, never the selection.
