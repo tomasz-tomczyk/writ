@@ -2792,6 +2792,51 @@ fn an_ast_grep_miss_on_an_added_file_stays_a_miss_without_a_pre_image() {
     );
 }
 
+/// A diff that removes lines elsewhere still has no pre-image for a file
+/// it creates. Reading one is not a failure, so it is not a notice.
+#[test]
+fn an_ast_grep_miss_skips_the_pre_image_of_a_created_file() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    std::fs::write(
+        root.join("old.ex"),
+        "defmodule Old do\n  def a, do: 1\n  def b, do: 2\nend\n",
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "add old"]);
+
+    let learning = sandbox.record(&[
+        "--scope",
+        "language:elixir",
+        "--matcher",
+        "@spec $A",
+        "--matcher-kind",
+        "ast_grep",
+        "--activate",
+    ]);
+    std::fs::write(
+        root.join("old.ex"),
+        "defmodule Old do\n  def a, do: 1\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("new.ex"),
+        "defmodule New do\n  def value, do: 1\nend\n",
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+
+    let output = audit_with_ast_grep(&sandbox, &root, &[]);
+    output.assert_code(0);
+    assert!(!output.stdout.contains(&learning), "{}", output.stdout);
+    assert!(
+        !output.stderr.contains("pre-image"),
+        "a created file has no pre-image to report: {}",
+        output.stderr
+    );
+}
+
 /// A hit selects a learning. It does not create a finding: `times_applied`
 /// only moves on ingest.
 #[test]
