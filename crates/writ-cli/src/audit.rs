@@ -337,7 +337,7 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
     // A two-point range already names its post-image. Spec section 9.2,
     // **An audit records what it reviewed**.
     let (text, range, tree) = if cached {
-        let (text, range) = git::diff_cached(&repo.root)?;
+        let (text, range) = git::diff_cached(&repo.root, merge_in_progress(&repo.root).as_deref())?;
         (text, range, git::index_tree(&repo.root))
     } else {
         let base = range
@@ -555,23 +555,75 @@ fn since_answer(store: &Store, repo: &git::Repo) -> Result<Option<String>> {
     let branch_point = || branch_point.get_or_init(|| git::branch_point(&repo.root));
     let mut covered = vec![false; history.len()];
     for index in (0..history.len()).rev() {
-        let (commit, tree) = &history[index];
-        let on_covered_parent = history.get(index + 1).is_some_and(|(parent, _)| {
+        let commit = &history[index];
+        let on_covered_parent = history.get(index + 1).is_some_and(|parent| {
             points
                 .working
                 .iter()
-                .any(|(head, seen)| head == parent && seen == tree)
-                && (covered[index + 1] || branch_point().as_ref() == Some(parent))
+                .any(|(head, seen)| *head == parent.id && *seen == commit.tree)
+                && (covered[index + 1] || branch_point().as_ref() == Some(&parent.id))
         });
-        covered[index] =
-            points.heads.contains(commit) || points.trees.contains(tree) || on_covered_parent;
+        covered[index] = points.heads.contains(&commit.id)
+            || points.trees.contains(&commit.tree)
+            || on_covered_parent;
     }
     let base = match covered.iter().position(|covered| *covered) {
         Some(0) => return Ok(None),
-        Some(index) => Some(history[index].0.clone()),
+        Some(index) => Some(past_upstream_merges(
+            &repo.root,
+            &history[..index],
+            &history[index].id,
+        )),
         None => branch_point().clone(),
     };
-    Ok(base.filter(|base| history.first().map(|(head, _)| head) != Some(base)))
+    Ok(base.filter(|base| history.first().map(|head| &head.id) != Some(base)))
+}
+
+/// Where a range from an answer point starts when the default branch was
+/// merged in after it. Spec section 9.2, **A merge of the default branch**.
+///
+/// From the answer point itself, the diff holds every change the merge
+/// brought in, which the default branch already reviewed. From git's
+/// automatic merge of the answer point and the newest merged commit, it
+/// holds the branch's own commits, the conflict resolutions, and the
+/// uncommitted work.
+///
+/// `newer` is the first-parent history after the answer point, newest
+/// first. The answer point is kept when there is no merge in it, or when
+/// any merge is an octopus, brings in a commit outside the default branch,
+/// or merged a commit the newest merge does not contain: that work was
+/// not reviewed anywhere this can see.
+fn past_upstream_merges(root: &Path, newer: &[git::Commit], answered: &str) -> String {
+    let merged: Vec<&git::Commit> = newer
+        .iter()
+        .filter(|commit| commit.parents.len() > 1)
+        .collect();
+    let Some(newest) = merged.first() else {
+        return answered.to_string();
+    };
+    let theirs = &newest.parents[1];
+    let all_upstream = merged.iter().all(|merge| {
+        merge.parents.len() == 2
+            && git::in_upstream(root, &merge.parents[1])
+            && git::is_ancestor(root, &merge.parents[1], theirs)
+    });
+    if !all_upstream {
+        return answered.to_string();
+    }
+    git::auto_merge(root, answered, theirs).unwrap_or_else(|| answered.to_string())
+}
+
+/// The base a staged merge of the default branch is compared with: git's
+/// automatic merge of HEAD and the commit being merged, so the commit gate
+/// audits the resolution and not the default branch. Nothing when no
+/// merge is in progress, or it merges anything else. Spec section 9.2,
+/// **A merge of the default branch**.
+fn merge_in_progress(root: &Path) -> Option<String> {
+    let theirs = git::merge_head(root)?;
+    if !git::in_upstream(root, &theirs) {
+        return None;
+    }
+    git::auto_merge(root, "HEAD", &theirs)
 }
 
 /// How many answered audits `since` looks through for the last answer.
@@ -631,11 +683,12 @@ fn since(store: &Store, scope: &AuditScope, root: &Path) -> Result<Option<Since>
 
 /// The commit an audit's diff starts from: HEAD for a staged or default
 /// audit, the commit its range names otherwise. Nothing for a two-point
-/// range or a start git cannot resolve, such as the empty tree.
+/// range, a staged merge, whose base is a tree, or a start git cannot
+/// resolve, such as the empty tree.
 fn audit_start(root: &Path, range: &str, head: &str) -> Option<String> {
     match range {
         "HEAD" | git::CACHED => Some(head.to_string()),
-        range if range.contains("..") => None,
+        range if range.contains("..") || range.starts_with(git::CACHED) => None,
         range => git::resolve(root, range),
     }
 }

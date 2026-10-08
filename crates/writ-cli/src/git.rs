@@ -111,9 +111,15 @@ pub fn diff(root: &Path, range: Option<&str>) -> Result<(String, String)> {
 /// compares A with B, so both start at A. `git diff A...B` starts at the
 /// merge-base of A and B. An empty side means HEAD, as it does to git.
 pub fn range_base(root: &Path, range: &str) -> String {
-    // The index is compared with HEAD.
+    // The index is compared with HEAD, or with the base a merge names.
     if range == CACHED {
         return "HEAD".to_string();
+    }
+    if let Some(base) = range
+        .strip_prefix(CACHED)
+        .and_then(|rest| rest.strip_prefix(' '))
+    {
+        return base.to_string();
     }
     let or_head = |side: &str| {
         if side.is_empty() {
@@ -145,12 +151,20 @@ pub const CACHED: &str = "--cached";
 /// about to record. A repository with no commit yet is compared with the
 /// empty tree, which is what `git diff --cached` does by itself.
 ///
+/// With a `base`, the index is compared with it instead, and the range
+/// is `--cached BASE`, which `git diff` takes as it is.
+///
 /// A hook git runs during `git commit -a` or `git commit PATH` sees a
 /// temporary index through `GIT_INDEX_FILE`. git reads that variable
 /// itself, so this reads the index the commit will actually use.
-pub fn diff_cached(root: &Path) -> Result<(String, String)> {
+pub fn diff_cached(root: &Path, base: Option<&str>) -> Result<(String, String)> {
+    let range = match base {
+        Some(base) => format!("{CACHED} {base}"),
+        None => CACHED.to_string(),
+    };
     let output = Command::new("git")
-        .args(["diff", CACHED])
+        .arg("diff")
+        .args(range.split(' '))
         .current_dir(root)
         .output()
         .map_err(|error| Error::Command {
@@ -165,10 +179,7 @@ pub fn diff_cached(root: &Path) -> Result<(String, String)> {
             ),
         });
     }
-    Ok((
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        CACHED.to_string(),
-    ))
+    Ok((String::from_utf8_lossy(&output.stdout).into_owned(), range))
 }
 
 /// What `git diff` compares with when no range is named: HEAD, or the
@@ -315,39 +326,101 @@ pub fn index_tree(root: &Path) -> Option<String> {
 /// falls back to the branch point.
 pub const HISTORY_DEPTH: usize = 500;
 
-/// HEAD's first-parent history, newest first, as commit and tree pairs.
+/// One commit of [`first_parent_history`].
+pub struct Commit {
+    pub id: String,
+    pub tree: String,
+    /// Its parents, first parent first. Two or more is a merge.
+    pub parents: Vec<String>,
+}
+
+/// HEAD's first-parent history, newest first.
 ///
 /// First-parent, so a merge of main into the branch does not walk into
 /// main's history and find someone else's answer there.
-pub fn first_parent_history(root: &Path, depth: usize) -> Vec<(String, String)> {
+pub fn first_parent_history(root: &Path, depth: usize) -> Vec<Commit> {
     let depth = format!("-n{depth}");
     run(
         root,
-        &["log", "--first-parent", &depth, "--format=%H %T", "HEAD"],
+        &["log", "--first-parent", &depth, "--format=%H %T %P", "HEAD"],
     )
     .map(|text| {
         text.lines()
-            .filter_map(|line| line.split_once(' '))
-            .map(|(commit, tree)| (commit.to_string(), tree.to_string()))
+            .filter_map(|line| {
+                let mut words = line.split(' ').map(str::to_string);
+                Some(Commit {
+                    id: words.next()?,
+                    tree: words.next()?,
+                    parents: words.collect(),
+                })
+            })
             .collect()
     })
     .unwrap_or_default()
 }
 
+/// The refs that may name the remote's default branch, in the order they
+/// are tried: the remote's `HEAD`, then `origin/main`, then
+/// `origin/master`.
+fn upstream_candidates(root: &Path) -> Vec<String> {
+    run(
+        root,
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .into_iter()
+    .chain(["origin/main".to_string(), "origin/master".to_string()])
+    .collect()
+}
+
 /// Where this branch left the remote's default branch.
 ///
-/// The remote's `HEAD` first, then `origin/main`, then `origin/master`.
 /// Nothing when there is no such ref or no common history, and the caller
 /// then reads the working tree against HEAD. P6.
 pub fn branch_point(root: &Path) -> Option<String> {
-    let remote_head = run(
-        root,
-        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
-    );
-    remote_head
+    upstream_candidates(root)
         .into_iter()
-        .chain(["origin/main".to_string(), "origin/master".to_string()])
         .find_map(|candidate| run(root, &["merge-base", "HEAD", &candidate]))
+}
+
+/// Whether a commit is in the remote's default branch: work that was
+/// reviewed there, not on this branch.
+pub fn in_upstream(root: &Path, commit: &str) -> bool {
+    upstream_candidates(root)
+        .iter()
+        .filter(|candidate| resolve(root, candidate).is_some())
+        .any(|candidate| is_ancestor(root, commit, candidate))
+}
+
+/// The one commit a merge in progress is merging, or nothing when no merge
+/// is in progress. An octopus merge names several and is nothing here, so
+/// the caller audits it as before.
+pub fn merge_head(root: &Path) -> Option<String> {
+    let path = root.join(run(root, &["rev-parse", "--git-path", "MERGE_HEAD"])?);
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut heads = text.lines().filter(|line| !line.is_empty());
+    let head = heads.next()?.to_string();
+    heads.next().is_none().then_some(head)
+}
+
+/// The tree git's automatic merge of two commits gives, conflicts left in
+/// as markers. Spec section 9.2, **A merge of the default branch**.
+///
+/// `git merge-tree --write-tree` exits 1 on a conflict and still writes
+/// the tree, so both 0 and 1 are a tree. It writes the objects and no ref,
+/// and touches neither the index nor the working tree. Nothing when git
+/// cannot do it, and the caller audits the merge as before. P6.
+pub fn auto_merge(root: &Path, ours: &str, theirs: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["merge-tree", "--write-tree", "--no-messages", ours, theirs])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let tree = text.lines().next()?.trim().to_string();
+    (!tree.is_empty()).then_some(tree)
 }
 
 /// Raw bytes of a git object (`HEAD:path`, a blob oid, …).

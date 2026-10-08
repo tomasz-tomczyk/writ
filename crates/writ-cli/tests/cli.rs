@@ -4257,6 +4257,166 @@ fn since_answer_chains_commits_of_answered_working_trees() {
     assert_eq!(diff_range_of(&output.stdout), "HEAD");
 }
 
+// --- a merge of the default branch: audit the merge, not the default branch
+
+/// Commit `name` on `main` and move `origin/main` to it, as a fetch after
+/// someone else merged would. The branch is checked out again after.
+fn upstream_commits(root: &Path, name: &str, text: &str) {
+    git(root, &["checkout", "-q", "main"]);
+    commit_file(root, name, text);
+    git(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(root, &["checkout", "-q", "feature"]);
+}
+
+/// Run git where a non-zero exit is the expected outcome, such as a merge
+/// that stops on a conflict.
+fn git_unchecked(dir: &Path, args: &[&str]) {
+    Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "writ tests")
+        .env("GIT_AUTHOR_EMAIL", "tests@example.com")
+        .env("GIT_COMMITTER_NAME", "writ tests")
+        .env("GIT_COMMITTER_EMAIL", "tests@example.com")
+        .output()
+        .unwrap();
+}
+
+/// The paths of the diff a prompt tells the agent to read, by running the
+/// command it names.
+fn paths_to_read(root: &Path, prompt: &str) -> Vec<String> {
+    let command = prompt
+        .split_once("Read it with `git diff ")
+        .and_then(|(_, rest)| rest.split_once('`'))
+        .map(|(args, _)| args)
+        .expect("a Read it with line");
+    let mut args = vec!["diff", "--name-only"];
+    args.extend(command.split_whitespace());
+    git(root, &args).lines().map(str::to_string).collect()
+}
+
+/// After a merge of the default branch, Stop audits what the merge result
+/// holds beyond an automatic merge of the answered commit and the default
+/// branch. The default branch's own changes were reviewed there.
+#[test]
+fn since_answer_after_a_merge_of_upstream_audits_only_the_branch_work() {
+    let sandbox = Sandbox::new();
+    let (root, _) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "b.rs", "fn b() {}\n");
+    let first = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    first.assert_code(0);
+    answer(&sandbox, &first.stdout);
+    upstream_commits(&root, "m.rs", "fn m() {}\n");
+    git(&root, &["merge", "-q", "--no-edit", "main"]);
+    std::fs::write(root.join("c.rs"), "fn c() {}\n").unwrap();
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(paths_to_read(&root, &output.stdout), ["c.rs"]);
+}
+
+/// A clean merge of the default branch adds nothing of the branch's own.
+#[test]
+fn since_answer_after_a_clean_merge_of_upstream_has_nothing_to_audit() {
+    let sandbox = Sandbox::new();
+    let (root, _) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "b.rs", "fn b() {}\n");
+    let first = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    first.assert_code(0);
+    answer(&sandbox, &first.stdout);
+    upstream_commits(&root, "m.rs", "fn m() {}\n");
+    git(&root, &["merge", "-q", "--no-edit", "main"]);
+
+    sandbox
+        .run_at(&root, &["audit", "--since-answer"])
+        .assert_code(7);
+}
+
+/// A merge of a branch that is not in the default branch brings work no
+/// gate has seen, so it is audited as before.
+#[test]
+fn since_answer_after_a_merge_of_another_branch_audits_that_branch() {
+    let sandbox = Sandbox::new();
+    let (root, base) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    let answered = commit_file(&root, "b.rs", "fn b() {}\n");
+    let first = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    first.assert_code(0);
+    answer(&sandbox, &first.stdout);
+    git(&root, &["checkout", "-qb", "other", &base]);
+    commit_file(&root, "o.rs", "fn o() {}\n");
+    git(&root, &["checkout", "-q", "feature"]);
+    git(&root, &["merge", "-q", "--no-edit", "other"]);
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(diff_range_of(&output.stdout), answered);
+    assert_eq!(paths_to_read(&root, &output.stdout), ["o.rs"]);
+}
+
+/// The commit gate on a clean merge of the default branch: the index holds
+/// only the default branch's changes, so there is nothing to audit.
+#[test]
+fn the_git_hook_passes_a_clean_merge_of_upstream() {
+    let sandbox = Sandbox::new();
+    let (root, _) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "b.rs", "fn b() {}\n");
+    upstream_commits(&root, "m.rs", "fn m() {}\n");
+    git(&root, &["merge", "-q", "--no-commit", "--no-ff", "main"]);
+
+    git_hook(&sandbox, &root, Some(("CLAUDECODE", "1"))).assert_code(0);
+    assert_eq!(sandbox.learnings()[0]["times_selected"], 0);
+}
+
+/// The commit gate on a merge that stopped on a conflict audits the
+/// resolution: what the index holds beyond the automatic merge.
+#[test]
+fn the_git_hook_audits_the_conflict_resolution_of_a_merge_of_upstream() {
+    let sandbox = Sandbox::new();
+    let (root, _) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "c.rs", "fn ours() {}\n");
+    upstream_commits(&root, "m.rs", "fn m() {}\n");
+    upstream_commits(&root, "c.rs", "fn theirs() {}\n");
+    git_unchecked(&root, &["merge", "-q", "--no-edit", "main"]);
+    std::fs::write(root.join("c.rs"), "fn ours() {}\nfn theirs() {}\n").unwrap();
+    git(&root, &["add", "-A"]);
+
+    let gate = git_hook(&sandbox, &root, Some(("CLAUDECODE", "1")));
+    gate.assert_code(1);
+    let fetched = sandbox.run_at(&root, &["audit", "--fetch", &audit_id_of(&gate.stderr)]);
+    fetched.assert_code(0);
+    assert_eq!(paths_to_read(&root, &fetched.stdout), ["c.rs"]);
+}
+
+/// An answered commit-gate audit of a merge saw the resolution and none of
+/// the branch before it. With the merge abandoned, Stop does not take the
+/// branch's head as reviewed.
+#[test]
+fn an_answered_merge_at_the_git_hook_does_not_vouch_for_the_branch_before_it() {
+    let sandbox = Sandbox::new();
+    let (root, base) = branched_repo(&sandbox);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "c.rs", "fn ours() {}\n");
+    upstream_commits(&root, "c.rs", "fn theirs() {}\n");
+    git_unchecked(&root, &["merge", "-q", "--no-edit", "main"]);
+    std::fs::write(root.join("c.rs"), "fn ours() {}\nfn theirs() {}\n").unwrap();
+    git(&root, &["add", "-A"]);
+    let gate = git_hook(&sandbox, &root, Some(("CLAUDECODE", "1")));
+    gate.assert_code(1);
+    answer(&sandbox, &gate.stderr);
+    git(&root, &["merge", "--abort"]);
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(diff_range_of(&output.stdout), base);
+}
+
 #[test]
 fn the_claude_code_hook_blocks_with_exit_two_and_a_pointer_on_stderr() {
     let sandbox = Sandbox::new();
