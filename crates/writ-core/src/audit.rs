@@ -82,6 +82,13 @@ pub struct Hit {
 /// a loose pattern cannot grow the prompt back to the size of the diff.
 pub const MAX_HITS: usize = 5;
 
+/// The most paths one list in the prompt names: a slice's paths, or the
+/// paths changed since the last answer. A merge or a long branch puts
+/// hundreds of paths in a diff, and listing them all made one prompt
+/// 322 KB. Past this, a slice names the range alone and a list ends with a
+/// count. Spec section 9.2, **The prompt points at the diff**.
+pub const MAX_PATHS: usize = 20;
+
 /// The most characters of one hit's line the prompt shows.
 const MAX_HIT_CHARS: usize = 160;
 
@@ -471,14 +478,21 @@ pub fn render_prompt(audit_id: &str, scope: &AuditScope, selected: &[Selected]) 
 }
 
 /// What `git diff` is given to print this audit's diff: `--cached` for a
-/// staged audit, the range and the reviewed tree for a working-tree audit,
-/// and the range alone otherwise.
+/// staged audit, with the base a merge names when it has one, the range
+/// and the reviewed tree for a working-tree audit, and the range alone
+/// otherwise.
 fn diff_args(scope: &AuditScope) -> String {
     match &scope.tree {
-        Some(tree) if scope.diff_range != "--cached" => {
+        Some(tree) if !scope.diff_range.starts_with("--cached") => {
             format!("{} {}", shell_word(&scope.diff_range), shell_word(tree))
         }
-        _ => shell_word(&scope.diff_range),
+        // `--cached BASE` is two words to git.
+        _ => scope
+            .diff_range
+            .split(' ')
+            .map(shell_word)
+            .collect::<Vec<_>>()
+            .join(" "),
     }
 }
 
@@ -495,15 +509,24 @@ fn since_section(since: &Since) -> String {
             "You answered audit {}. Only these paths changed since then:\n\n",
             since.audit_id
         ));
-        for path in &since.paths {
+        for path in since.paths.iter().take(MAX_PATHS) {
             out.push_str(&format!("- {path}\n"));
         }
-        out.push_str(&format!(
-            "\nRead what changed: `git diff {} {} -- {}`\n",
-            shell_word(&since.from),
-            shell_word(&since.to),
-            shell_words(&since.paths)
-        ));
+        if since.paths.len() > MAX_PATHS {
+            out.push_str(&format!("- and {} more\n", since.paths.len() - MAX_PATHS));
+            out.push_str(&format!(
+                "\nRead what changed: `git diff {} {}`\n",
+                shell_word(&since.from),
+                shell_word(&since.to)
+            ));
+        } else {
+            out.push_str(&format!(
+                "\nRead what changed: `git diff {} {} -- {}`\n",
+                shell_word(&since.from),
+                shell_word(&since.to),
+                shell_words(&since.paths)
+            ));
+        }
         out.push_str(
             "\nThe rest of the diff is what you already reviewed. The learnings \
              still apply to all of it.\n",
@@ -554,6 +577,11 @@ fn rule_pointers(one: &Selected, scope: &AuditScope) -> String {
     let range = diff_args(scope);
     if paths.len() == scope.diff.paths.len() {
         out.push_str(&format!("slice: `git diff {range}`\n"));
+    } else if paths.len() > MAX_PATHS {
+        out.push_str(&format!(
+            "slice: `git diff {range}`, only the {} paths its scopes select\n",
+            paths.len()
+        ));
     } else {
         paths.sort();
         out.push_str(&format!(
@@ -1010,6 +1038,74 @@ slice: `git diff 041a89bc`
         );
         assert!(
             prompt.contains("slice: `git diff --cached -- src/a.rs`\n"),
+            "{prompt}"
+        );
+
+        // A staged merge names its base as a second word.
+        scope.diff_range = "--cached 4a7f0c2e".into();
+        let prompt = render_prompt("AUDIT", &scope, &selected);
+        assert!(
+            prompt.contains("Read it with `git diff --cached 4a7f0c2e`."),
+            "{prompt}"
+        );
+    }
+
+    /// A diff of `count` Rust files under `src/` and one file under `web/`.
+    fn many_paths(count: usize) -> String {
+        let mut text = String::new();
+        let names = (0..count)
+            .map(|n| format!("src/f{n:02}.rs"))
+            .chain(["web/b.ts".to_string()]);
+        for name in names {
+            text.push_str(&format!(
+                "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-a\n+b\n"
+            ));
+        }
+        text
+    }
+
+    /// A long branch must not make a long prompt. Past [`MAX_PATHS`], a
+    /// slice names the range alone and the changed-since list stops with a
+    /// count. Spec 9.2, **The prompt points at the diff**.
+    #[test]
+    fn a_prompt_lists_at_most_max_paths_paths_per_list() {
+        let count = MAX_PATHS + 5;
+        let changed: Vec<String> = (0..count).map(|n| format!("src/f{n:02}.rs")).collect();
+        let scope = AuditScope {
+            identity: crate::repo::RepoIdentity::Remote("github.com/o/r".into()),
+            diff: crate::diff::Diff::parse(&many_paths(count)),
+            diff_range: "041a89bc".into(),
+            diff_digest: "d".into(),
+            head: Some("5b3c9cc5".into()),
+            tree: None,
+            since: Some(Since {
+                audit_id: "PREV".into(),
+                from: "aaaa1111".into(),
+                to: "bbbb2222".into(),
+                paths: changed,
+                learnings: vec!["L1".into()],
+            }),
+        };
+        let selected = [Selected {
+            learning: scoped("L1", ScopeKind::Language, "rust"),
+            exemplars: vec![],
+            hits: None,
+        }];
+        let prompt = render_prompt("AUDIT", &scope, &selected);
+
+        let last = format!("- src/f{:02}.rs\n", MAX_PATHS - 1);
+        let next = format!("- src/f{MAX_PATHS:02}.rs\n");
+        assert!(prompt.contains(&last), "{prompt}");
+        assert!(!prompt.contains(&next), "{prompt}");
+        assert!(prompt.contains("- and 5 more\n"), "{prompt}");
+        assert!(
+            prompt.contains("Read what changed: `git diff aaaa1111 bbbb2222`\n"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(&format!(
+                "slice: `git diff 041a89bc`, only the {count} paths its scopes select\n"
+            )),
             "{prompt}"
         );
     }

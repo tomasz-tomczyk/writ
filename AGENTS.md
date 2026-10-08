@@ -234,6 +234,27 @@ passed with no rule selected sent the next Stop back to the branch
 point. Coverage and *Changed since your last answer* still need
 `ingested_at`.
 
+## A merge of the default branch audits the merge
+
+Spec section 9.2, **A merge of the default branch**. On 2026-10-08 an
+agent merged master into a PR to fix one conflict. Both gates audited
+master's 1,064 changed paths, six of eight rules fired on master's own
+code, and the prompts were 350 KB and 322 KB.
+
+The base is git's automatic merge (`git merge-tree`) of the
+branch side and the merged commit. The diff from it holds the conflict
+resolutions and any other edit made with the merge.
+
+- **Commit gate:** with `MERGE_HEAD` naming one commit in the default
+  branch, the range is `--cached BASE`. Its head is not an answer point,
+  as for any staged audit.
+- **Stop:** when merges follow the answer point in first-parent history,
+  the range starts at the automatic merge of the answer point and the
+  newest merged commit.
+- **Only the default branch.** A merge of any other branch, or an
+  octopus merge, keeps the old base. No gate saw that work.
+- When `git merge-tree` fails, the old base is used. P6.
+
 ## Stop audits only what the turn changed
 
 Stop fires in the session's directory, and a Bash `cd` moves it. A
@@ -281,7 +302,8 @@ backfilling them with `''`, which `--fetch` would have handed an agent
 as a document. Their findings cascaded with them.
 
 The prompt is stored and P4 means pruning never reclaims it. It holds
-rule text and at most five hits per rule, not the diff, so a row does
+rule text, at most five hits per rule and at most twenty paths per list,
+not the diff, so a row does
 not grow with the branch. `render_pointer` and its golden file pin the
 emitted text, beside `render_prompt` and its own.
 
@@ -309,6 +331,8 @@ the command prints exactly what writ hashed.
   written another way.
 - **Hits are not rule text.** They render after `rule_block` and are
   bounded by `MAX_HITS` per learning, not by `max_chars`.
+- **A list of paths stops at `MAX_PATHS`** (20). A wider slice names the
+  range alone, and the changed-since list ends with a count.
 
 The risk is rubber-stamping: an agent that does not run the command
 sees no code. Watch `times_applied` against `times_selected`. If it

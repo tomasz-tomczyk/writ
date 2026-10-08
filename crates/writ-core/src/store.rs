@@ -873,8 +873,13 @@ impl Store {
             if let Some(tree) = tree {
                 points.trees.push(tree);
             }
+            // A staged audit saw the index and nothing before it, so its
+            // tree counts and its head does not: `--cached`, or a staged
+            // merge, `--cached BASE`.
             if let Some(head) = head
-                && range.as_deref() != Some("--cached")
+                && !range
+                    .as_deref()
+                    .is_some_and(|range| range.starts_with("--cached"))
             {
                 points.heads.push(head);
             }
@@ -1916,13 +1921,14 @@ mod tests {
         };
         answered("HEAD", "h-default", "t-default");
         answered("--cached", "h-cached", "t-cached");
+        answered("--cached 4a7f0c2e", "h-merge", "t-merge");
         answered("base", "h-range", "t-range");
 
         let points = store.answered_points(&identity).unwrap();
         assert_eq!(points.heads, ["h-range"]);
         let mut trees = points.trees;
         trees.sort();
-        assert_eq!(trees, ["t-cached", "t-range"]);
+        assert_eq!(trees, ["t-cached", "t-merge", "t-range"]);
         assert_eq!(
             points.working,
             [("h-default".to_string(), "t-default".to_string())]
