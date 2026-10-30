@@ -545,6 +545,11 @@ pub fn select(args: &Args, db: &Path, config: &Config) -> Result<Selection> {
 /// everything before it. So the history is walked oldest first, and such
 /// commits chain.
 ///
+/// The start is never before the branch point when the branch point is in
+/// that history. Commits up to it are in the remote's default branch and
+/// were reviewed there. On the default branch itself, after a pull, the
+/// branch point is HEAD, so nothing pulled is audited.
+///
 /// With no such commit, the branch point against the remote's default
 /// branch, and with no branch point, `None`: the working tree against HEAD.
 /// An answer at HEAD itself is the same thing, so it is `None` as well.
@@ -567,14 +572,21 @@ fn since_answer(store: &Store, repo: &git::Repo) -> Result<Option<String>> {
             || points.trees.contains(&commit.tree)
             || on_covered_parent;
     }
-    let base = match covered.iter().position(|covered| *covered) {
-        Some(0) => return Ok(None),
-        Some(index) => Some(past_upstream_merges(
+    let answered = covered.iter().position(|covered| *covered);
+    let upstream = branch_point()
+        .as_ref()
+        .and_then(|point| history.iter().position(|commit| commit.id == *point));
+    let base = match (answered, upstream) {
+        (Some(0), _) => return Ok(None),
+        (_, Some(index)) if answered.is_none_or(|answered| index < answered) => {
+            Some(history[index].id.clone())
+        }
+        (Some(index), _) => Some(past_upstream_merges(
             &repo.root,
             &history[..index],
             &history[index].id,
         )),
-        None => branch_point().clone(),
+        (None, _) => branch_point().clone(),
     };
     Ok(base.filter(|base| history.first().map(|head| &head.id) != Some(base)))
 }

@@ -4358,6 +4358,75 @@ fn since_answer_after_a_merge_of_another_branch_audits_that_branch() {
     assert_eq!(paths_to_read(&root, &output.stdout), ["o.rs"]);
 }
 
+// --- the default branch itself: never audit what upstream already holds
+
+/// A `main` with one answered commit, pushed: `origin/main` is at it.
+fn answered_main(sandbox: &Sandbox) -> PathBuf {
+    let root = sandbox.repo("repo", Some("git@github.com:Owner/Repo.git"));
+    git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    sandbox.record(&["--activate"]);
+    commit_file(&root, "b.rs", "fn b() {}\n");
+    let first = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    first.assert_code(0);
+    answer(sandbox, &first.stdout);
+    git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    root
+}
+
+/// Commits that land on `origin/main` and are then fast-forwarded into
+/// `main`, as `git pull --ff-only` does.
+fn fast_forward(root: &Path, name: &str, text: &str) {
+    commit_file(root, name, text);
+    git(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+}
+
+/// A fast-forward of the default branch brings only work that was
+/// reviewed upstream, so Stop has nothing to audit.
+#[test]
+fn since_answer_after_a_fast_forward_of_the_default_branch_has_nothing_to_audit() {
+    let sandbox = Sandbox::new();
+    let root = answered_main(&sandbox);
+    fast_forward(&root, "m.rs", "fn m() {}\n");
+
+    sandbox
+        .run_at(&root, &["audit", "--since-answer"])
+        .assert_code(7);
+}
+
+/// A merge on the default branch's own history, such as a downmerge from
+/// another long-lived branch, is upstream's, not a merge this branch made.
+#[test]
+fn since_answer_after_a_fast_forward_over_a_downmerge_has_nothing_to_audit() {
+    let sandbox = Sandbox::new();
+    let root = answered_main(&sandbox);
+    git(&root, &["checkout", "-qb", "staging"]);
+    commit_file(&root, "s.rs", "fn s() {}\n");
+    git(&root, &["checkout", "-q", "main"]);
+    commit_file(&root, "m.rs", "fn m() {}\n");
+    git(&root, &["merge", "-q", "--no-edit", "staging"]);
+    fast_forward(&root, "n.rs", "fn n() {}\n");
+
+    sandbox
+        .run_at(&root, &["audit", "--since-answer"])
+        .assert_code(7);
+}
+
+/// A commit made on the default branch after a fast-forward is not
+/// upstream's yet, so Stop audits it and nothing before it.
+#[test]
+fn since_answer_on_the_default_branch_audits_only_unpushed_commits() {
+    let sandbox = Sandbox::new();
+    let root = answered_main(&sandbox);
+    fast_forward(&root, "m.rs", "fn m() {}\n");
+    let pushed = head(&root);
+    commit_file(&root, "c.rs", "fn c() {}\n");
+
+    let output = sandbox.run_at(&root, &["audit", "--since-answer"]);
+    output.assert_code(0);
+    assert_eq!(diff_range_of(&output.stdout), pushed);
+    assert_eq!(paths_to_read(&root, &output.stdout), ["c.rs"]);
+}
+
 /// The commit gate on a clean merge of the default branch: the index holds
 /// only the default branch's changes, so there is nothing to audit.
 #[test]
