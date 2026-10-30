@@ -223,6 +223,12 @@ counts only when its parent is an answer point or the branch point, and
 such commits chain. Without this, a commit let through on a working-tree
 answer sent the next Stop back to the branch point.
 
+**It never starts before the branch point** when the branch point is in
+first-parent history. Those commits are in the remote's default branch
+and were reviewed there. Without this, a `git pull --ff-only` on
+`master` audited every commit since an older answer on `master`, and
+took the downmerges in between for merges of the default branch.
+
 A stacked branch needs no configuration: its parent's answered commits
 are in its history, so it starts after them. Everything before the
 answer point is taken as reviewed, so a commit made with `--no-verify`
